@@ -38,6 +38,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Target tokens consumed per draft rollout; 0 uses lookahead",
     )
+    parser.add_argument(
+        "--prefetch-horizons",
+        type=int,
+        default=1,
+        help="Number of currently available horizons admitted to the memory queue",
+    )
     parser.add_argument("--sink-tokens", type=int, default=4)
     parser.add_argument("--recent-tokens", type=int, default=256)
     parser.add_argument("--kv-chunk-tokens", type=int, default=64)
@@ -63,6 +69,8 @@ def main() -> None:
     refresh_tokens = args.draft_refresh_tokens or args.lookahead
     if not 0 < refresh_tokens <= args.lookahead:
         raise ValueError("draft-refresh-tokens must be in [1, lookahead]")
+    if not 0 < args.prefetch_horizons <= args.lookahead:
+        raise ValueError("prefetch-horizons must be in [1, lookahead]")
     config = RuntimeConfig(
         sink_tokens=args.sink_tokens,
         recent_tokens=args.recent_tokens,
@@ -155,7 +163,7 @@ def main() -> None:
             output = engine.decode(
                 token_ids,
                 output.state,
-                remaining_horizons,
+                remaining_horizons[: args.prefetch_horizons],
                 prefetch=not args.disable_prefetch,
             )
             synchronize(args.device)
