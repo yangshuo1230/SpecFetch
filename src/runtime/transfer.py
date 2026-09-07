@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any, Protocol
 
 import torch
@@ -57,6 +57,15 @@ class TransferMetrics:
     demand_requests: int = 0
     demand_hits: int = 0
     demand_misses: int = 0
+
+    def delta(self, earlier: TransferMetrics) -> TransferMetrics:
+        """Return the per-field increase since an earlier snapshot."""
+        return type(self)(
+            **{
+                item.name: getattr(self, item.name) - getattr(earlier, item.name)
+                for item in fields(self)
+            }
+        )
 
 
 class TransferWorker:
@@ -117,6 +126,15 @@ class TransferWorker:
     def check(self) -> None:
         if self._error is not None:
             raise RuntimeError("transfer worker failed") from self._error
+
+    def metrics_snapshot(self) -> TransferMetrics:
+        """Copy monotonic counters for phase-level reporting.
+
+        A transfer completing across a phase boundary is charged to the phase in
+        which its counter becomes visible. This preserves additive totals without
+        synchronizing away intended transfer/compute overlap.
+        """
+        return replace(self.metrics)
 
     def close(self, *, drain: bool = False) -> None:
         self.queue.close(discard=not drain)

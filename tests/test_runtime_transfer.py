@@ -2,7 +2,7 @@ import time
 
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
-from src.runtime.transfer import OffloadRuntime, TransferWorker
+from src.runtime.transfer import OffloadRuntime, TransferMetrics, TransferWorker
 
 
 class FakeBackend:
@@ -59,6 +59,16 @@ def test_demand_promotes_queued_resource():
     assert value == "gpu:cpu:1"
     assert resource(1) in backend.copies
     worker.close()
+
+
+def test_transfer_metric_snapshots_have_additive_deltas():
+    earlier = TransferMetrics(submitted=2, bytes=10, transfer_ms=1.5, demand_hits=1)
+    later = TransferMetrics(submitted=5, bytes=42, transfer_ms=4.0, demand_hits=3)
+    delta = later.delta(earlier)
+    assert delta.submitted == 3
+    assert delta.bytes == 32
+    assert delta.transfer_ms == 2.5
+    assert delta.demand_hits == 2
 
 
 def test_low_priority_prefetch_cannot_evict_high_priority_lease():

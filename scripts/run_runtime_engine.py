@@ -128,17 +128,23 @@ def main() -> None:
     expert_preload_seconds = time.perf_counter() - expert_preload_start
     initialization_seconds = time.perf_counter() - initialization_start
     worker.start()
+    transfer_start = worker.metrics_snapshot()
+    residency_start = (residency.evictions, residency.wasted_prefetches)
     torch.cuda.reset_peak_memory_stats(torch.device(args.device))
     try:
         start = time.perf_counter()
         output = engine.prefill(input_ids, request_ids)
         synchronize(args.device)
         prefill_seconds = time.perf_counter() - start
+        transfer_after_prefill = worker.metrics_snapshot()
+        residency_after_prefill = (residency.evictions, residency.wasted_prefetches)
         start = time.perf_counter()
         provider.initialize(input_ids, request_ids)
         plan = provider.predict(output.state)
         synchronize(args.device)
         draft_prefill_seconds = time.perf_counter() - start
+        transfer_after_draft_prefill = worker.metrics_snapshot()
+        residency_after_draft_prefill = (residency.evictions, residency.wasted_prefetches)
 
         token_ids = output.logits[:, -1].argmax(dim=-1).cpu()
         generated = [token_ids]
@@ -184,6 +190,9 @@ def main() -> None:
     finally:
         worker.close()
 
+    transfer_end = worker.metrics_snapshot()
+    residency_end = (residency.evictions, residency.wasted_prefetches)
+
     tokens = torch.stack(generated, dim=1)
     total_steps = sum(step_seconds)
     total_request = prefill_seconds + draft_prefill_seconds + total_steps
@@ -219,10 +228,32 @@ def main() -> None:
             else 0,
             "mean_predicted_mass": statistics.mean(predicted_mass) if predicted_mass else 0,
         },
-        "transfer": vars(worker.metrics),
+        "transfer": vars(transfer_end),
+        "transfer_by_phase": {
+            "prefill": vars(transfer_after_prefill.delta(transfer_start)),
+            "draft_prefill": vars(
+                transfer_after_draft_prefill.delta(transfer_after_prefill)
+            ),
+            "decode": vars(transfer_end.delta(transfer_after_draft_prefill)),
+        },
         "residency": {
             "evictions": residency.evictions,
             "wasted_prefetches": residency.wasted_prefetches,
+        },
+        "residency_by_phase": {
+            "prefill": {
+                "evictions": residency_after_prefill[0] - residency_start[0],
+                "wasted_prefetches": residency_after_prefill[1] - residency_start[1],
+            },
+            "draft_prefill": {
+                "evictions": residency_after_draft_prefill[0] - residency_after_prefill[0],
+                "wasted_prefetches": residency_after_draft_prefill[1]
+                - residency_after_prefill[1],
+            },
+            "decode": {
+                "evictions": residency_end[0] - residency_after_draft_prefill[0],
+                "wasted_prefetches": residency_end[1] - residency_after_draft_prefill[1],
+            },
         },
         "generated_token_ids": tokens.tolist(),
         "generated_text": [tokenizer.decode(row) for row in tokens],
