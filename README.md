@@ -18,11 +18,18 @@ python -m scripts.run_offload_prefetch \
   --output results/offload-prefetch.json
 ~~~
 
-The defaults use a four-token draft lookahead and report results separately for horizons 1 through
-4. For each horizon, the experiment measures token agreement and resource agreement independently.
+The defaults use a four-token draft lookahead and a simulated batch size of four, and report results
+separately for horizons 1 through 4. For each horizon, the experiment measures token agreement and
+resource agreement independently.
 It also reports resource recall conditioned on the draft token matching or differing from the
 target token. This directly tests whether memory-access predictions remain useful after textual
 rollouts diverge.
+
+The batch policy compares fixed per-request Top-K with dynamic allocation under the same total
+number of transfers. KV chunks remain request-private, while an expert loaded once is shared by all
+requests that need that layer/expert pair. An oracle allocation is reported as an upper bound. This
+stage measures aggregate hit utility; it does not yet claim an end-to-end latency speedup or model
+the lifetime and eviction of resident GPU objects.
 
 The script has an idle-GPU guard enabled by default. It refuses to load either model if a visible
 GPU is using more than 1,000 MiB or has more than 10% utilization, and checks again between target

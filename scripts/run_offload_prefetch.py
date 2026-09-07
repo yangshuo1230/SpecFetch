@@ -11,6 +11,13 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from src.batch_policy import (
+    allocate_private,
+    allocate_shared,
+    allocate_shared_slots,
+    private_utility,
+    shared_utility,
+)
 from src.gpu_guard import require_idle_gpus
 from src.metrics import fit_ridge_probe, ndcg_at_k, predict_probe, recall_at_k, top_k
 from src.trace import Mass, ModelTrace, attention_block_mass, map_layer, router_probabilities
@@ -50,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("results/offload-prefetch.json"))
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--lookahead", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--kv-block-size", type=int, default=8)
     parser.add_argument("--kv-prefetch-blocks", type=int, default=2)
     parser.add_argument("--train-fraction", type=float, default=0.5)
@@ -275,6 +283,61 @@ def evaluate_kv(prompts: list[PromptTrace], budget: int, seed: int) -> dict[str,
     return {"by_horizon": by_horizon, "signal": "independent draft attention"}
 
 
+def chunks(items: list[PromptTrace], size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def evaluate_kv_batches(prompts: list[PromptTrace], budget: int, batch_size: int) -> dict[str, Any]:
+    """Compare equal per-request KV quotas with a global quota of equal size."""
+    by_horizon = {}
+    max_horizon = max(len(prompt.target.kv_by_horizon) for prompt in prompts)
+    for horizon in range(1, max_horizon + 1):
+        rows: dict[str, list[float]] = defaultdict(list)
+        events = 0
+        for batch in chunks(prompts, batch_size):
+            max_issues = max(prompt.target.generated_tokens for prompt in batch)
+            for issue in range(max_issues):
+                active = [
+                    prompt
+                    for prompt in batch
+                    if issue + horizon <= prompt.target.generated_tokens
+                    and len(prompt.rollouts[issue].token_ids) >= horizon
+                ]
+                if not active:
+                    continue
+                target_layers = active[0].target.kv_by_horizon[horizon]
+                for target_layer in target_layers:
+                    predicted, actual = [], []
+                    for prompt in active:
+                        rollout = prompt.rollouts[issue]
+                        draft_layer = map_layer(
+                            target_layer, len(target_layers), len(rollout.trace.kv_mass)
+                        )
+                        predicted.append(rollout.trace.kv_mass[draft_layer][horizon - 1])
+                        actual.append(prompt.target.kv_by_horizon[horizon][target_layer][issue])
+                    static, dynamic = allocate_private(predicted, budget)
+                    _, oracle = allocate_private(actual, budget)
+                    for policy, selection in (
+                        ("static", static),
+                        ("dynamic", dynamic),
+                        ("oracle", oracle),
+                    ):
+                        for metric, value in private_utility(selection, actual, budget).items():
+                            rows[f"{policy}_{metric}"].append(value)
+                    events += 1
+        by_horizon[str(horizon)] = {
+            "summary": mean_rows(rows),
+            "batch_layer_step_events": events,
+        }
+    return {
+        "by_horizon": by_horizon,
+        "batch_size": batch_size,
+        "resource_scope": "KV chunks are private to each request",
+        "budget": "dynamic and static transfer the same number of chunks",
+    }
+
+
 def routed_labels(probabilities: torch.Tensor, experts: int) -> torch.Tensor:
     labels = torch.zeros_like(probabilities)
     indices = probabilities.topk(min(experts, probabilities.shape[1]), dim=1).indices
@@ -296,7 +359,11 @@ def probe_examples(
 
 
 def evaluate_experts(
-    train: list[PromptTrace], evaluation: list[PromptTrace], alpha: float, seed: int
+    train: list[PromptTrace],
+    evaluation: list[PromptTrace],
+    alpha: float,
+    seed: int,
+    batch_size: int = 1,
 ) -> dict[str, Any]:
     if not train[0].target.routers:
         return {"status": "not_applicable", "reason": "target has no MoE router"}
@@ -307,6 +374,8 @@ def evaluate_experts(
     max_horizon = max(len(prompt.target.kv_by_horizon) for prompt in evaluation)
     for horizon in range(1, max_horizon + 1):
         rows: dict[str, list[float]] = defaultdict(list)
+        batch_rows: dict[str, list[float]] = defaultdict(list)
+        batch_events = 0
         observations = 0
         for target_layer in sorted(train[0].target.routers):
             draft_layer = map_layer(target_layer, target_layers, draft_layers)
@@ -339,8 +408,44 @@ def evaluate_experts(
                     rows["frequency_recall@8"].append(recall_at_k(frequency, actual, experts))
                     rows["random_recall@8"].append(recall_at_k(random_prediction, actual, experts))
                     observations += 1
+            for batch in chunks(evaluation, batch_size):
+                max_issues = max(prompt.target.generated_tokens for prompt in batch)
+                for issue in range(max_issues):
+                    active = [
+                        prompt
+                        for prompt in batch
+                        if issue + horizon <= prompt.target.generated_tokens
+                        and len(prompt.rollouts[issue].token_ids) >= horizon
+                    ]
+                    if not active:
+                        continue
+                    predicted_maps, actual_maps = [], []
+                    for prompt in active:
+                        feature = (
+                            prompt.rollouts[issue]
+                            .trace.hidden_states[draft_layer][horizon - 1]
+                            .unsqueeze(0)
+                        )
+                        scores = torch.softmax(predict_probe(probe, feature)[0], dim=0)
+                        actual_scores = prompt.target.routers[target_layer][issue + horizon - 1]
+                        predicted_maps.append(dict(enumerate(scores.tolist())))
+                        actual_maps.append(dict(enumerate(actual_scores.tolist())))
+                    static, dynamic = allocate_shared(predicted_maps, experts)
+                    oracle = allocate_shared_slots(actual_maps, len(static))
+                    for policy, selection in (
+                        ("static", static),
+                        ("dynamic", dynamic),
+                        ("oracle", oracle),
+                    ):
+                        for metric, value in shared_utility(
+                            selection, actual_maps, experts
+                        ).items():
+                            batch_rows[f"{policy}_{metric}"].append(value)
+                    batch_events += 1
         by_horizon[str(horizon)] = {
             "summary": mean_rows(rows),
+            "batch_policy": mean_rows(batch_rows),
+            "batch_layer_step_events": batch_events,
             "layer_token_observations": observations,
         }
     return {
@@ -351,8 +456,8 @@ def evaluate_experts(
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.lookahead <= 0 or args.max_new_tokens <= 0:
-        raise ValueError("lookahead and max-new-tokens must be positive")
+    if args.lookahead <= 0 or args.max_new_tokens <= 0 or args.batch_size <= 0:
+        raise ValueError("lookahead, max-new-tokens, and batch-size must be positive")
     if not 0 < args.train_fraction < 1:
         raise ValueError("train-fraction must be between zero and one")
     if args.require_idle_gpus:
@@ -419,6 +524,7 @@ def main() -> None:
             "evaluation_prompts": len(evaluation),
             "max_new_tokens": args.max_new_tokens,
             "lookahead": args.lookahead,
+            "batch_size": args.batch_size,
             "kv_block_size": args.kv_block_size,
             "kv_prefetch_blocks": args.kv_prefetch_blocks,
             "expert_prefetch_count": 8,
@@ -427,7 +533,12 @@ def main() -> None:
             "layer_alignment": "nearest relative depth",
         },
         "kv_prefetch": evaluate_kv(evaluation, args.kv_prefetch_blocks, args.seed),
-        "expert_prefetch": evaluate_experts(train, evaluation, args.ridge_alpha, args.seed),
+        "kv_batch_policy": evaluate_kv_batches(
+            evaluation, args.kv_prefetch_blocks, args.batch_size
+        ),
+        "expert_prefetch": evaluate_experts(
+            train, evaluation, args.ridge_alpha, args.seed, args.batch_size
+        ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
