@@ -67,6 +67,25 @@ def test_offloaded_executor_matches_direct_moe():
     worker.close()
 
 
+def test_grouped_and_vectorized_executors_match():
+    experts = [make_expert(0), make_expert(1), make_expert(2)]
+    hidden = torch.randn(2, 4, generator=torch.Generator().manual_seed(7))
+    logits = torch.tensor([[3.0, 2.0, 0.0], [0.0, 2.0, 3.0]])
+    first_runtime, first_registry, first_worker = runtime_with(experts)
+    second_runtime, second_registry, second_worker = runtime_with(experts)
+    vectorized = OffloadedExpertExecutor(
+        first_runtime, first_registry, top_k=2, vectorized_token_limit=8
+    )
+    grouped = OffloadedExpertExecutor(
+        second_runtime, second_registry, top_k=2, vectorized_token_limit=0
+    )
+    first = vectorized(hidden, logits, layer=0, request_ids=["a", "b"])
+    second = grouped(hidden, logits, layer=0, request_ids=["a", "b"])
+    assert torch.allclose(first, second, atol=1e-5)
+    first_worker.close()
+    second_worker.close()
+
+
 def test_predictions_merge_shared_expert_consumers():
     experts = [make_expert(0), make_expert(1)]
     runtime, registry, worker = runtime_with(experts)
