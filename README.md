@@ -3,6 +3,65 @@
 This repository tests whether signals already produced by speculative decoding can prefetch
 offloaded memory for Qwen/Qwen3-30B-A3B. The draft model is Qwen/Qwen3-0.6B.
 
+## Sparse offload inference runtime
+
+The `feature/sparse-offload-runtime` implementation is a runnable Qwen3-MoE reference engine, not
+only a trace simulator. It keeps four sink tokens and a 256-token recent window on GPU for each
+request/layer. Older 64-token KV chunks and every routed expert have authoritative CPU copies and
+enter GPU only through one decoupled memory-request queue.
+
+The queue supports speculative probability/deadline priority, cross-request expert reuse, demand
+promotion, duplicate upsert and reprioritization. GPU residency uses priority leases so a remote
+low-value prefetch cannot evict a nearer dependency. The sparse attention stopping rule combines
+95% cumulative draft mass, two consecutive target marginal contributions below 1%, and a minimum
+of two old chunks.
+
+Core modules are deliberately framework-neutral:
+
+| Module | Responsibility |
+| --- | --- |
+| `memory_queue.py` | Mutable KV/expert priority queue and demand promotion |
+| `residency.py` | Resource state machine, finite GPU capacity and eviction |
+| `transfer.py` | Dedicated worker and CUDA H2D stream |
+| `kv_cache.py` | Sink/recent layout, CPU old chunks and sparse retrieval |
+| `hybrid_attention.py` | Online target marginal mass and sparse attention |
+| `expert.py` | Original checkpoint expert source and exact Top-8 MoE |
+| `predictor.py` | Incremental, rollback-safe four-token draft rollout |
+| `qwen3_engine.py` | Transformers Qwen3 projections/router adapter |
+| `model_loader.py` | Meta loader that never materializes experts on GPU |
+
+Train the expert probes and run the two causally matched policies:
+
+~~~bash
+python -m scripts.run_offload_prefetch \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --prompts prompts.json \
+  --output results/runtime-signal-training.json \
+  --probe-output results/expert-probes.pt
+
+python -m scripts.run_runtime_engine \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --probes results/expert-probes.pt \
+  --prompts prompts.json \
+  --context-tokens 512 --batch-size 4 \
+  --output results/runtime-speculative.json
+
+python -m scripts.run_runtime_engine \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --probes results/expert-probes.pt \
+  --prompts prompts.json \
+  --context-tokens 512 --batch-size 4 \
+  --disable-prefetch \
+  --output results/runtime-demand-only.json
+~~~
+
+Both runtime modes use the same draft-ranked sparse KV set. `demand-only` suppresses early H2D but
+retains the predictor for an apples-to-apples sparse-attention choice. Timing includes draft prefill,
+rollout, draft-cache advancement, target compute and every demand wait.
+
 The primary experiment treats the draft as a prefetch oracle, not as a source of tokens for target
 verification. At every target step, the draft independently rolls out from only the currently known
 target prefix. Its attention and hidden states issue hypothetical CPU-to-GPU prefetch requests;
