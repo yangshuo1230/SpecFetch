@@ -89,6 +89,12 @@ class ExpertRegistry:
                 self._registered.add(key)
         return key
 
+    def preload(self, layers: range, experts: range) -> None:
+        """Materialize CPU expert storage before serving begins."""
+        for layer in layers:
+            for expert in experts:
+                self.ensure(layer, expert)
+
 
 def enqueue_expert_predictions(
     probabilities: torch.Tensor,

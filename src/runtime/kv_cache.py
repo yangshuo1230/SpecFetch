@@ -86,8 +86,9 @@ class RequestLayerKV:
         old_tokens = max(0, tokens - sink_end - self.config.recent_tokens)
         old_tokens -= old_tokens % self.config.kv_chunk_tokens
         old_end = sink_end + old_tokens
-        self.sink = (key[:sink_end], value[:sink_end])
-        self.recent = (key[old_end:], value[old_end:])
+        # Clone small resident windows so their views do not retain the full prefill tensor.
+        self.sink = (key[:sink_end].contiguous().clone(), value[:sink_end].contiguous().clone())
+        self.recent = (key[old_end:].contiguous().clone(), value[old_end:].contiguous().clone())
         for start in range(sink_end, old_end, self.config.kv_chunk_tokens):
             end = start + self.config.kv_chunk_tokens
             self._register_old(key[start:end], value[start:end])

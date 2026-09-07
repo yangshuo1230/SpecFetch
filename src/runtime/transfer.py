@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Protocol
 
 import torch
@@ -29,6 +29,10 @@ class CudaTransferBackend:
             return tuple(self._copy(item) for item in value)
         if isinstance(value, dict):
             return {name: self._copy(item) for name, item in value.items()}
+        if is_dataclass(value):
+            return type(value)(
+                **{item.name: self._copy(getattr(value, item.name)) for item in fields(value)}
+            )
         raise TypeError(f"unsupported transfer payload {type(value)}")
 
     def copy_to_gpu(self, key: ResourceKey, cpu_value: Any) -> Any:
