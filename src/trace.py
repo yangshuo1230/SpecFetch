@@ -42,9 +42,23 @@ def normalize_mass(values: Mass) -> Mass:
 
 
 def attention_block_mass(
-    attentions: tuple[torch.Tensor | None, ...], block_size: int, token_slice: slice
+    attentions: tuple[torch.Tensor | None, ...],
+    block_size: int,
+    token_slice: slice,
+    *,
+    key_limit: int | None = None,
+    key_lag: int = 0,
 ) -> dict[int, list[Mass]]:
-    """Aggregate each query's attention over heads and contiguous KV blocks."""
+    """Aggregate attention over heads and KV blocks visible at prefetch time.
+
+    ``key_limit`` keeps only a fixed prefix, as used for a draft rollout. ``key_lag``
+    derives the visible prefix from each query, as used to score an h-token-ahead
+    target access (``key_lag=h``). They are mutually exclusive.
+    """
+    if key_limit is not None and key_lag:
+        raise ValueError("key_limit and key_lag are mutually exclusive")
+    if key_lag < 0:
+        raise ValueError("key_lag must be non-negative")
     result: dict[int, list[Mass]] = {}
     for layer, attention in enumerate(attentions):
         if attention is None:
@@ -54,7 +68,9 @@ def attention_block_mass(
         per_query = attention.detach().float().sum(dim=1)[0].cpu()
         rows = []
         for query in range(*token_slice.indices(per_query.shape[0])):
-            mass = aggregate_mass(per_query[query, : query + 1].tolist(), block_size)
+            limit = key_limit if key_limit is not None else query + 1 - key_lag
+            limit = max(0, min(limit, query + 1))
+            mass = aggregate_mass(per_query[query, :limit].tolist(), block_size)
             rows.append(normalize_mass(mass))
         result[layer] = rows
     return result

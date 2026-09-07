@@ -3,8 +3,30 @@
 This repository tests whether signals already produced by speculative decoding can prefetch
 offloaded memory for Qwen/Qwen3-30B-A3B. The draft model is Qwen/Qwen3-0.6B.
 
-The study is observational: target decoding is unchanged, and every comparison uses the same
-target-generated token sequence.
+The primary experiment treats the draft as a prefetch oracle, not as a source of tokens for target
+verification. At every target step, the draft independently rolls out from only the currently known
+target prefix. Its attention and hidden states issue hypothetical CPU-to-GPU prefetch requests;
+future target accesses are used only as offline ground truth.
+
+## Independent offload-prefetch experiment
+
+~~~bash
+python -m scripts.run_offload_prefetch \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --prompts prompts.json \
+  --output results/offload-prefetch.json
+~~~
+
+The defaults use a four-token draft lookahead and report results separately for horizons 1 through
+4. For each horizon, the experiment measures token agreement and resource agreement independently.
+It also reports resource recall conditioned on the draft token matching or differing from the
+target token. This directly tests whether memory-access predictions remain useful after textual
+rollouts diverge.
+
+The script has an idle-GPU guard enabled by default. It refuses to load either model if a visible
+GPU is using more than 1,000 MiB or has more than 10% utilization, and checks again between target
+and draft phases. Override it only in an environment where GPU sharing is intentional.
 
 ## Questions and tests
 
@@ -42,7 +64,7 @@ pytest -q
 ruff check .
 ~~~
 
-## Run
+## Controlled aligned-sequence experiment
 
 With local model snapshots:
 
@@ -78,9 +100,11 @@ near the front of the prefetch queue. These metrics establish predictability, no
 latency improvement; a runtime integration must still measure transfer overlap, bandwidth, and
 eviction costs.
 
-## Measured result
+## Previous aligned-sequence result
 
-The full bfloat16 run used four training prompts and four held-out prompts, with 16 generated
+This earlier experiment replays the target sequence through the draft. It is a controlled upper
+bound rather than the independent prefetch setting above. The full bfloat16 run used four training
+prompts and four held-out prompts, with 16 generated
 tokens per prompt. Each task therefore contains 3,072 held-out layer-token observations
 (48 target layers x 64 tokens).
 

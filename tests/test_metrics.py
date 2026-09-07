@@ -46,6 +46,23 @@ def test_attention_block_mass_preserves_layers_and_queries():
     assert result[0][1] == pytest.approx({0: 0.3, 1: 0.7})
 
 
+def test_attention_block_mass_limits_keys_available_at_prefetch_time():
+    attention = torch.zeros(1, 1, 4, 4)
+    attention[0, 0, 3] = torch.tensor([0.1, 0.2, 0.3, 0.4])
+    fixed = attention_block_mass((attention,), block_size=1, token_slice=slice(3, 4), key_limit=2)
+    lagged = attention_block_mass((attention,), block_size=1, token_slice=slice(3, 4), key_lag=2)
+    assert fixed[0][0] == pytest.approx({0: 1 / 3, 1: 2 / 3})
+    assert lagged == fixed
+
+
+def test_attention_block_mass_rejects_two_key_window_modes():
+    attention = torch.zeros(1, 1, 1, 1)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        attention_block_mass(
+            (attention,), block_size=1, token_slice=slice(0, 1), key_limit=1, key_lag=1
+        )
+
+
 def test_mass_helpers_and_layer_mapping():
     assert aggregate_mass([1, 2, 3, 4], 2) == {0: 3.0, 1: 7.0}
     assert normalize_mass({0: 1.0, 1: 3.0}) == {0: 0.25, 1: 0.75}
