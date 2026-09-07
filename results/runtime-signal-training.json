@@ -1,0 +1,249 @@
+{
+  "configuration": {
+    "batch_size": 4,
+    "dtype": "bfloat16",
+    "evaluation_prompts": 4,
+    "expert_prefetch_count": 8,
+    "kv_block_size": 8,
+    "kv_prefetch_blocks": 2,
+    "layer_alignment": "nearest relative depth",
+    "lookahead": 4,
+    "max_new_tokens": 16,
+    "prompts": 8,
+    "ridge_alpha": 10.0,
+    "seed": 7,
+    "train_prompts": 4
+  },
+  "expert_prefetch": {
+    "by_horizon": {
+      "1": {
+        "batch_layer_step_events": 768,
+        "batch_policy": {
+          "dynamic_hits_per_transfer": 1.8772352001918213,
+          "dynamic_recall": 0.7262369791666666,
+          "dynamic_transfers": 15.046875,
+          "oracle_hits_per_transfer": 2.123344171357215,
+          "oracle_recall": 0.8599853515625,
+          "oracle_transfers": 15.046875,
+          "static_hits_per_transfer": 1.871008016947852,
+          "static_recall": 0.7233479817708334,
+          "static_transfers": 15.046875
+        },
+        "layer_token_observations": 3072,
+        "summary": {
+          "frequency_recall@8": 0.3597412109375,
+          "probe_ndcg@8": 0.7053821283826957,
+          "probe_recall@8": 0.6260579427083334,
+          "probe_recall@8_when_token_differs": 0.4548611111111111,
+          "probe_recall@8_when_token_matches": 0.6344774590163934,
+          "random_recall@8": 0.06510416666666667
+        }
+      },
+      "2": {
+        "batch_layer_step_events": 720,
+        "batch_policy": {
+          "dynamic_hits_per_transfer": 1.806906110188118,
+          "dynamic_recall": 0.7019965277777778,
+          "dynamic_transfers": 15.026388888888889,
+          "oracle_hits_per_transfer": 2.0657269129393216,
+          "oracle_recall": 0.8413628472222222,
+          "oracle_transfers": 15.026388888888889,
+          "static_hits_per_transfer": 1.795282847487119,
+          "static_recall": 0.6963975694444444,
+          "static_transfers": 15.026388888888889
+        },
+        "layer_token_observations": 2880,
+        "summary": {
+          "frequency_recall@8": 0.3776041666666667,
+          "probe_ndcg@8": 0.676466199149332,
+          "probe_recall@8": 0.5934461805555555,
+          "probe_recall@8_when_token_differs": 0.42578125,
+          "probe_recall@8_when_token_matches": 0.6120756172839507,
+          "random_recall@8": 0.06050347222222222
+        }
+      },
+      "3": {
+        "batch_layer_step_events": 672,
+        "batch_policy": {
+          "dynamic_hits_per_transfer": 1.7133352187588036,
+          "dynamic_recall": 0.6821056547619048,
+          "dynamic_transfers": 15.427083333333334,
+          "oracle_hits_per_transfer": 1.9838797112860609,
+          "oracle_recall": 0.8330543154761905,
+          "oracle_transfers": 15.427083333333334,
+          "static_hits_per_transfer": 1.704137315873822,
+          "static_recall": 0.6776413690476191,
+          "static_transfers": 15.427083333333334
+        },
+        "layer_token_observations": 2688,
+        "summary": {
+          "frequency_recall@8": 0.3860677083333333,
+          "probe_ndcg@8": 0.658774215041824,
+          "probe_recall@8": 0.5646391369047619,
+          "probe_recall@8_when_token_differs": 0.39620535714285715,
+          "probe_recall@8_when_token_matches": 0.5887011054421769,
+          "random_recall@8": 0.06240699404761905
+        }
+      },
+      "4": {
+        "batch_layer_step_events": 624,
+        "batch_policy": {
+          "dynamic_hits_per_transfer": 1.5791630902723435,
+          "dynamic_recall": 0.6667668269230769,
+          "dynamic_transfers": 15.886217948717949,
+          "oracle_hits_per_transfer": 1.8679629557979838,
+          "oracle_recall": 0.8277243589743589,
+          "oracle_transfers": 15.886217948717949,
+          "static_hits_per_transfer": 1.571711455248026,
+          "static_recall": 0.6629607371794872,
+          "static_transfers": 15.886217948717949
+        },
+        "layer_token_observations": 2496,
+        "summary": {
+          "frequency_recall@8": 0.373447516025641,
+          "probe_ndcg@8": 0.6451939425135682,
+          "probe_recall@8": 0.542167467948718,
+          "probe_recall@8_when_token_differs": 0.3862847222222222,
+          "probe_recall@8_when_token_matches": 0.5747940891472868,
+          "random_recall@8": 0.061197916666666664
+        }
+      }
+    },
+    "signal": "ridge probe on independent draft hidden states",
+    "status": "ok"
+  },
+  "kv_batch_policy": {
+    "batch_size": 4,
+    "budget": "dynamic and static transfer the same number of chunks",
+    "by_horizon": {
+      "1": {
+        "batch_layer_step_events": 768,
+        "summary": {
+          "dynamic_recall": 0.798828125,
+          "dynamic_target_mass": 0.8407778141031352,
+          "dynamic_transfers": 8.0,
+          "oracle_recall": 0.9420572916666666,
+          "oracle_target_mass": 0.8918839282571304,
+          "oracle_transfers": 8.0,
+          "static_recall": 0.8069661458333334,
+          "static_target_mass": 0.8391555960230664,
+          "static_transfers": 8.0
+        }
+      },
+      "2": {
+        "batch_layer_step_events": 720,
+        "summary": {
+          "dynamic_recall": 0.8253472222222222,
+          "dynamic_target_mass": 0.8638647567722963,
+          "dynamic_transfers": 8.0,
+          "oracle_recall": 0.9317708333333333,
+          "oracle_target_mass": 0.905900892485159,
+          "oracle_transfers": 8.0,
+          "static_recall": 0.8366319444444444,
+          "static_target_mass": 0.8609213522864009,
+          "static_transfers": 8.0
+        }
+      },
+      "3": {
+        "batch_layer_step_events": 672,
+        "summary": {
+          "dynamic_recall": 0.8424479166666666,
+          "dynamic_target_mass": 0.8831792942812707,
+          "dynamic_transfers": 8.0,
+          "oracle_recall": 0.9317336309523809,
+          "oracle_target_mass": 0.9193834911704416,
+          "oracle_transfers": 8.0,
+          "static_recall": 0.8586309523809523,
+          "static_target_mass": 0.8813116695108382,
+          "static_transfers": 8.0
+        }
+      },
+      "4": {
+        "batch_layer_step_events": 624,
+        "summary": {
+          "dynamic_recall": 0.8589743589743589,
+          "dynamic_target_mass": 0.893924434411878,
+          "dynamic_transfers": 8.0,
+          "oracle_recall": 0.9318910256410257,
+          "oracle_target_mass": 0.9296601959711108,
+          "oracle_transfers": 8.0,
+          "static_recall": 0.8739983974358975,
+          "static_target_mass": 0.8943443396498757,
+          "static_transfers": 8.0
+        }
+      }
+    },
+    "resource_scope": "KV chunks are private to each request"
+  },
+  "kv_prefetch": {
+    "by_horizon": {
+      "1": {
+        "layer_token_observations": 3072,
+        "summary": {
+          "draft_ndcg@k": 0.9452264865953951,
+          "draft_recall@k": 0.8069661458333334,
+          "draft_recall@k_when_token_differs": 0.8229166666666666,
+          "draft_recall@k_when_token_matches": 0.806181693989071,
+          "draft_target_mass@k": 0.8391555960230664,
+          "random_recall@k": 0.5948893229166666,
+          "recency_recall@k": 0.4327799479166667,
+          "rollout_prefix_match": 0.953125,
+          "token_match": 0.953125
+        }
+      },
+      "2": {
+        "layer_token_observations": 2880,
+        "summary": {
+          "draft_ndcg@k": 0.9536329325421207,
+          "draft_recall@k": 0.8366319444444444,
+          "draft_recall@k_when_token_differs": 0.7760416666666666,
+          "draft_recall@k_when_token_matches": 0.8433641975308642,
+          "draft_target_mass@k": 0.8609213522864009,
+          "random_recall@k": 0.5987847222222222,
+          "recency_recall@k": 0.4083333333333333,
+          "rollout_prefix_match": 0.9,
+          "token_match": 0.9
+        }
+      },
+      "3": {
+        "layer_token_observations": 2688,
+        "summary": {
+          "draft_ndcg@k": 0.9595214353535032,
+          "draft_recall@k": 0.8586309523809523,
+          "draft_recall@k_when_token_differs": 0.7752976190476191,
+          "draft_recall@k_when_token_matches": 0.8705357142857143,
+          "draft_target_mass@k": 0.8813116695108382,
+          "random_recall@k": 0.6063988095238095,
+          "recency_recall@k": 0.3939732142857143,
+          "rollout_prefix_match": 0.875,
+          "token_match": 0.875
+        }
+      },
+      "4": {
+        "layer_token_observations": 2496,
+        "summary": {
+          "draft_ndcg@k": 0.9623104423005017,
+          "draft_recall@k": 0.8739983974358975,
+          "draft_recall@k_when_token_differs": 0.78125,
+          "draft_recall@k_when_token_matches": 0.8934108527131783,
+          "draft_target_mass@k": 0.8943443396498757,
+          "random_recall@k": 0.6207932692307693,
+          "recency_recall@k": 0.3880208333333333,
+          "rollout_prefix_match": 0.8269230769230769,
+          "token_match": 0.8269230769230769
+        }
+      }
+    },
+    "signal": "independent draft attention"
+  },
+  "models": {
+    "draft": "/root/models/Qwen3-0.6B",
+    "target": "/root/models/Qwen3-30B-A3B"
+  },
+  "semantics": {
+    "draft": "independent greedy rollout from the currently known target prefix",
+    "ground_truth": "target access traces are used only for offline scoring",
+    "offload": "KV chunks and experts are treated as CPU-resident prefetch objects",
+    "target": "normal decoding; never verifies or accepts draft tokens"
+  }
+}
