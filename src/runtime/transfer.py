@@ -51,6 +51,12 @@ class TransferMetrics:
     bytes: int = 0
     transfer_ms: float = 0.0
     demand_wait_ms: float = 0.0
+    speculative_transfers: int = 0
+    demand_transfers: int = 0
+    dropped_speculative: int = 0
+    demand_requests: int = 0
+    demand_hits: int = 0
+    demand_misses: int = 0
 
 
 class TransferWorker:
@@ -86,6 +92,8 @@ class TransferWorker:
                 deadline=request.deadline,
                 demand=request.demand,
             ):
+                if not request.demand:
+                    self.metrics.dropped_speculative += 1
                 continue
             self.metrics.submitted += 1
             start = time.perf_counter()
@@ -95,6 +103,10 @@ class TransferWorker:
                 self.residency.complete_transfer(request.key, value)
                 self.metrics.completed += 1
                 self.metrics.bytes += request.size_bytes
+                if request.demand:
+                    self.metrics.demand_transfers += 1
+                else:
+                    self.metrics.speculative_transfers += 1
             except Exception as error:  # noqa: BLE001 - surface backend failures to compute
                 self._error = error
                 self.metrics.failed += 1
@@ -163,9 +175,12 @@ class OffloadRuntime:
         miss_cost_ms: float,
         timeout: float | None = None,
     ) -> Any:
+        self.worker.metrics.demand_requests += 1
         state = self.residency.state(key)
         if state == ResourceState.GPU_RESIDENT:
+            self.worker.metrics.demand_hits += 1
             return self.residency.get_gpu(key)
+        self.worker.metrics.demand_misses += 1
         record = self.residency.record(key)
         if state != ResourceState.IN_FLIGHT:
             self.residency.mark_queued(key)

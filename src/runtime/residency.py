@@ -30,6 +30,8 @@ class ResourceRecord:
     pinned: bool = False
     priority: float = 0.0
     deadline: int = 0
+    speculative: bool = False
+    used: bool = False
 
 
 class ResidencyManager:
@@ -46,6 +48,7 @@ class ResidencyManager:
         self._reserved: dict[ResourceKind, set[ResourceKey]] = {kind: set() for kind in capacities}
         self._condition = threading.Condition()
         self.evictions = 0
+        self.wasted_prefetches = 0
 
     def register_cpu(
         self, key: ResourceKey, value: Any, size_bytes: int, *, pinned: bool = False
@@ -107,6 +110,8 @@ class ResidencyManager:
             raise CacheFullError(f"no evictable {kind.value} cache slot")
         lru.pop(victim)
         record = self._records[victim]
+        if record.speculative and not record.used:
+            self.wasted_prefetches += 1
         record.gpu_value = None
         record.state = ResourceState.CPU_ONLY
         self.evictions += 1
@@ -140,6 +145,8 @@ class ResidencyManager:
             record.state = ResourceState.IN_FLIGHT
             record.priority = priority
             record.deadline = deadline
+            record.speculative = not demand
+            record.used = demand
             return True
 
     def complete_transfer(self, key: ResourceKey, gpu_value: Any) -> None:
@@ -167,6 +174,7 @@ class ResidencyManager:
                 raise KeyError(f"resource is not GPU resident: {key}")
             lru = self._resident[key.kind]
             lru.move_to_end(key)
+            record.used = True
             return record.gpu_value
 
     def set_pinned(self, key: ResourceKey, pinned: bool) -> None:
@@ -178,6 +186,8 @@ class ResidencyManager:
             record = self._records[key]
             record.priority = max(record.priority, priority)
             record.deadline = min(record.deadline, deadline) if record.deadline else deadline
+            record.speculative = True
+            record.used = False
 
     def release(self, key: ResourceKey) -> None:
         with self._condition:
@@ -191,6 +201,8 @@ class ResidencyManager:
             if record.state != ResourceState.GPU_RESIDENT or record.pinned:
                 return False
             self._resident[key.kind].pop(key, None)
+            if record.speculative and not record.used:
+                self.wasted_prefetches += 1
             record.gpu_value = None
             record.state = ResourceState.CPU_ONLY
             self.evictions += 1

@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kv-cache-slots", type=int, default=512)
     parser.add_argument("--disable-prefetch", action="store_true")
     parser.add_argument("--no-pin-experts", action="store_true")
+    parser.add_argument("--lazy-expert-store", action="store_true")
     return parser.parse_args()
 
 
@@ -72,6 +73,7 @@ def main() -> None:
         args.context_tokens,
     )
 
+    initialization_start = time.perf_counter()
     target, expert_source = load_qwen3_non_expert(
         args.target,
         device=args.device,
@@ -100,6 +102,13 @@ def main() -> None:
     engine = Qwen3SparseOffloadEngine(target, expert_source, runtime, residency, config)
     provider = DraftSignalProvider(draft, probes, args.lookahead)
     request_ids = [f"request-{index}" for index in range(args.batch_size)]
+    expert_preload_start = time.perf_counter()
+    if not args.lazy_expert_store:
+        engine.expert_registry.preload(
+            range(len(target.model.layers)), range(target.config.num_experts)
+        )
+    expert_preload_seconds = time.perf_counter() - expert_preload_start
+    initialization_seconds = time.perf_counter() - initialization_start
     worker.start()
     torch.cuda.reset_peak_memory_stats(torch.device(args.device))
     try:
@@ -176,6 +185,8 @@ def main() -> None:
             else 0,
             "end_to_end_tokens_per_second": args.batch_size * args.max_new_tokens / total_request,
             "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(args.device)) / 2**30,
+            "initialization_seconds": initialization_seconds,
+            "expert_preload_seconds": expert_preload_seconds,
         },
         "sparse_kv": {
             "mean_selected_old_chunks_per_layer_request": statistics.mean(selected_chunks)
@@ -184,7 +195,10 @@ def main() -> None:
             "mean_predicted_mass": statistics.mean(predicted_mass) if predicted_mass else 0,
         },
         "transfer": vars(worker.metrics),
-        "residency": {"evictions": residency.evictions},
+        "residency": {
+            "evictions": residency.evictions,
+            "wasted_prefetches": residency.wasted_prefetches,
+        },
         "generated_token_ids": tokens.tolist(),
         "generated_text": [tokenizer.decode(row) for row in tokens],
     }
