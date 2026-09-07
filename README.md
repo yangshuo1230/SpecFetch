@@ -68,6 +68,59 @@ horizons 1--3 and loses 0.04 points at horizon 4. A practical KV scheduler shoul
 a per-request minimum quota or explicit miss cost instead of maximizing raw draft attention alone.
 The complete result is in `results/offload-prefetch-batch4.json`.
 
+## Physical CPU-offload replay
+
+The system replay materializes the offloaded objects as BF16 tensors in pinned CPU memory and uses
+a dedicated CUDA stream for non-blocking H2D prefetch. A persistent, finite LRU GPU cache stores 64
+expert objects (576 MiB) and 512 KV chunks (8 MiB). At each target demand point, missing objects are
+really copied synchronously from CPU and counted as visible stall. The payloads exactly match Qwen3
+shapes: 9,437,184 bytes per expert and 16,384 bytes per eight-token KV chunk.
+
+Generate the event trace and replay it with:
+
+~~~bash
+python -m scripts.run_offload_prefetch \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --prompts prompts.json --batch-size 4 \
+  --output results/offload-prefetch-batch4.json \
+  --events-output results/offload-events-batch4.json
+
+python -m scripts.run_system_offload \
+  --events results/offload-events-batch4.json \
+  --output results/system-offload-batch4.json
+~~~
+
+For experts, the dynamic policy hits 58.26% of unique batch-layer expert objects. Pairwise request
+recall is higher (72.62%) because one shared expert can satisfy several requests. Wrong prefetches
+increase traffic from 120.52 GiB with demand-only loading to 151.88 GiB, so enough overlap is
+essential:
+
+| Available overlap | No-prefetch stall | Dynamic visible stall | Stall reduction |
+| ---: | ---: | ---: | ---: |
+| 0 ms | 4,527 ms | 5,625 ms | -24.3% |
+| 0.5 ms | 4,539 ms | 5,189 ms | -14.3% |
+| 1 ms | 4,541 ms | 4,798 ms | -5.6% |
+| 2 ms | 4,538 ms | 4,026 ms | **11.3%** |
+| 4 ms | 4,531 ms | 2,802 ms | **38.2%** |
+| 6 ms | 4,532 ms | 2,150 ms | **52.6%** |
+| 8 ms | 4,526 ms | 1,941 ms | **57.1%** |
+
+The measured expert break-even is therefore between one and two milliseconds on this machine. At
+two milliseconds the oracle reduces stall by 29.3%, showing that a better expert predictor or a
+smaller prefetch set has substantial headroom.
+
+For KV, the persistent cache already hits 80.68% without prefetch; static and dynamic prefetch raise
+this to 94.08% and 93.33%. At zero artificial overlap they reduce measured transfer stall by 32.2%
+and 27.7%. However, a 16 KiB object is so small that Python and CUDA-launch jitter are comparable to
+the copy itself, and the longer-lead sweep is not monotonic. These measurements establish real
+offload and recall behavior but not a reliable KV latency speedup. A production KV path must
+coalesce chunks into larger DMA requests and be tested on long contexts.
+
+The replay transfers real payload-sized bytes and measures real CUDA synchronization. It does not
+execute the expert matrix multiplications or patch Hugging Face's attention/MoE kernels, so the
+reported stall reduction is a system trace replay rather than end-to-end model latency.
+
 ## Questions and tests
 
 ### KV-cache blocks
@@ -173,3 +226,6 @@ four-prompt held-out set should be expanded before making a production latency c
 - The prompt set is small; confidence should be strengthened with a larger, shuffled workload.
 - The probe measures whether draft hidden states contain routing information. Production use must
   account for probe latency and overlap it with target execution.
+- Physical replay uses payload-shaped tensors rather than the original checkpoint values. Tensor
+  contents do not affect PCIe transfer timing, but an integrated engine is still required to test
+  numerical output and full-model latency.

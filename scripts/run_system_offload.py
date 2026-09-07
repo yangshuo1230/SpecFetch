@@ -92,7 +92,7 @@ def replay(
             for key, slot in to_prefetch:
                 cache.storage[slot].copy_(sources[key[2] % source_slots], non_blocking=True)
             end.record()
-        if lead_ms:
+        if lead_ms and to_prefetch:
             time.sleep(lead_ms / 1000)
         wait_start = time.perf_counter()
         end.synchronize()
@@ -127,6 +127,10 @@ def replay(
     }
     result.update({f"mean_{name}": mean(values) for name, values in rows.items()})
     result.update({f"total_{name}": sum(values) for name, values in rows.items()})
+    result["total_visible_stall_ms"] = (
+        result["total_prefetch_wait_ms"] + result["total_demand_stall_ms"]
+    )
+    result["mean_visible_stall_ms"] = result["total_visible_stall_ms"] / result["events"]
     del cache, sources
     torch.cuda.empty_cache()
     return result
