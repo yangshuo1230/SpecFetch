@@ -35,6 +35,39 @@ The script has an idle-GPU guard enabled by default. It refuses to load either m
 GPU is using more than 1,000 MiB or has more than 10% utilization, and checks again between target
 and draft phases. Override it only in an environment where GPU sharing is intentional.
 
+### Independent rollout result
+
+The full batch-4 run used four training prompts and four held-out prompts. Draft token agreement
+falls with lookahead, but resource agreement remains useful even when the individual draft token
+differs from the target token.
+
+| Horizon | Token match | KV recall@2 | KV recall when token differs | Expert recall@8 | Expert recall when token differs |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 95.31% | **80.70%** | **82.29%** | **62.61%** | **45.49%** |
+| 2 | 90.00% | **83.66%** | **77.60%** | **59.34%** | **42.58%** |
+| 3 | 87.50% | **85.86%** | **77.53%** | **56.46%** | **39.62%** |
+| 4 | 82.69% | **87.40%** | **78.13%** | **54.22%** | **38.63%** |
+
+At horizon 1, random and recency KV recall are 59.49% and 43.28%; expert frequency and random
+recall are 35.97% and 6.51%. The mismatch-conditioned sample is small, but it supports the central
+hypothesis: exact token acceptance is not necessary for a draft rollout to predict memory access.
+
+The batch expert policy exploits cross-request reuse. Under exactly the same number of expert
+transfers as the static union, aggregate recall improves consistently:
+
+| Horizon | Static expert recall | Dynamic expert recall | Oracle | Dynamic hits / transfer |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 72.33% | **72.62%** | 86.00% | 1.877 |
+| 2 | 69.64% | **70.20%** | 84.14% | 1.807 |
+| 3 | 67.76% | **68.21%** | 83.31% | 1.713 |
+| 4 | 66.30% | **66.68%** | 82.77% | 1.579 |
+
+The first global KV allocator is not yet a win: compared with fixed Top-2 per request, it loses
+0.81--1.62 recall points. It increases target attention-mass coverage by only 0.16--0.29 points at
+horizons 1--3 and loses 0.04 points at horizon 4. A practical KV scheduler should therefore include
+a per-request minimum quota or explicit miss cost instead of maximizing raw draft attention alone.
+The complete result is in `results/offload-prefetch-batch4.json`.
+
 ## Questions and tests
 
 ### KV-cache blocks
