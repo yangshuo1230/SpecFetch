@@ -1,0 +1,12 @@
+{
+  "prompts": [
+    "<|im_start|>user\nExplain speculative decoding in two sentences.\n<|im_end|>\n<|im_start|>assistant\n",
+    "<|im_start|>user\nWhy do mixture-of-experts models save compute?\n<|im_end|>\n<|im_start|>assistant\n",
+    "<|im_start|>user\nWrite a Python function that checks whether a number is prime.\n<|im_end|>\n<|im_start|>assistant\n",
+    "<|im_start|>user\nTranslate 'memory bandwidth is limited' into Chinese.\n<|im_end|>\n<|im_start|>assistant\n",
+    "<|im_start|>user\nWhat is the difference between RAM and a CPU cache?\n<|im_end|>\n<|im_start|>assistant\n",
+    "<|im_start|>user\nGive three practical uses of matrix multiplication.\n<|im_end|>\n<|im_start|>assistant\n",
+    "<|im_start|>user\nContinue the sequence: 1, 1, 2, 3, 5, and explain the rule.\n<|im_end|>\n<|im_start|>assistant\n",
+    "<|im_start|>user\nSummarize why reproducible experiments need held-out data.\n<|im_end|>\n<|im_start|>assistant\n"
+  ]
+}
