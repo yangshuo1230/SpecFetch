@@ -8,8 +8,8 @@ from pathlib import Path
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from scripts.run_runtime_engine import fixed_contexts, load_prompt_texts
 from src.gpu_guard import require_idle_gpus
+from src.workload import fixed_contexts, load_prompt_texts
 
 
 def parse_args() -> argparse.Namespace:

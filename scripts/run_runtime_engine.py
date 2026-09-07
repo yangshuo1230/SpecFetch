@@ -17,6 +17,7 @@ from src.runtime.predictor import DraftSignalProvider, ExpertProbeBank
 from src.runtime.qwen3_engine import Qwen3SparseOffloadEngine
 from src.runtime.residency import ResidencyManager
 from src.runtime.transfer import CudaTransferBackend, OffloadRuntime, TransferWorker
+from src.workload import fixed_contexts, load_prompt_texts
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,27 +44,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-prefetch", action="store_true")
     parser.add_argument("--no-pin-experts", action="store_true")
     return parser.parse_args()
-
-
-def load_prompt_texts(path: Path) -> list[str]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    prompts = value.get("prompts") if isinstance(value, dict) else value
-    if not isinstance(prompts, list) or not all(isinstance(item, str) for item in prompts):
-        raise ValueError("prompts must contain a string array")
-    return prompts
-
-
-def fixed_contexts(tokenizer, prompts: list[str], batch: int, tokens: int) -> torch.Tensor:
-    rows = []
-    for prompt in prompts[:batch]:
-        encoded = tokenizer(prompt, add_special_tokens=False).input_ids
-        if not encoded:
-            raise ValueError("an empty prompt cannot form a benchmark context")
-        repeats = (tokens + len(encoded) - 1) // len(encoded)
-        rows.append((encoded * repeats)[:tokens])
-    if len(rows) != batch:
-        raise ValueError("not enough prompts for requested batch size")
-    return torch.tensor(rows, dtype=torch.long)
 
 
 def synchronize(device: str) -> None:
