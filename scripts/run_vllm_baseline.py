@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
 
 from src.gpu_guard import require_idle_gpus
 from src.workload import fixed_contexts, load_prompt_texts
@@ -18,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompts", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--physical-gpu-index", type=int, default=0)
     parser.add_argument("--context-tokens", type=int, default=512)
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
@@ -29,7 +29,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    require_idle_gpus(1000, 10)
+    require_idle_gpus(1000, 10, {args.physical_gpu_index})
+    from vllm import LLM, SamplingParams
+
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     input_ids = fixed_contexts(
         tokenizer,

@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompts", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--physical-gpu-index", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--context-tokens", type=int, default=512)
     parser.add_argument("--max-new-tokens", type=int, default=8)
@@ -65,7 +66,7 @@ def synchronize(device: str) -> None:
 
 def main() -> None:
     args = parse_args()
-    require_idle_gpus(1000, 10)
+    require_idle_gpus(1000, 10, {args.physical_gpu_index})
     refresh_tokens = args.draft_refresh_tokens or args.lookahead
     if not 0 < refresh_tokens <= args.lookahead:
         raise ValueError("draft-refresh-tokens must be in [1, lookahead]")

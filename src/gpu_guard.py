@@ -26,11 +26,18 @@ def query_gpu_states() -> list[GpuState]:
     return states
 
 
-def require_idle_gpus(max_memory_mib: int, max_utilization: int) -> list[GpuState]:
+def require_idle_gpus(
+    max_memory_mib: int,
+    max_utilization: int,
+    indices: set[int] | None = None,
+) -> list[GpuState]:
     states = query_gpu_states()
+    checked = [state for state in states if indices is None or state.index in indices]
+    if indices is not None and {state.index for state in checked} != indices:
+        raise RuntimeError(f"requested GPUs are not visible: {sorted(indices)}")
     busy = [
         state
-        for state in states
+        for state in checked
         if state.memory_used_mib > max_memory_mib or state.utilization_percent > max_utilization
     ]
     if busy:
@@ -39,4 +46,4 @@ def require_idle_gpus(max_memory_mib: int, max_utilization: int) -> list[GpuStat
             for state in busy
         )
         raise RuntimeError(f"refusing to disturb busy GPUs ({details})")
-    return states
+    return checked
