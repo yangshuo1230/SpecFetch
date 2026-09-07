@@ -127,17 +127,25 @@ def main() -> None:
         output = engine.prefill(input_ids, request_ids)
         synchronize(args.device)
         prefill_seconds = time.perf_counter() - start
+        start = time.perf_counter()
         provider.initialize(input_ids, request_ids)
+        synchronize(args.device)
+        draft_prefill_seconds = time.perf_counter() - start
 
-        generated = []
-        decode_seconds = []
+        token_ids = output.logits[:, -1].argmax(dim=-1).cpu()
+        generated = [token_ids]
+        target_decode_seconds = []
+        draft_seconds = []
+        step_seconds = []
         selected_chunks = []
         predicted_mass = []
-        logits = output.logits[:, -1]
-        for _ in range(args.max_new_tokens):
-            token_ids = logits.argmax(dim=-1).cpu()
+        for _ in range(max(0, args.max_new_tokens - 1)):
+            step_start = time.perf_counter()
+            draft_start = time.perf_counter()
             plan = provider.predict(output.state)
-            start = time.perf_counter()
+            synchronize(args.device)
+            prediction_seconds = time.perf_counter() - draft_start
+            target_start = time.perf_counter()
             output = engine.decode(
                 token_ids,
                 output.state,
@@ -145,10 +153,14 @@ def main() -> None:
                 prefetch=not args.disable_prefetch,
             )
             synchronize(args.device)
-            decode_seconds.append(time.perf_counter() - start)
+            target_decode_seconds.append(time.perf_counter() - target_start)
+            draft_start = time.perf_counter()
             provider.advance(token_ids)
-            logits = output.logits[:, -1]
+            synchronize(args.device)
+            draft_seconds.append(prediction_seconds + time.perf_counter() - draft_start)
+            token_ids = output.logits[:, -1].argmax(dim=-1).cpu()
             generated.append(token_ids)
+            step_seconds.append(time.perf_counter() - step_start)
             selected_chunks.extend(
                 len(trace.selected_old_chunks) for trace in output.sparse_attention.values()
             )
@@ -159,7 +171,9 @@ def main() -> None:
         worker.close()
 
     tokens = torch.stack(generated, dim=1)
-    total_decode = sum(decode_seconds)
+    total_steps = sum(step_seconds)
+    total_request = prefill_seconds + draft_prefill_seconds + total_steps
+    decode_count = max(0, args.max_new_tokens - 1)
     result = {
         "configuration": {
             **vars(args),
@@ -170,15 +184,24 @@ def main() -> None:
         },
         "performance": {
             "prefill_seconds": prefill_seconds,
-            "decode_seconds": total_decode,
-            "mean_tpot_ms": statistics.mean(decode_seconds) * 1000,
-            "p50_tpot_ms": statistics.median(decode_seconds) * 1000,
-            "throughput_tokens_per_second": args.batch_size * args.max_new_tokens / total_decode,
+            "draft_prefill_seconds": draft_prefill_seconds,
+            "target_decode_seconds": sum(target_decode_seconds),
+            "draft_decode_seconds": sum(draft_seconds),
+            "decode_step_seconds": total_steps,
+            "request_seconds": total_request,
+            "mean_tpot_ms": statistics.mean(step_seconds) * 1000 if step_seconds else 0,
+            "p50_tpot_ms": statistics.median(step_seconds) * 1000 if step_seconds else 0,
+            "decode_throughput_tokens_per_second": args.batch_size * decode_count / total_steps
+            if total_steps
+            else 0,
+            "end_to_end_tokens_per_second": args.batch_size * args.max_new_tokens / total_request,
             "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(args.device)) / 2**30,
         },
         "sparse_kv": {
-            "mean_selected_old_chunks_per_layer_request": statistics.mean(selected_chunks),
-            "mean_predicted_mass": statistics.mean(predicted_mass),
+            "mean_selected_old_chunks_per_layer_request": statistics.mean(selected_chunks)
+            if selected_chunks
+            else 0,
+            "mean_predicted_mass": statistics.mean(predicted_mass) if predicted_mass else 0,
         },
         "transfer": vars(worker.metrics),
         "residency": {"evictions": residency.evictions},
