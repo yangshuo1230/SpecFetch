@@ -101,8 +101,8 @@ class TransferWorker:
         if self._error is not None:
             raise RuntimeError("transfer worker failed") from self._error
 
-    def close(self) -> None:
-        self.queue.close()
+    def close(self, *, drain: bool = False) -> None:
+        self.queue.close(discard=not drain)
         if self._thread is not None:
             self._thread.join()
         self.check()

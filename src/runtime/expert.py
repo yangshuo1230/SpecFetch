@@ -62,7 +62,21 @@ class SafetensorExpertSource:
             if cached is not None:
                 return cached
             names = self.names(layer, expert)
-            weights = ExpertWeights(**{name: self._load_tensor(key) for name, key in names.items()})
+            shards = {self.weight_map[name] for name in names.values()}
+            if len(shards) == 1:
+                with safe_open(
+                    self.model_path / shards.pop(), framework="pt", device="cpu"
+                ) as handle:
+                    tensors = {
+                        name: handle.get_tensor(key).contiguous() for name, key in names.items()
+                    }
+                if self.pin_memory and torch.cuda.is_available():
+                    tensors = {name: value.pin_memory() for name, value in tensors.items()}
+                weights = ExpertWeights(**tensors)
+            else:
+                weights = ExpertWeights(
+                    **{name: self._load_tensor(key) for name, key in names.items()}
+                )
             self._cache[identity] = weights
             return weights
 
@@ -106,10 +120,11 @@ def enqueue_expert_predictions(
     miss_cost_ms: float,
     registry: ExpertRegistry,
     runtime: OffloadRuntime,
-) -> None:
+) -> list[tuple[ResourceKey, str]]:
     """Merge per-request predicted routes into shared expert queue entries."""
     if probabilities.ndim != 2 or len(probabilities) != len(request_ids):
         raise ValueError("probabilities must align with request IDs")
+    queued = []
     for row, request_id in zip(probabilities, request_ids):
         values, experts = row.topk(min(top_k, row.numel()))
         for probability, expert in zip(values.tolist(), experts.tolist()):
@@ -121,6 +136,8 @@ def enqueue_expert_predictions(
                 deadline=deadline,
                 miss_cost_ms=miss_cost_ms,
             )
+            queued.append((key, request_id))
+    return queued
 
 
 class OffloadedExpertExecutor:

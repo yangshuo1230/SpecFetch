@@ -15,6 +15,7 @@ from src.runtime.expert import (
     enqueue_expert_predictions,
 )
 from src.runtime.kv_cache import RequestLayerKV, SparseAttentionResult
+from src.runtime.memory_queue import ResourceKey
 from src.runtime.residency import ResidencyManager
 from src.runtime.transfer import OffloadRuntime
 
@@ -57,6 +58,7 @@ class BatchState:
     lengths: list[int]
     kv: dict[tuple[str, int], RequestLayerKV]
     step: int = 0
+    speculative_consumers: list[tuple[ResourceKey, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -76,6 +78,14 @@ def _dense_causal_attention(
     groups = query.shape[1] // key.shape[1]
     key = _repeat_kv(key, groups)
     value = _repeat_kv(value, groups)
+    if query.is_cuda:
+        return (
+            torch.nn.functional.scaled_dot_product_attention(
+                query, key, value, is_causal=True, scale=scale
+            )
+            .transpose(1, 2)
+            .contiguous()
+        )
     logits = torch.matmul(query.float(), key.float().transpose(2, 3)) * scale
     length = query.shape[-2]
     mask = torch.ones((length, length), dtype=torch.bool, device=query.device).triu(1)
@@ -190,37 +200,67 @@ class Qwen3SparseOffloadEngine:
         logits = self.model.lm_head(hidden)
         return EngineOutput(logits, BatchState(request_ids, [tokens] * batch, caches), {})
 
-    def enqueue_predictions(self, state: BatchState, predictions: StepPredictions) -> None:
+    def enqueue_predictions(self, state: BatchState, predictions: list[StepPredictions]) -> None:
+        for key, consumer in state.speculative_consumers:
+            self.runtime.cancel(key, consumer)
+        state.speculative_consumers.clear()
         layers = len(self.model.model.layers)
+        for horizon, prediction in enumerate(predictions, 1):
+            for layer_index in range(layers):
+                deadline = (state.step + horizon - 1) * layers + layer_index
+                expert_probabilities = prediction.experts.get(layer_index)
+                consumers = [
+                    f"{request_id}@{state.step + horizon}" for request_id in state.request_ids
+                ]
+                if expert_probabilities is not None:
+                    state.speculative_consumers.extend(
+                        enqueue_expert_predictions(
+                            expert_probabilities,
+                            layer=layer_index,
+                            request_ids=consumers,
+                            top_k=self.model.config.num_experts_per_tok,
+                            deadline=deadline,
+                            miss_cost_ms=0.5,
+                            registry=self.expert_registry,
+                            runtime=self.runtime,
+                        )
+                    )
+                for request_id, consumer in zip(state.request_ids, consumers):
+                    cache = state.kv[(request_id, layer_index)]
+                    scores = prediction.kv.get((request_id, layer_index), {})
+                    state.speculative_consumers.extend(
+                        cache.enqueue(
+                            scores,
+                            deadline,
+                            miss_cost_ms=0.05,
+                            consumer=consumer,
+                        )
+                    )
         for layer_index in range(layers):
-            deadline = state.step * layers + layer_index
-            expert_probabilities = predictions.experts.get(layer_index)
-            if expert_probabilities is not None:
-                enqueue_expert_predictions(
-                    expert_probabilities,
-                    layer=layer_index,
-                    request_ids=state.request_ids,
-                    top_k=self.model.config.num_experts_per_tok,
-                    deadline=deadline,
-                    miss_cost_ms=0.5,
-                    registry=self.expert_registry,
-                    runtime=self.runtime,
-                )
             for request_id in state.request_ids:
                 cache = state.kv[(request_id, layer_index)]
-                scores = predictions.kv.get((request_id, layer_index), {})
-                cache.reconcile(scores, deadline, miss_cost_ms=0.05)
+                keep_predictions = [
+                    item.kv.get((request_id, layer_index), {}) for item in predictions[:2]
+                ]
+                cache.retain_predicted(keep_predictions)
 
     @torch.inference_mode()
     def decode(
         self,
         token_ids: torch.Tensor,
         state: BatchState,
-        predictions: StepPredictions,
+        predictions: StepPredictions | list[StepPredictions],
+        *,
+        prefetch: bool = True,
     ) -> EngineOutput:
         if token_ids.ndim != 1 or len(token_ids) != len(state.request_ids):
             raise ValueError("decode requires one token per active request")
-        self.enqueue_predictions(state, predictions)
+        predictions = [predictions] if isinstance(predictions, StepPredictions) else predictions
+        if not predictions:
+            predictions = [StepPredictions()]
+        if prefetch:
+            self.enqueue_predictions(state, predictions)
+        current_predictions = predictions[0]
         hidden = self.model.model.embed_tokens(token_ids[:, None].to(self.device))
         positions = torch.tensor(state.lengths, device=self.device)[:, None]
         position_embeddings = self.model.model.rotary_emb(hidden, positions)
@@ -238,7 +278,7 @@ class Qwen3SparseOffloadEngine:
                     key[request_index].transpose(0, 1),
                     value[request_index].transpose(0, 1),
                 )
-                scores = predictions.kv.get((request_id, layer_index))
+                scores = current_predictions.kv.get((request_id, layer_index))
                 if scores is None:
                     count = len(cache.old)
                     scores = {index: 1 / count for index in cache.old} if count else {}

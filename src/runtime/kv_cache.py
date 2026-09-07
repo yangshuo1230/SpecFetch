@@ -63,10 +63,13 @@ class RequestLayerKV:
         self.sink: tuple[torch.Tensor, torch.Tensor] | None = None
         self.recent: tuple[torch.Tensor, torch.Tensor] | None = None
         self.old: dict[int, ResourceKey] = {}
+        self.old_ranges: dict[int, tuple[int, int]] = {}
         self._next_chunk = 0
+        self._recent_start = 0
+        self._total_tokens = 0
         self._unwanted: set[ResourceKey] = set()
 
-    def _register_old(self, key: torch.Tensor, value: torch.Tensor) -> int:
+    def _register_old(self, key: torch.Tensor, value: torch.Tensor, start: int) -> int:
         chunk = self._next_chunk
         self._next_chunk += 1
         identity = kv_key(self.request_id, self.layer, chunk)
@@ -74,6 +77,7 @@ class RequestLayerKV:
         size = sum(tensor.numel() * tensor.element_size() for tensor in payload)
         self.residency.register_cpu(identity, payload, size)
         self.old[chunk] = identity
+        self.old_ranges[chunk] = (start, start + len(key))
         return chunk
 
     def initialize(self, key: torch.Tensor, value: torch.Tensor) -> None:
@@ -89,9 +93,11 @@ class RequestLayerKV:
         # Clone small resident windows so their views do not retain the full prefill tensor.
         self.sink = (key[:sink_end].contiguous().clone(), value[:sink_end].contiguous().clone())
         self.recent = (key[old_end:].contiguous().clone(), value[old_end:].contiguous().clone())
+        self._recent_start = old_end
+        self._total_tokens = tokens
         for start in range(sink_end, old_end, self.config.kv_chunk_tokens):
             end = start + self.config.kv_chunk_tokens
-            self._register_old(key[start:end], value[start:end])
+            self._register_old(key[start:end], value[start:end], start)
 
     def append(self, key: torch.Tensor, value: torch.Tensor) -> None:
         if self.recent is None or key.shape != value.shape or key.ndim != 3:
@@ -101,21 +107,57 @@ class RequestLayerKV:
         limit = self.config.recent_tokens + self.config.kv_chunk_tokens - 1
         while len(recent_key) > limit:
             width = self.config.kv_chunk_tokens
-            self._register_old(recent_key[:width], recent_value[:width])
+            self._register_old(recent_key[:width], recent_value[:width], self._recent_start)
             recent_key, recent_value = recent_key[width:], recent_value[width:]
+            self._recent_start += width
         self.recent = (recent_key, recent_value)
+        self._total_tokens += len(key)
 
-    def enqueue(self, draft_mass: dict[int, float], deadline: int, miss_cost_ms: float) -> None:
+    def enqueue(
+        self,
+        draft_mass: dict[int, float],
+        deadline: int,
+        miss_cost_ms: float,
+        *,
+        consumer: str | None = None,
+    ) -> list[tuple[ResourceKey, str]]:
+        queued = []
+        consumer = consumer or self.request_id
         for chunk, probability in draft_mass.items():
             if chunk not in self.old:
                 continue
             self.runtime.prefetch(
                 self.old[chunk],
-                consumer=self.request_id,
+                consumer=consumer,
                 probability=probability,
                 deadline=deadline,
                 miss_cost_ms=miss_cost_ms,
             )
+            queued.append((self.old[chunk], consumer))
+        return queued
+
+    def predicted_keep_set(self, draft_mass: dict[int, float]) -> set[int]:
+        keep = set()
+        cumulative = 0.0
+        for chunk in sorted(draft_mass, key=draft_mass.get, reverse=True):
+            if chunk not in self.old:
+                continue
+            keep.add(chunk)
+            cumulative += draft_mass[chunk]
+            if cumulative >= self.config.predicted_mass_threshold and len(keep) >= min(
+                self.config.minimum_old_chunks, len(self.old)
+            ):
+                break
+        return keep
+
+    def retain_predicted(self, predictions: list[dict[int, float]]) -> None:
+        keep = set().union(*(self.predicted_keep_set(values) for values in predictions))
+        for chunk, identity in self.old.items():
+            if chunk in keep:
+                self._unwanted.discard(identity)
+            elif not self.residency.evict(identity):
+                self._unwanted.add(identity)
+        self.reap_unwanted()
 
     def sparse_attention(
         self,
@@ -167,16 +209,7 @@ class RequestLayerKV:
         self, next_draft_mass: dict[int, float], deadline: int, miss_cost_ms: float
     ) -> None:
         """Keep next-decode candidates; cancel or evict every other old chunk."""
-        ranked = sorted(next_draft_mass, key=next_draft_mass.get, reverse=True)
-        keep = set()
-        cumulative = 0.0
-        for chunk in ranked:
-            if chunk not in self.old:
-                continue
-            keep.add(chunk)
-            cumulative += next_draft_mass[chunk]
-            if cumulative >= self.config.predicted_mass_threshold:
-                break
+        keep = self.predicted_keep_set(next_draft_mass)
         for chunk, identity in self.old.items():
             if chunk in keep:
                 self.runtime.prefetch(

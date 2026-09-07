@@ -182,7 +182,10 @@ class MemoryRequestQueue:
                 key=lambda item: (-item.priority(self._step), item.deadline),
             )
 
-    def close(self) -> None:
+    def close(self, *, discard: bool = False) -> None:
         with self._condition:
             self._closed = True
+            if discard:
+                self._requests.clear()
+                self._heap.clear()
             self._condition.notify_all()
