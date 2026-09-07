@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draft", required=True)
     parser.add_argument("--prompts", required=True, type=Path)
     parser.add_argument("--output", type=Path, default=Path("results/offload-prefetch.json"))
+    parser.add_argument("--events-output", type=Path)
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--lookahead", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -359,6 +360,84 @@ def probe_examples(
     return torch.stack(features), torch.stack(probabilities)
 
 
+def build_transfer_events(
+    train: list[PromptTrace], evaluation: list[PromptTrace], args: argparse.Namespace
+) -> list[dict[str, Any]]:
+    """Build horizon-1 batch events for physical CPU-to-GPU replay."""
+
+    def encode_private(values: list[set[int]]) -> list[int]:
+        return [
+            request * 10_000 + resource
+            for request, resources in enumerate(values)
+            for resource in resources
+        ]
+
+    events = []
+    batch = evaluation[: args.batch_size]
+    target_layers = len(batch[0].target.kv_by_horizon[1])
+    draft_layers = len(batch[0].rollouts[0].trace.kv_mass)
+    for step in range(max(prompt.target.generated_tokens for prompt in batch)):
+        active = [prompt for prompt in batch if step < prompt.target.generated_tokens]
+        for target_layer in range(target_layers):
+            predicted, actual = [], []
+            for request, prompt in enumerate(active):
+                rollout = prompt.rollouts[step]
+                draft_layer = map_layer(target_layer, target_layers, draft_layers)
+                predicted.append(rollout.trace.kv_mass[draft_layer][0])
+                actual.append(prompt.target.kv_by_horizon[1][target_layer][step])
+            static, dynamic = allocate_private(predicted, args.kv_prefetch_blocks)
+            _, oracle = allocate_private(actual, args.kv_prefetch_blocks)
+            events.append(
+                {
+                    "kind": "kv",
+                    "layer": target_layer,
+                    "step": step,
+                    "static": encode_private(static),
+                    "dynamic": encode_private(dynamic),
+                    "oracle": encode_private(oracle),
+                    "actual": encode_private(
+                        [set(top_k(values, args.kv_prefetch_blocks)) for values in actual]
+                    ),
+                }
+            )
+
+    target_router_layers = len(train[0].target.routers)
+    draft_hidden_layers = len(train[0].rollouts[0].trace.hidden_states)
+    probes = {}
+    for target_layer in range(target_router_layers):
+        draft_layer = map_layer(target_layer, target_router_layers, draft_hidden_layers)
+        train_x, train_probabilities = probe_examples(train, target_layer, draft_layer, 1)
+        probes[target_layer] = (
+            draft_layer,
+            fit_ridge_probe(train_x, routed_labels(train_probabilities, 8), args.ridge_alpha),
+        )
+    for step in range(max(prompt.target.generated_tokens for prompt in batch)):
+        active = [prompt for prompt in batch if step < prompt.target.generated_tokens]
+        for target_layer in range(target_router_layers):
+            draft_layer, probe = probes[target_layer]
+            predicted, actual = [], []
+            for prompt in active:
+                feature = prompt.rollouts[step].trace.hidden_states[draft_layer][0].unsqueeze(0)
+                scores = torch.softmax(predict_probe(probe, feature)[0], dim=0)
+                actual_scores = prompt.target.routers[target_layer][step]
+                predicted.append(dict(enumerate(scores.tolist())))
+                actual.append(dict(enumerate(actual_scores.tolist())))
+            static, dynamic = allocate_shared(predicted, 8)
+            oracle = allocate_shared_slots(actual, len(static))
+            events.append(
+                {
+                    "kind": "expert",
+                    "layer": target_layer,
+                    "step": step,
+                    "static": sorted(static),
+                    "dynamic": sorted(dynamic),
+                    "oracle": sorted(oracle),
+                    "actual": sorted(set().union(*(top_k(values, 8) for values in actual))),
+                }
+            )
+    return events
+
+
 def evaluate_experts(
     train: list[PromptTrace],
     evaluation: list[PromptTrace],
@@ -545,6 +624,16 @@ def main() -> None:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.events_output:
+        events = {
+            "configuration": result["configuration"],
+            "semantics": result["semantics"],
+            "events": build_transfer_events(train, evaluation, args),
+        }
+        args.events_output.parent.mkdir(parents=True, exist_ok=True)
+        args.events_output.write_text(
+            json.dumps(events, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
