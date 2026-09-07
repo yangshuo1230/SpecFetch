@@ -31,6 +31,7 @@ def test_loader_keeps_experts_out_of_model_tree(tmp_path):
         loaded.model.layers[0].self_attn.q_proj.weight,
         original.model.layers[0].self_attn.q_proj.weight,
     )
+    source.preload(range(1), range(4))
     expert = source.get(0, 2)
     assert torch.equal(expert.gate, original.model.layers[0].mlp.experts[2].gate_proj.weight)
     assert expert.size_bytes > 0

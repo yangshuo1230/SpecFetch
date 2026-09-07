@@ -83,24 +83,23 @@ class SafetensorExpertSource:
     def preload(self, layers: range, experts: range) -> None:
         """Populate pinned CPU storage shard-by-shard before request timing."""
         identities = [(layer, expert) for layer in layers for expert in experts]
-        by_shard: dict[str, list[tuple[int, int]]] = {}
+        by_shard: dict[str, list[tuple[tuple[int, int], str, str]]] = {}
         for identity in identities:
-            names = self.names(*identity)
-            shard = self.weight_map[names["gate"]]
-            by_shard.setdefault(shard, []).append(identity)
+            for field, name in self.names(*identity).items():
+                by_shard.setdefault(self.weight_map[name], []).append((identity, field, name))
         with self._lock:
+            partial: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
             for shard, items in by_shard.items():
                 with safe_open(self.model_path / shard, framework="pt", device="cpu") as handle:
-                    for identity in items:
+                    for identity, field, name in items:
                         if identity in self._cache:
                             continue
-                        names = self.names(*identity)
-                        tensors = {
-                            name: handle.get_tensor(key).contiguous() for name, key in names.items()
-                        }
+                        tensor = handle.get_tensor(name).contiguous()
                         if self.pin_memory and torch.cuda.is_available():
-                            tensors = {name: value.pin_memory() for name, value in tensors.items()}
-                        self._cache[identity] = ExpertWeights(**tensors)
+                            tensor = tensor.pin_memory()
+                        partial.setdefault(identity, {})[field] = tensor
+            for identity, tensors in partial.items():
+                self._cache[identity] = ExpertWeights(**tensors)
 
 
 def expert_key(layer: int, expert: int) -> ResourceKey:
