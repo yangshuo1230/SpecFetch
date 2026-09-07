@@ -68,3 +68,23 @@ def update_partition(previous_lse: torch.Tensor, chunk_lse: torch.Tensor) -> tor
 
 def empty_partition(heads: int, device: torch.device | str = "cpu") -> torch.Tensor:
     return torch.full((heads,), -math.inf, dtype=torch.float32, device=device)
+
+
+def attention_output(
+    query: torch.Tensor,
+    chunks: list[tuple[torch.Tensor, torch.Tensor]],
+    scale: float | None = None,
+) -> torch.Tensor:
+    """Reference GQA attention over an explicitly selected set of KV chunks."""
+    if not chunks:
+        raise ValueError("at least one KV chunk is required")
+    heads, dimension = query.shape
+    keys = torch.cat([key for key, _ in chunks])
+    values = torch.cat([value for _, value in chunks])
+    if keys.shape != values.shape or heads % keys.shape[1]:
+        raise ValueError("incompatible query, key, and value shapes")
+    keys = keys.repeat_interleave(heads // keys.shape[1], dim=1)
+    values = values.repeat_interleave(heads // values.shape[1], dim=1)
+    logits = torch.einsum("hd,thd->ht", query.float(), keys.float())
+    weights = torch.softmax(logits * (scale or dimension**-0.5), dim=-1)
+    return torch.einsum("ht,thd->hd", weights.to(values.dtype), values)

@@ -74,6 +74,14 @@ class ResidencyManager:
                 return True
             return record.state == ResourceState.QUEUED
 
+    def unqueue(self, key: ResourceKey) -> bool:
+        with self._condition:
+            record = self._records[key]
+            if record.state != ResourceState.QUEUED:
+                return False
+            record.state = ResourceState.CPU_ONLY
+            return True
+
     def _evict_one(self, kind: ResourceKind, protected: set[ResourceKey]) -> None:
         lru = self._resident[kind]
         victim = next(

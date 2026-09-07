@@ -64,6 +64,10 @@ class MemoryRequestQueue:
         with self._condition:
             return len(self._requests)
 
+    def contains(self, key: ResourceKey) -> bool:
+        with self._condition:
+            return key in self._requests
+
     def _push(self, request: MemoryRequest) -> None:
         request.version += 1
         self._sequence += 1

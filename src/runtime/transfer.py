@@ -167,3 +167,9 @@ class OffloadRuntime:
         if not ready:
             raise TimeoutError(f"resource did not become resident: {key}")
         return self.residency.get_gpu(key)
+
+    def cancel(self, key: ResourceKey, consumer: str | None = None) -> bool:
+        removed = self.queue.cancel(key, consumer)
+        if removed and not self.queue.contains(key):
+            self.residency.unqueue(key)
+        return removed
