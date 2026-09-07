@@ -56,3 +56,5 @@ def test_draft_rollout_restores_prefix_cache():
     assert provider.cache.get_seq_length() == 3
     provider.advance(torch.tensor([4]))
     assert provider.cache.get_seq_length() == 4
+    provider.advance(torch.tensor([[5, 6]]))
+    assert provider.cache.get_seq_length() == 6

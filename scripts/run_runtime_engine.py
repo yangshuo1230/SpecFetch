@@ -32,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-tokens", type=int, default=512)
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--lookahead", type=int, default=4)
+    parser.add_argument(
+        "--draft-refresh-tokens",
+        type=int,
+        default=0,
+        help="Target tokens consumed per draft rollout; 0 uses lookahead",
+    )
     parser.add_argument("--sink-tokens", type=int, default=4)
     parser.add_argument("--recent-tokens", type=int, default=256)
     parser.add_argument("--kv-chunk-tokens", type=int, default=64)
@@ -54,6 +60,9 @@ def synchronize(device: str) -> None:
 def main() -> None:
     args = parse_args()
     require_idle_gpus(1000, 10)
+    refresh_tokens = args.draft_refresh_tokens or args.lookahead
+    if not 0 < refresh_tokens <= args.lookahead:
+        raise ValueError("draft-refresh-tokens must be in [1, lookahead]")
     config = RuntimeConfig(
         sink_tokens=args.sink_tokens,
         recent_tokens=args.recent_tokens,
@@ -118,6 +127,7 @@ def main() -> None:
         prefill_seconds = time.perf_counter() - start
         start = time.perf_counter()
         provider.initialize(input_ids, request_ids)
+        plan = provider.predict(output.state)
         synchronize(args.device)
         draft_prefill_seconds = time.perf_counter() - start
 
@@ -128,25 +138,31 @@ def main() -> None:
         step_seconds = []
         selected_chunks = []
         predicted_mass = []
+        pending_actual: list[torch.Tensor] = []
+        remaining_horizons = plan.horizons[:refresh_tokens]
         for _ in range(max(0, args.max_new_tokens - 1)):
             step_start = time.perf_counter()
-            draft_start = time.perf_counter()
-            plan = provider.predict(output.state)
-            synchronize(args.device)
-            prediction_seconds = time.perf_counter() - draft_start
+            draft_step_seconds = 0.0
+            if not remaining_horizons:
+                draft_start = time.perf_counter()
+                provider.advance(torch.stack(pending_actual, dim=1))
+                plan = provider.predict(output.state)
+                synchronize(args.device)
+                draft_step_seconds = time.perf_counter() - draft_start
+                pending_actual.clear()
+                remaining_horizons = plan.horizons[:refresh_tokens]
             target_start = time.perf_counter()
             output = engine.decode(
                 token_ids,
                 output.state,
-                plan.horizons,
+                remaining_horizons,
                 prefetch=not args.disable_prefetch,
             )
             synchronize(args.device)
             target_decode_seconds.append(time.perf_counter() - target_start)
-            draft_start = time.perf_counter()
-            provider.advance(token_ids)
-            synchronize(args.device)
-            draft_seconds.append(prediction_seconds + time.perf_counter() - draft_start)
+            draft_seconds.append(draft_step_seconds)
+            pending_actual.append(token_ids)
+            remaining_horizons = remaining_horizons[1:]
             token_ids = output.logits[:, -1].argmax(dim=-1).cpu()
             generated.append(token_ids)
             step_seconds.append(time.perf_counter() - step_start)

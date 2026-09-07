@@ -96,8 +96,12 @@ class DraftSignalProvider:
     def advance(self, actual_token_ids: torch.Tensor) -> None:
         if self.cache is None or len(actual_token_ids) != len(self.request_ids):
             raise RuntimeError("initialize draft state before advancing")
+        if actual_token_ids.ndim == 1:
+            actual_token_ids = actual_token_ids[:, None]
+        elif actual_token_ids.ndim != 2:
+            raise ValueError("actual tokens must have shape (batch,) or (batch, tokens)")
         output = self.model(
-            input_ids=actual_token_ids[:, None].to(self.device),
+            input_ids=actual_token_ids.to(self.device),
             past_key_values=self.cache,
             use_cache=True,
             return_dict=True,
