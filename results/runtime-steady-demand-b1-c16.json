@@ -1,0 +1,81 @@
+{
+  "configuration": {
+    "batch_size": 1,
+    "context_tokens": 16,
+    "device": "cuda:0",
+    "disable_prefetch": true,
+    "draft": "/root/models/Qwen3-0.6B",
+    "draft_refresh_tokens": 0,
+    "expert_cache_slots": 64,
+    "kv_cache_slots": 64,
+    "kv_chunk_tokens": 4,
+    "lazy_expert_store": false,
+    "lookahead": 4,
+    "marginal_patience": 2,
+    "marginal_threshold": 0.01,
+    "mass_threshold": 0.95,
+    "max_new_tokens": 9,
+    "minimum_old_chunks": 2,
+    "no_pin_experts": false,
+    "output": "results/runtime-steady-demand-b1-c16.json",
+    "policy": "demand_only",
+    "probes": "results/expert-probes.pt",
+    "prompts": "prompts.json",
+    "recent_tokens": 4,
+    "sink_tokens": 4,
+    "target": "/root/models/Qwen3-30B-A3B"
+  },
+  "generated_text": [
+    "<think>\nOkay, the user asked me to"
+  ],
+  "generated_token_ids": [
+    [
+      151667,
+      198,
+      32313,
+      11,
+      279,
+      1196,
+      4588,
+      752,
+      311
+    ]
+  ],
+  "performance": {
+    "decode_step_seconds": 6.18777658068575,
+    "decode_throughput_tokens_per_second": 1.2928715016910668,
+    "draft_decode_seconds": 1.8174963921774179,
+    "draft_prefill_seconds": 1.8267333949916065,
+    "end_to_end_tokens_per_second": 0.6639123125039283,
+    "expert_preload_seconds": 47.5131393650081,
+    "initialization_seconds": 55.319854811998084,
+    "mean_tpot_ms": 773.4720725857187,
+    "p50_tpot_ms": 533.1419669091702,
+    "peak_gpu_gib": 4.565621852874756,
+    "prefill_seconds": 5.54149709106423,
+    "request_seconds": 13.556007066741586,
+    "target_decode_seconds": 4.36963766394183
+  },
+  "residency": {
+    "evictions": 6114,
+    "wasted_prefetches": 0
+  },
+  "sparse_kv": {
+    "mean_predicted_mass": 1.0,
+    "mean_selected_old_chunks_per_layer_request": 2.5
+  },
+  "transfer": {
+    "bytes": 54013255680,
+    "completed": 6242,
+    "demand_hits": 441,
+    "demand_misses": 6242,
+    "demand_requests": 6683,
+    "demand_transfers": 6242,
+    "demand_wait_ms": 4709.514555521309,
+    "dropped_speculative": 0,
+    "failed": 0,
+    "speculative_transfers": 0,
+    "submitted": 6242,
+    "transfer_ms": 2318.495370913297
+  }
+}

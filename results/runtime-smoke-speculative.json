@@ -1,0 +1,73 @@
+{
+  "configuration": {
+    "batch_size": 1,
+    "context_tokens": 16,
+    "device": "cuda:0",
+    "disable_prefetch": false,
+    "draft": "/root/models/Qwen3-0.6B",
+    "expert_cache_slots": 64,
+    "kv_cache_slots": 64,
+    "kv_chunk_tokens": 4,
+    "lazy_expert_store": false,
+    "lookahead": 4,
+    "marginal_patience": 2,
+    "marginal_threshold": 0.01,
+    "mass_threshold": 0.95,
+    "max_new_tokens": 2,
+    "minimum_old_chunks": 2,
+    "no_pin_experts": false,
+    "output": "results/runtime-smoke-speculative.json",
+    "policy": "speculative",
+    "probes": "results/expert-probes.pt",
+    "prompts": "prompts.json",
+    "recent_tokens": 4,
+    "sink_tokens": 4,
+    "target": "/root/models/Qwen3-30B-A3B"
+  },
+  "generated_text": [
+    "<think>\n"
+  ],
+  "generated_token_ids": [
+    [
+      151667,
+      198
+    ]
+  ],
+  "performance": {
+    "decode_step_seconds": 2.652948528062552,
+    "decode_throughput_tokens_per_second": 0.3769390884979965,
+    "draft_decode_seconds": 1.8181675628293306,
+    "draft_prefill_seconds": 0.025132122915238142,
+    "end_to_end_tokens_per_second": 0.24077599963441212,
+    "expert_preload_seconds": 49.431246171938255,
+    "initialization_seconds": 57.23445746884681,
+    "mean_tpot_ms": 2652.948528062552,
+    "p50_tpot_ms": 2652.948528062552,
+    "peak_gpu_gib": 4.573453426361084,
+    "prefill_seconds": 5.628395090112463,
+    "request_seconds": 8.306475741090253,
+    "target_decode_seconds": 0.8347015520557761
+  },
+  "residency": {
+    "evictions": 3025,
+    "wasted_prefetches": 31
+  },
+  "sparse_kv": {
+    "mean_predicted_mass": 1.0,
+    "mean_selected_old_chunks_per_layer_request": 2
+  },
+  "transfer": {
+    "bytes": 28737110016,
+    "completed": 3153,
+    "demand_hits": 106,
+    "demand_misses": 3025,
+    "demand_requests": 3131,
+    "demand_transfers": 3025,
+    "demand_wait_ms": 2413.537301821634,
+    "dropped_speculative": 957,
+    "failed": 0,
+    "speculative_transfers": 128,
+    "submitted": 3153,
+    "transfer_ms": 1254.6614375896752
+  }
+}

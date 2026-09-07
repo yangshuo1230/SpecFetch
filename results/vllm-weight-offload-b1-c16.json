@@ -1,0 +1,45 @@
+{
+  "configuration": {
+    "batch_size": 1,
+    "context_tokens": 16,
+    "cpu_offload_gb": 54.0,
+    "enforce_eager": true,
+    "gpu_memory_utilization": 0.1,
+    "kv_offloading_size": null,
+    "max_new_tokens": 9,
+    "model": "/root/models/Qwen3-30B-A3B",
+    "output": "results/vllm-weight-offload-b1-c16.json",
+    "physical_gpu_index": 1,
+    "prompts": "prompts.json"
+  },
+  "engine_options": {
+    "cpu_offload_gb": 54.0,
+    "dtype": "bfloat16",
+    "enforce_eager": true,
+    "gpu_memory_utilization": 0.1,
+    "model": "/root/models/Qwen3-30B-A3B",
+    "trust_remote_code": true
+  },
+  "generated_text": [
+    "<think>\nOkay, the user is asking me"
+  ],
+  "generated_token_ids": [
+    [
+      151667,
+      198,
+      32313,
+      11,
+      279,
+      1196,
+      374,
+      10161,
+      752
+    ]
+  ],
+  "performance": {
+    "initialization_seconds": 66.05986648192629,
+    "mean_tpot_ms_including_prefill": 297.1975756550415,
+    "request_seconds": 2.6747781808953732,
+    "throughput_tokens_per_second": 3.364764997816484
+  }
+}
