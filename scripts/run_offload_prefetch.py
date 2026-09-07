@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import random
 from collections import defaultdict
@@ -495,6 +496,7 @@ def main() -> None:
             )
         )
     del target_model
+    gc.collect()
     torch.cuda.empty_cache()
 
     # Check again between the two model phases, while this process owns no model memory.
@@ -506,6 +508,7 @@ def main() -> None:
         print(f"[draft {index}/{len(targets)}] independent per-step rollouts", flush=True)
         traces.append(collect_prompt(draft_model, target, args, tokenizer.eos_token_id))
     del draft_model
+    gc.collect()
     torch.cuda.empty_cache()
 
     train, evaluation = traces[:split], traces[split:]
