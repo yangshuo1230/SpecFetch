@@ -184,4 +184,5 @@ class OffloadedExpertExecutor:
             outputs = F.linear(activated, weights.down)
             outputs *= routing[token_indices, route_indices, None]
             result.index_add_(0, token_indices, outputs.to(result.dtype))
+            self.runtime.release(key)
         return result

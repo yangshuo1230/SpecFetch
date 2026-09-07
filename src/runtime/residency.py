@@ -28,6 +28,8 @@ class ResourceRecord:
     state: ResourceState = ResourceState.CPU_ONLY
     gpu_value: Any = None
     pinned: bool = False
+    priority: float = 0.0
+    deadline: int = 0
 
 
 class ResidencyManager:
@@ -82,12 +84,25 @@ class ResidencyManager:
             record.state = ResourceState.CPU_ONLY
             return True
 
+    def _eviction_candidate(
+        self, kind: ResourceKind, protected: set[ResourceKey]
+    ) -> ResourceKey | None:
+        lru = self._resident[kind]
+        order = {key: index for index, key in enumerate(lru)}
+        candidates = [key for key in lru if key not in protected and not self._records[key].pinned]
+        return min(
+            candidates,
+            key=lambda key: (
+                self._records[key].priority,
+                -self._records[key].deadline,
+                order[key],
+            ),
+            default=None,
+        )
+
     def _evict_one(self, kind: ResourceKind, protected: set[ResourceKey]) -> None:
         lru = self._resident[kind]
-        victim = next(
-            (key for key in lru if key not in protected and not self._records[key].pinned),
-            None,
-        )
+        victim = self._eviction_candidate(kind, protected)
         if victim is None:
             raise CacheFullError(f"no evictable {kind.value} cache slot")
         lru.pop(victim)
@@ -96,7 +111,15 @@ class ResidencyManager:
         record.state = ResourceState.CPU_ONLY
         self.evictions += 1
 
-    def begin_transfer(self, key: ResourceKey, protected: set[ResourceKey] | None = None) -> bool:
+    def begin_transfer(
+        self,
+        key: ResourceKey,
+        *,
+        priority: float = 0.0,
+        deadline: int = 0,
+        demand: bool = False,
+        protected: set[ResourceKey] | None = None,
+    ) -> bool:
         with self._condition:
             record = self._records[key]
             if record.state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
@@ -105,9 +128,18 @@ class ResidencyManager:
             protected = protected or set()
             used = len(self._resident[kind]) + len(self._reserved[kind])
             if used >= self.capacities[kind]:
+                victim = self._eviction_candidate(kind, protected | {key})
+                if victim is None:
+                    raise CacheFullError(f"no evictable {kind.value} cache slot")
+                if not demand and self._records[victim].priority >= priority:
+                    record.state = ResourceState.CPU_ONLY
+                    self._condition.notify_all()
+                    return False
                 self._evict_one(kind, protected | {key})
             self._reserved[kind].add(key)
             record.state = ResourceState.IN_FLIGHT
+            record.priority = priority
+            record.deadline = deadline
             return True
 
     def complete_transfer(self, key: ResourceKey, gpu_value: Any) -> None:
@@ -140,6 +172,18 @@ class ResidencyManager:
     def set_pinned(self, key: ResourceKey, pinned: bool) -> None:
         with self._condition:
             self._records[key].pinned = pinned
+
+    def update_lease(self, key: ResourceKey, priority: float, deadline: int) -> None:
+        with self._condition:
+            record = self._records[key]
+            record.priority = max(record.priority, priority)
+            record.deadline = min(record.deadline, deadline) if record.deadline else deadline
+
+    def release(self, key: ResourceKey) -> None:
+        with self._condition:
+            record = self._records[key]
+            record.priority = 0.0
+            record.deadline = 0
 
     def evict(self, key: ResourceKey) -> bool:
         with self._condition:

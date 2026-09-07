@@ -64,6 +64,11 @@ class MemoryRequestQueue:
         with self._condition:
             return len(self._requests)
 
+    @property
+    def current_step(self) -> int:
+        with self._condition:
+            return self._step
+
     def contains(self, key: ResourceKey) -> bool:
         with self._condition:
             return key in self._requests

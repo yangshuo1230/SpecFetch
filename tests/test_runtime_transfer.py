@@ -59,3 +59,14 @@ def test_demand_promotes_queued_resource():
     assert value == "gpu:cpu:1"
     assert resource(1) in backend.copies
     worker.close()
+
+
+def test_low_priority_prefetch_cannot_evict_high_priority_lease():
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    residency.register_cpu(resource(0), "a", 1)
+    residency.register_cpu(resource(1), "b", 1)
+    assert residency.begin_transfer(resource(0), priority=10, deadline=1)
+    residency.complete_transfer(resource(0), "gpu:a")
+    assert not residency.begin_transfer(resource(1), priority=1, deadline=5)
+    assert residency.state(resource(0)) == ResourceState.GPU_RESIDENT
+    assert residency.state(resource(1)) == ResourceState.CPU_ONLY

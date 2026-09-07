@@ -80,7 +80,12 @@ class TransferWorker:
             request = self.queue.pop(block=True)
             if request is None:
                 return
-            if not self.residency.begin_transfer(request.key):
+            if not self.residency.begin_transfer(
+                request.key,
+                priority=request.priority(self.queue.current_step),
+                deadline=request.deadline,
+                demand=request.demand,
+            ):
                 continue
             self.metrics.submitted += 1
             start = time.perf_counter()
@@ -131,7 +136,13 @@ class OffloadRuntime:
         miss_cost_ms: float,
     ) -> None:
         state = self.residency.state(key)
-        if state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
+        if state == ResourceState.GPU_RESIDENT:
+            record = self.residency.record(key)
+            urgency = 1 / max(1, deadline - self.queue.current_step)
+            priority = miss_cost_ms * probability * urgency / max(record.size_bytes / 2**20, 1e-6)
+            self.residency.update_lease(key, priority, deadline)
+            return
+        if state == ResourceState.IN_FLIGHT:
             return
         record = self.residency.record(key)
         self.residency.mark_queued(key)
@@ -177,3 +188,6 @@ class OffloadRuntime:
         if removed and not self.queue.contains(key):
             self.residency.unqueue(key)
         return removed
+
+    def release(self, key: ResourceKey) -> None:
+        self.residency.release(key)
