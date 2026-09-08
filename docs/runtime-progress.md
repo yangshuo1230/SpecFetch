@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-07 21:32 UTC  
+Updated: 2026-09-08 01:29 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## Objective and semantics
@@ -23,6 +23,12 @@ count. Unseen Target mass is never used online.
   eviction leases.
 - One transfer worker that owns a dedicated CUDA H2D stream; compute only submits or
   waits for dependencies.
+- Coalesced speculative admission and same-class transfer batches. A decode layer
+  promotes all missing experts before waiting, then issues their copies with one CUDA
+  stream synchronization. Demand and speculation are never mixed in one transfer batch.
+- Fixed packed expert slots: gate/up share a fused weight bank and evicted slots are
+  overwritten in place rather than allocated again. Large prefill batches stream one
+  expert at a time so live references can never outnumber physical slots.
 - Sink/recent/old KV layout, pinned-CPU old chunks, sparse retrieval, next-step retention
   and eviction.
 - Original Qwen3 safetensors expert source, including experts whose three matrices cross
@@ -33,11 +39,18 @@ count. Unseen Target mass is never used online.
 - Stateful Qwen3-0.6B predictor whose KV cache is rolled back after a four-token rollout.
   One rollout is consumed over four Target steps before refresh.
 - Fixed-batch Qwen3 adapter and a framework-neutral continuous-batch admission core.
+- Runnable variable-length continuous batching with independent per-request Draft caches,
+  separate prefill admission, completion removal, backfill, and request-private KV cleanup.
+- Optional vLLM Triton FusedMoE adapter over physical expert slot IDs, with the readable
+  PyTorch executor retained as the default until the CUDA path is benchmarked.
+- Phase-separated transfer/residency counters and an opt-in CPU full-attention shadow.
+  One shadow run evaluates 0.90/0.95/0.99 thresholds counterfactually and reports Target
+  mass coverage, relative L2 error, cosine similarity, and selected chunk count.
 - Isolated vLLM 0.11.1 baseline harness and generation-quality comparison tool.
 
 ## Correctness evidence
 
-- 46 CPU tests pass; one CUDA test is opt-in to avoid touching a busy GPU.
+- 60 CPU tests pass; one CUDA test is opt-in to avoid touching a busy GPU.
 - On a random miniature Qwen3-MoE, custom dense prefill and incremental decode logits
   match the Transformers reference when all KV is selected.
 - The vectorized and grouped expert executors match numerically.
@@ -45,6 +58,9 @@ count. Unseen Target mass is never used online.
   storage, real H2D, two old KV chunks per layer, and no transfer failures.
 - Demand-only and speculative modes produced the same nine tokens in the current exact
   two-old-chunk workload.
+- Tiny Qwen3-MoE tests exercise variable prompt/output lengths, completion backfill,
+  packed-slot reuse, a cache capacity smaller than the routed expert set, logical-to-
+  physical fused routing, batched demand copies, and full-attention shadow metrics.
 
 ## Current measured state
 
@@ -59,6 +75,11 @@ The short context deliberately forces two old chunks while making full selection
 | SpecFetch speculative, four admitted horizons | 4.57 GiB peak | 14.319 | 0.629 tok/s |
 | SpecFetch speculative, one admitted horizon | 4.58 GiB peak | 14.075 | 0.639 tok/s |
 | SpecFetch demand-only, vectorized decode | 4.64 GiB peak | 13.134 | 0.685 tok/s |
+| SpecFetch speculative, vectorized decode, horizon 1 | 4.64 GiB peak | 13.524 | 0.665 tok/s |
+
+These measurements predate fixed slots, coalesced admission, batched expert demand,
+scoped residency leases, and the optional fused kernel. They are retained as the
+pre-optimization baseline and must not be presented as current optimized performance.
 
 The production baseline was run with `VLLM_USE_DEEP_GEMM=0`,
 `VLLM_MOE_USE_DEEP_GEMM=0`, and `--enforce-eager`. The PPU build otherwise JIT-warms
@@ -73,28 +94,33 @@ Vectorizing decode experts improves Target decode time from 4.370 to 4.098 secon
 
 ## Known gaps
 
-1. The reference engine remains about 4.9x slower than vLLM weight offload on this tiny
-   workload. Per-object allocation/copy and Python queue upserts remain expensive.
-2. Expert tensors need fixed GPU slots and a grouped/fused MoE kernel; route-wise
-   `torch.stack` is only an intermediate implementation.
-3. Transfer metrics currently include prefill and decode together; phase deltas should be
-   reported separately.
-4. The continuous-batch state machine is tested but not yet wired into variable-length
-   Qwen execution.
-5. Batch-4, 512/4K contexts and threshold quality sweeps have not run yet.
-6. vLLM and the custom adapter use different BF16 attention/MoE kernel orders. Their
+1. The new fixed-slot/batched-transfer path has not had a real-model CUDA run because all
+   four GPUs are occupied by an unrelated job. Its performance delta and peak residency
+   therefore remain unverified.
+2. The optional vLLM FusedMoE adapter has mapping/shape tests but still needs numerical
+   and latency validation on the actual Qwen3-30B-A3B tensors. PyTorch remains the CLI
+   default until that evidence exists.
+3. Batch-4 512/4K contexts, real continuous batching, and the 0.90/0.95/0.99 shadow sweep
+   have not run on the full model.
+4. The continuous runner performs admitted prefills sequentially. Chunked prefill and
+   prefill/decode kernel-level interleaving remain future production integration work.
+5. vLLM and the custom adapter use different BF16 attention/MoE kernel orders. Their
    first six generated tokens match in the short test, after which rounding changes the
    greedy path. Quality must be assessed statistically, not by requiring bit identity to
    vLLM.
 
 ## Next actions
 
-1. Introduce fixed packed GPU expert slots and coalesced queue admission.
-2. Separate prefill/decode transfer counters and quantify cache hit utility.
-3. Re-run demand/speculative batch-1 smoke, then batch 4 at context 512.
-4. Run quality sweeps for mass thresholds 0.90/0.95/0.99 against a full-attention shadow.
-5. Run vLLM full and 54-GiB weight-offload baselines at matching batch/context lengths.
-6. Integrate request removal/backfill into the Qwen adapter, then measure continuous batch.
+1. When a GPU is idle, run a CUDA regression for packed slots and batched H2D, then
+   re-run batch-1 demand/speculative with both PyTorch and vLLM MoE backends.
+2. Run the full-attention shadow once with thresholds 0.90/0.95/0.99 and select a quality
+   operating point before performance testing longer contexts.
+3. Run batch 4 at context 512 and 4K, followed by the matching vLLM full-resident and
+   54-GiB weight-offload baselines.
+4. Run the variable-output continuous-batch CLI and report throughput plus request-level
+   latency; then add chunked prefill only if profiling shows admission stalls dominate.
+5. Update this document with post-optimization evidence, merge the feature branch to
+   `main`, and push only after every correctness/performance gate is accounted for.
 
 ## Safety and versioning
 

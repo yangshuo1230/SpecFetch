@@ -28,6 +28,7 @@ Core modules are deliberately framework-neutral:
 | `expert.py` | Original checkpoint expert source and exact Top-8 MoE |
 | `predictor.py` | Incremental, rollback-safe four-token draft rollout |
 | `qwen3_engine.py` | Transformers Qwen3 projections/router adapter |
+| `continuous_engine.py` | Variable-length admission, completion and backfill loop |
 | `model_loader.py` | Meta loader that never materializes experts on GPU |
 
 Train the expert probes and run the two causally matched policies:
@@ -61,6 +62,35 @@ python -m scripts.run_runtime_engine \
 Both runtime modes use the same draft-ranked sparse KV set. `demand-only` suppresses early H2D but
 retains the predictor for an apples-to-apples sparse-attention choice. Timing includes draft prefill,
 rollout, draft-cache advancement, target compute and every demand wait.
+
+For quality analysis, one non-performance run can compare every sparse attention output with a
+CPU full-attention shadow and evaluate several stopping thresholds on the same Target queries:
+
+~~~bash
+python -m scripts.run_runtime_engine \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --probes results/expert-probes.pt --prompts prompts.json \
+  --context-tokens 512 --batch-size 4 \
+  --shadow-attention --shadow-thresholds 0.90,0.95,0.99 \
+  --output results/runtime-shadow-batch4-c512.json
+~~~
+
+Shadow runs deliberately mark latency as invalid. The vLLM fused-MoE adapter is opt-in with
+`--moe-backend vllm`; the default remains `torch` until actual-model numerical and latency checks
+pass. Both backends use the same CPU source, packed GPU expert slots, queue and residency policy.
+
+Variable output lengths and request backfill are available through the continuous runner:
+
+~~~bash
+python -m scripts.run_continuous_runtime \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --probes results/expert-probes.pt --prompts prompts.json \
+  --request-count 8 --max-batch-size 4 --context-tokens 512 \
+  --output-lengths 4,8,12,16 \
+  --output results/runtime-continuous.json
+~~~
 
 The primary experiment treats the draft as a prefetch oracle, not as a source of tokens for target
 verification. At every target step, the draft independently rolls out from only the currently known
