@@ -39,6 +39,11 @@ class ExpertProbeBank:
     def predict(self, target_layer: int, hidden_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
         entry = self.entries[target_layer]
         features = hidden_states[entry.draft_layer + 1][:, -1].float().cpu()
+        return self.predict_features(target_layer, features)
+
+    def predict_features(self, target_layer: int, features: torch.Tensor) -> torch.Tensor:
+        """使用已搬到 CPU 的特征，避免相同 Draft 层重复同步。"""
+        entry = self.entries[target_layer]
         scores = predict_probe(entry.probe, features)
         return torch.sigmoid(scores)
 
@@ -173,7 +178,7 @@ class DraftSignalProvider:
         proposed = []
         outputs = []
         for _ in range(self.lookahead):
-            proposed.append(token.detach().cpu())
+            proposed.append(token)
             output = self.model(
                 input_ids=token[:, None],
                 past_key_values=self.cache,
@@ -191,17 +196,28 @@ class DraftSignalProvider:
         horizons = []
         for output in outputs:
             prediction = StepPredictions()
+            cpu_attentions: dict[int, torch.Tensor] = {}
+            cpu_features: dict[int, torch.Tensor] = {}
             for target_layer in range(target_layers):
                 draft_layer = map_layer(target_layer, target_layers, draft_layers)
-                attention = output.attentions[draft_layer][:, :, -1]
+                if draft_layer not in cpu_attentions:
+                    cpu_attentions[draft_layer] = (
+                        output.attentions[draft_layer][:, :, -1].detach().float().cpu()
+                    )
+                attention = cpu_attentions[draft_layer]
                 for request_index, request_id in enumerate(self.request_ids):
                     ranges = target_state.kv[(request_id, target_layer)].old_ranges
                     prediction.kv[(request_id, target_layer)] = aggregate_old_chunk_mass(
                         attention[request_index], ranges
                     )
                 if self.probe_bank is not None:
-                    prediction.experts[target_layer] = self.probe_bank.predict(
-                        target_layer, output.hidden_states
+                    feature_layer = self.probe_bank.entries[target_layer].draft_layer
+                    if feature_layer not in cpu_features:
+                        cpu_features[feature_layer] = (
+                            output.hidden_states[feature_layer + 1][:, -1].detach().float().cpu()
+                        )
+                    prediction.experts[target_layer] = self.probe_bank.predict_features(
+                        target_layer, cpu_features[feature_layer]
                     )
             horizons.append(prediction)
-        return DraftPredictionPlan(horizons, torch.stack(proposed, dim=1))
+        return DraftPredictionPlan(horizons, torch.stack(proposed, dim=1).detach().cpu())

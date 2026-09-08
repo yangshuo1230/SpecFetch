@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 07:48 UTC
+Updated: 2026-09-08 07:51 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -75,6 +75,9 @@ count. Unseen Target mass is never used online.
 - lookahead 耗尽后的 Draft 刷新会按模型、probe、lookahead、缓存长度和待推进 token 数分组；
   兼容请求临时合并 KV，批量 advance/rollout 后再拆回私有状态。不同长度或不同进度的
   请求不会强行合并；结果报告刷新批次数和最大刷新批大小。
+- 每个 horizon 的 Draft attention 和 hidden feature 现在按唯一 Draft 层一次性搬到 CPU
+  并复用，避免对每个 Target 层、请求和旧 KV 块反复触发标量同步；lookahead token 也改为
+  在 rollout 末尾一次性同步。实际 GPU 时延收益待空闲后复测，不以 CPU 测试代替性能证据。
 - Optional vLLM Triton FusedMoE adapter over physical expert slot IDs, with the readable
   PyTorch executor retained as the default until the CUDA path is benchmarked.
 - Phase-separated transfer/residency counters and an opt-in CPU full-attention shadow.

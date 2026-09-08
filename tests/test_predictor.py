@@ -31,7 +31,9 @@ def test_probe_bank_round_trip(tmp_path):
     loaded = ExpertProbeBank.load(path)
     hidden = (torch.zeros(1, 1, 2), torch.tensor([[[2.0, -2.0]]]))
     prediction = loaded.predict(0, hidden)
+    cached_prediction = loaded.predict_features(0, hidden[1][:, -1].float())
     assert prediction[0, 0] > prediction[0, 1]
+    assert torch.equal(prediction, cached_prediction)
 
 
 def test_draft_rollout_restores_prefix_cache():
@@ -53,6 +55,7 @@ def test_draft_rollout_restores_prefix_cache():
     state = BatchState(["r0"], [3], {})
     plan = provider.predict(state)
     assert plan.token_ids.shape == (1, 2)
+    assert plan.token_ids.device.type == "cpu"
     assert len(plan.horizons) == 2
     assert provider.cache.get_seq_length() == 3
     provider.advance(torch.tensor([4]))

@@ -99,6 +99,8 @@ python -m scripts.run_continuous_runtime \
 请求私有 KV 缓存供独立推进；首轮 lookahead 同样先按组计算，再拆分为请求私有预测。
 后续刷新只合并缓存长度与推进进度兼容的请求，完成批量 advance/rollout 后立即恢复私有
 状态，并在结果中记录刷新批次及其峰值大小。
+Draft attention 与 probe feature 按唯一 Draft 层批量搬到 CPU 后复用，避免在层、请求和
+旧 KV 块的内层循环中反复产生设备同步。
 
 The primary experiment treats the draft as a prefetch oracle, not as a source of tokens for target
 verification. At every target step, the draft independently rolls out from only the currently known
