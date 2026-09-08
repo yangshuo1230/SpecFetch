@@ -163,14 +163,16 @@ def main() -> None:
         output = engine.prefill(input_ids, request_ids)
         synchronize(args.device)
         prefill_seconds = time.perf_counter() - start
-        transfer_after_prefill = worker.metrics_snapshot()
+        transfer_after_prefill, prefill_transfer = worker.phase_metrics_since(transfer_start)
         residency_after_prefill = (residency.evictions, residency.wasted_prefetches)
         start = time.perf_counter()
         provider.initialize(input_ids, request_ids)
         plan = provider.predict(output.state)
         synchronize(args.device)
         draft_prefill_seconds = time.perf_counter() - start
-        transfer_after_draft_prefill = worker.metrics_snapshot()
+        transfer_after_draft_prefill, draft_prefill_transfer = worker.phase_metrics_since(
+            transfer_after_prefill
+        )
         residency_after_draft_prefill = (residency.evictions, residency.wasted_prefetches)
 
         token_ids = output.logits[:, -1].argmax(dim=-1).cpu()
@@ -255,7 +257,7 @@ def main() -> None:
     finally:
         worker.close()
 
-    transfer_end = worker.metrics_snapshot()
+    transfer_end, decode_transfer = worker.phase_metrics_since(transfer_after_draft_prefill)
     residency_end = (residency.evictions, residency.wasted_prefetches)
 
     tokens = torch.stack(generated, dim=1)
@@ -313,9 +315,9 @@ def main() -> None:
         },
         "transfer": vars(transfer_end),
         "transfer_by_phase": {
-            "prefill": vars(transfer_after_prefill.delta(transfer_start)),
-            "draft_prefill": vars(transfer_after_draft_prefill.delta(transfer_after_prefill)),
-            "decode": vars(transfer_end.delta(transfer_after_draft_prefill)),
+            "prefill": vars(prefill_transfer),
+            "draft_prefill": vars(draft_prefill_transfer),
+            "decode": vars(decode_transfer),
         },
         "residency": {
             "evictions": residency.evictions,

@@ -265,6 +265,7 @@ class TransferWorker:
         if callable(release_gpu):
             residency.set_eviction_callback(release_gpu)
         self.metrics = TransferMetrics()
+        self._phase_maximum_transfer_batch = 0
         self._thread: threading.Thread | None = None
         self._error: BaseException | None = None
 
@@ -311,6 +312,9 @@ class TransferWorker:
             self.metrics.transfer_batches += 1
             self.metrics.maximum_transfer_batch = max(
                 self.metrics.maximum_transfer_batch, len(accepted)
+            )
+            self._phase_maximum_transfer_batch = max(
+                self._phase_maximum_transfer_batch, len(accepted)
             )
             start = time.perf_counter()
             try:
@@ -359,6 +363,16 @@ class TransferWorker:
         synchronizing away intended transfer/compute overlap.
         """
         return replace(self.metrics)
+
+    def phase_metrics_since(
+        self, earlier: TransferMetrics
+    ) -> tuple[TransferMetrics, TransferMetrics]:
+        """Return a new total snapshot and an additive delta with a phase-local peak."""
+        current = self.metrics_snapshot()
+        delta = current.delta(earlier)
+        delta.maximum_transfer_batch = self._phase_maximum_transfer_batch
+        self._phase_maximum_transfer_batch = 0
+        return current, delta
 
     def close(self, *, drain: bool = False) -> None:
         discarded = [] if drain else [request.key for request in self.queue.snapshot()]

@@ -79,6 +79,24 @@ def test_transfer_metric_snapshots_have_additive_deltas():
     assert delta.demand_hits == 2
 
 
+def test_phase_metrics_preserve_local_peak_instead_of_subtracting_gauge():
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    worker = TransferWorker(queue, residency, FakeBackend())
+    earlier = worker.metrics_snapshot()
+    worker.metrics.submitted = 5
+    worker.metrics.maximum_transfer_batch = 4
+    worker._phase_maximum_transfer_batch = 4
+    current, first = worker.phase_metrics_since(earlier)
+    assert first.submitted == 5
+    assert first.maximum_transfer_batch == 4
+    worker.metrics.submitted = 7
+    worker._phase_maximum_transfer_batch = 2
+    _, second = worker.phase_metrics_since(current)
+    assert second.submitted == 2
+    assert second.maximum_transfer_batch == 2
+
+
 def test_packed_expert_slots_reuse_released_storage():
     from src.runtime.expert import ExpertWeights
 
