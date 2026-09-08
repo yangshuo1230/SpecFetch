@@ -222,17 +222,43 @@ class MemoryRequestQueue:
             return True
 
     def pop(self, block: bool = False) -> MemoryRequest | None:
+        batch = self.pop_many(1, block=block)
+        return batch[0] if batch else None
+
+    def _peek_valid_locked(self) -> MemoryRequest | None:
+        while self._heap:
+            _, _, _, version, key = self._heap[0]
+            request = self._requests.get(key)
+            if request is not None and request.version == version:
+                return request
+            heapq.heappop(self._heap)
+        return None
+
+    def _pop_valid_locked(self) -> MemoryRequest | None:
+        request = self._peek_valid_locked()
+        if request is None:
+            return None
+        heapq.heappop(self._heap)
+        del self._requests[request.key]
+        return request
+
+    def pop_many(self, maximum: int, block: bool = False) -> list[MemoryRequest]:
+        """Pop one same-class transfer batch without mixing demand and speculation."""
+        if maximum <= 0:
+            raise ValueError("maximum batch size must be positive")
         with self._condition:
             while True:
-                while self._heap:
-                    _, _, _, version, key = heapq.heappop(self._heap)
-                    request = self._requests.get(key)
-                    if request is None or request.version != version:
-                        continue
-                    del self._requests[key]
-                    return request
+                first = self._pop_valid_locked()
+                if first is not None:
+                    requests = [first]
+                    while len(requests) < maximum:
+                        next_request = self._peek_valid_locked()
+                        if next_request is None or next_request.demand != first.demand:
+                            break
+                        requests.append(self._pop_valid_locked())
+                    return requests
                 if not block or self._closed:
-                    return None
+                    return []
                 self._condition.wait()
 
     def snapshot(self) -> list[MemoryRequest]:

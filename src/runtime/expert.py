@@ -12,7 +12,7 @@ from safetensors import safe_open
 
 from src.runtime.memory_queue import ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager
-from src.runtime.transfer import OffloadRuntime, PrefetchRequest
+from src.runtime.transfer import DemandRequest, OffloadRuntime, PrefetchRequest
 
 
 @dataclass(frozen=True)
@@ -185,17 +185,24 @@ class OffloadedExpertExecutor:
     def _load(
         self, selected: torch.Tensor, layer: int, request_ids: list[str]
     ) -> dict[int, tuple[ResourceKey, ExpertWeights]]:
-        loaded = {}
+        dependencies = {}
         for expert in selected.unique().tolist():
             token_indices, _ = torch.where(selected == expert)
             key = self.registry.ensure(layer, expert)
-            weights = self.runtime.demand(
+            dependencies[expert] = (
                 key,
-                consumer="demand:" + ",".join(request_ids[index] for index in token_indices),
-                miss_cost_ms=self.miss_cost_ms,
+                DemandRequest(
+                    key,
+                    "demand:" + ",".join(request_ids[index] for index in token_indices),
+                    self.miss_cost_ms,
+                ),
             )
-            loaded[expert] = (key, weights)
-        return loaded
+        values = self.runtime.demand_many(
+            [request for _, request in dependencies.values()]
+        )
+        return {
+            expert: (key, values[key]) for expert, (key, _) in dependencies.items()
+        }
 
     def _vectorized(
         self,

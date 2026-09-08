@@ -161,13 +161,27 @@ class CudaTransferBackend:
         raise TypeError(f"unsupported transfer payload {type(value)}")
 
     def copy_to_gpu(self, key: ResourceKey, cpu_value: Any) -> Any:
+        return self.copy_many_to_gpu([(key, cpu_value)])[0]
+
+    def copy_many_to_gpu(self, items: list[tuple[ResourceKey, Any]]) -> list[Any]:
+        acquired = []
+        values = []
         with torch.cuda.stream(self.stream):
-            if key.kind == ResourceKind.EXPERT and self.expert_slots is not None:
-                gpu_value = self.expert_slots.acquire(key, cpu_value)
-            else:
-                gpu_value = self._copy(cpu_value)
-        self.stream.synchronize()
-        return gpu_value
+            try:
+                for key, cpu_value in items:
+                    if key.kind == ResourceKind.EXPERT and self.expert_slots is not None:
+                        gpu_value = self.expert_slots.acquire(key, cpu_value)
+                        acquired.append(key)
+                    else:
+                        gpu_value = self._copy(cpu_value)
+                    values.append(gpu_value)
+                self.stream.synchronize()
+            except Exception:
+                if self.expert_slots is not None:
+                    for key in acquired:
+                        self.expert_slots.release(key)
+                raise
+        return values
 
     def release_gpu(self, key: ResourceKey, gpu_value: Any) -> None:
         del gpu_value
@@ -203,6 +217,8 @@ class TransferMetrics:
     prefetch_enqueued: int = 0
     prefetch_batches: int = 0
     prefetch_enqueue_ms: float = 0.0
+    transfer_batches: int = 0
+    maximum_transfer_batch: int = 0
 
     def delta(self, earlier: TransferMetrics) -> TransferMetrics:
         """Return the per-field increase since an earlier snapshot."""
@@ -223,6 +239,13 @@ class PrefetchRequest:
     miss_cost_ms: float
 
 
+@dataclass(frozen=True)
+class DemandRequest:
+    key: ResourceKey
+    consumer: str
+    miss_cost_ms: float
+
+
 class TransferWorker:
     """Single owner of memory movement; compute never performs copies directly."""
 
@@ -231,10 +254,14 @@ class TransferWorker:
         queue: MemoryRequestQueue,
         residency: ResidencyManager,
         backend: TransferBackend,
+        max_batch_size: int = 32,
     ) -> None:
+        if max_batch_size <= 0:
+            raise ValueError("transfer batch size must be positive")
         self.queue = queue
         self.residency = residency
         self.backend = backend
+        self.max_batch_size = max_batch_size
         release_gpu = getattr(backend, "release_gpu", None)
         if callable(release_gpu):
             residency.set_eviction_callback(release_gpu)
@@ -250,46 +277,71 @@ class TransferWorker:
 
     def _run(self) -> None:
         while True:
-            request = self.queue.pop(block=True)
-            if request is None:
+            requests = self.queue.pop_many(self.max_batch_size, block=True)
+            if not requests:
                 return
-            mib = max(request.size_bytes / 2**20, 1e-6)
-            consumer_leases = {
-                consumer: (
-                    request.miss_cost_ms
-                    * probability
-                    / max(1, request.consumer_deadlines[consumer] - self.queue.current_step)
-                    / mib,
-                    request.consumer_deadlines[consumer],
-                )
-                for consumer, probability in request.consumer_probabilities.items()
-            }
-            if not self.residency.begin_transfer(
-                request.key,
-                priority=request.priority(self.queue.current_step),
-                deadline=request.deadline,
-                demand=request.demand,
-                consumer_leases=consumer_leases,
-            ):
-                if not request.demand:
+            accepted = []
+            for request in requests:
+                mib = max(request.size_bytes / 2**20, 1e-6)
+                consumer_leases = {
+                    consumer: (
+                        request.miss_cost_ms
+                        * probability
+                        / max(
+                            1,
+                            request.consumer_deadlines[consumer] - self.queue.current_step,
+                        )
+                        / mib,
+                        request.consumer_deadlines[consumer],
+                    )
+                    for consumer, probability in request.consumer_probabilities.items()
+                }
+                if self.residency.begin_transfer(
+                    request.key,
+                    priority=request.priority(self.queue.current_step),
+                    deadline=request.deadline,
+                    demand=request.demand,
+                    consumer_leases=consumer_leases,
+                ):
+                    accepted.append(request)
+                elif not request.demand:
                     self.metrics.dropped_speculative += 1
+            if not accepted:
                 continue
-            self.metrics.submitted += 1
+            self.metrics.submitted += len(accepted)
+            self.metrics.transfer_batches += 1
+            self.metrics.maximum_transfer_batch = max(
+                self.metrics.maximum_transfer_batch, len(accepted)
+            )
             start = time.perf_counter()
             try:
-                record = self.residency.record(request.key)
-                value = self.backend.copy_to_gpu(request.key, record.cpu_value)
-                self.residency.complete_transfer(request.key, value)
-                self.metrics.completed += 1
-                self.metrics.bytes += request.size_bytes
-                if request.demand:
-                    self.metrics.demand_transfers += 1
+                items = [
+                    (request.key, self.residency.record(request.key).cpu_value)
+                    for request in accepted
+                ]
+                copy_many = getattr(self.backend, "copy_many_to_gpu", None)
+                if callable(copy_many):
+                    values = copy_many(items)
                 else:
-                    self.metrics.speculative_transfers += 1
+                    values = [
+                        self.backend.copy_to_gpu(key, cpu_value) for key, cpu_value in items
+                    ]
+                if len(values) != len(accepted):
+                    raise RuntimeError("transfer backend returned the wrong batch length")
+                for request, value in zip(accepted, values):
+                    self.residency.complete_transfer(request.key, value)
+                    self.metrics.completed += 1
+                    self.metrics.bytes += request.size_bytes
+                    if request.demand:
+                        self.metrics.demand_transfers += 1
+                    else:
+                        self.metrics.speculative_transfers += 1
             except Exception as error:  # noqa: BLE001 - surface backend failures to compute
                 self._error = error
-                self.metrics.failed += 1
-                self.residency.fail_transfer(request.key)
+                for request in accepted:
+                    if self.residency.state(request.key) == ResourceState.IN_FLIGHT:
+                        self.metrics.failed += 1
+                        self.residency.fail_transfer(request.key)
             finally:
                 self.metrics.transfer_ms += (time.perf_counter() - start) * 1000
 
@@ -404,31 +456,61 @@ class OffloadRuntime:
         miss_cost_ms: float,
         timeout: float | None = None,
     ) -> Any:
-        self.worker.metrics.demand_requests += 1
-        state = self.residency.state(key)
-        if state == ResourceState.GPU_RESIDENT:
-            self.worker.metrics.demand_hits += 1
-            self.residency.mark_demand(key)
-            return self.residency.get_gpu(key)
-        self.worker.metrics.demand_misses += 1
-        record = self.residency.record(key)
-        if state == ResourceState.IN_FLIGHT:
-            self.residency.mark_demand(key)
-        if state != ResourceState.IN_FLIGHT:
-            self.residency.mark_queued(key)
-            self.queue.promote_demand(
-                key,
-                consumer=consumer,
-                size_bytes=record.size_bytes,
-                miss_cost_ms=miss_cost_ms,
+        return self.demand_many(
+            [DemandRequest(key, consumer, miss_cost_ms)], timeout=timeout
+        )[key]
+
+    def demand_many(
+        self,
+        requests: list[DemandRequest],
+        *,
+        timeout: float | None = None,
+    ) -> dict[ResourceKey, Any]:
+        """Promote all dependencies before waiting so H2D can form a batch."""
+        if not requests:
+            return {}
+        self.worker.metrics.demand_requests += len(requests)
+        values = {}
+        pending: list[ResourceKey] = []
+        updates = []
+        current_step = self.queue.current_step
+        for request in requests:
+            if request.miss_cost_ms < 0:
+                raise ValueError("miss_cost_ms must be non-negative")
+            state = self.residency.state(request.key)
+            if state == ResourceState.GPU_RESIDENT:
+                self.worker.metrics.demand_hits += 1
+                self.residency.mark_demand(request.key)
+                values[request.key] = self.residency.get_gpu(request.key)
+                continue
+            self.worker.metrics.demand_misses += 1
+            record = self.residency.record(request.key)
+            pending.append(request.key)
+            if state == ResourceState.IN_FLIGHT:
+                self.residency.mark_demand(request.key)
+                continue
+            self.residency.mark_queued(request.key)
+            updates.append(
+                QueueUpdate(
+                    request.key,
+                    request.consumer,
+                    1.0,
+                    current_step,
+                    record.size_bytes,
+                    request.miss_cost_ms,
+                    demand=True,
+                )
             )
+        self.queue.upsert_many(updates)
         start = time.perf_counter()
-        ready = self.residency.wait_resident(key, timeout)
+        for key in pending:
+            ready = self.residency.wait_resident(key, timeout)
+            self.worker.check()
+            if not ready:
+                raise TimeoutError(f"resource did not become resident: {key}")
+            values[key] = self.residency.get_gpu(key)
         self.worker.metrics.demand_wait_ms += (time.perf_counter() - start) * 1000
-        self.worker.check()
-        if not ready:
-            raise TimeoutError(f"resource did not become resident: {key}")
-        return self.residency.get_gpu(key)
+        return values
 
     def cancel(self, key: ResourceKey, consumer: str | None = None) -> bool:
         removed = self.queue.cancel(key, consumer)

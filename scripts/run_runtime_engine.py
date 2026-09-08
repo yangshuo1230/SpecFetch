@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-old-chunks", type=int, default=2)
     parser.add_argument("--expert-cache-slots", type=int, default=64)
     parser.add_argument("--kv-cache-slots", type=int, default=512)
+    parser.add_argument("--transfer-batch-size", type=int, default=32)
     parser.add_argument("--disable-prefetch", action="store_true")
     parser.add_argument(
         "--shadow-attention",
@@ -134,7 +135,9 @@ def main() -> None:
         }
     )
     backend = CudaTransferBackend(args.device, expert_slots=config.expert_cache_slots)
-    worker = TransferWorker(queue, residency, backend)
+    worker = TransferWorker(
+        queue, residency, backend, max_batch_size=args.transfer_batch_size
+    )
     runtime = OffloadRuntime(queue, residency, worker)
     engine = Qwen3SparseOffloadEngine(
         target,

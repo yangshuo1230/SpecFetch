@@ -5,6 +5,7 @@ import torch
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
 from src.runtime.transfer import (
+    DemandRequest,
     OffloadRuntime,
     PackedExpertSlots,
     TransferMetrics,
@@ -158,6 +159,35 @@ def test_consumer_lease_cancellation_and_demand_scope_recompute_priority():
     assert residency.record(key).priority == float("inf")
     residency.release(key)
     assert residency.record(key).priority == 3
+
+
+def test_demand_many_uses_one_backend_transfer_batch():
+    class BatchBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.batches = []
+
+        def copy_many_to_gpu(self, items):
+            self.batches.append([key for key, _ in items])
+            return [f"gpu:{value}" for _, value in items]
+
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 3, ResourceKind.KV: 1})
+    backend = BatchBackend()
+    worker = TransferWorker(queue, residency, backend)
+    runtime = OffloadRuntime(queue, residency, worker)
+    for index in range(3):
+        residency.register_cpu(resource(index), f"cpu:{index}", 1024)
+    worker.start()
+    values = runtime.demand_many(
+        [DemandRequest(resource(index), "r0", 1.0) for index in range(3)]
+    )
+    assert values == {resource(index): f"gpu:cpu:{index}" for index in range(3)}
+    assert len(backend.batches) == 1
+    assert set(backend.batches[0]) == {resource(0), resource(1), resource(2)}
+    assert worker.metrics.transfer_batches == 1
+    assert worker.metrics.maximum_transfer_batch == 3
+    worker.close()
 
 
 def test_low_priority_prefetch_cannot_evict_high_priority_lease():

@@ -74,3 +74,14 @@ def test_batch_upsert_merges_consumers_before_worker_observes_queue():
     assert first.key == key(1)
     assert first.expected_uses == pytest.approx(0.9)
     assert first.deadline == 2
+
+
+def test_pop_many_batches_demands_without_delaying_them_for_speculation():
+    queue = MemoryRequestQueue()
+    add(queue, 1, 0.9, 1)
+    queue.promote_demand(key(2), consumer="r0", size_bytes=1024, miss_cost_ms=1)
+    queue.promote_demand(key(3), consumer="r0", size_bytes=1024, miss_cost_ms=1)
+    demands = queue.pop_many(8)
+    assert {item.key for item in demands} == {key(2), key(3)}
+    assert all(item.demand for item in demands)
+    assert queue.pop().key == key(1)
