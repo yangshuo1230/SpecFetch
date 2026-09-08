@@ -221,6 +221,28 @@ class MemoryRequestQueue:
                     del self._requests[key]
             return True
 
+    def cancel_many(self, cancellations: list[tuple[ResourceKey, str]]) -> set[ResourceKey]:
+        """批量移除 consumer，每个受影响资源最多重建一次堆项。"""
+        grouped: dict[ResourceKey, set[str]] = {}
+        for key, consumer in cancellations:
+            grouped.setdefault(key, set()).add(consumer)
+        depleted = set()
+        with self._condition:
+            for key, consumers in grouped.items():
+                request = self._requests.get(key)
+                if request is None:
+                    continue
+                for consumer in consumers:
+                    request.consumer_probabilities.pop(consumer, None)
+                    request.consumer_deadlines.pop(consumer, None)
+                if request.consumer_probabilities:
+                    request.deadline = min(request.consumer_deadlines.values())
+                    self._push(request)
+                else:
+                    del self._requests[key]
+                    depleted.add(key)
+        return depleted
+
     def pop(self, block: bool = False) -> MemoryRequest | None:
         batch = self.pop_many(1, block=block)
         return batch[0] if batch else None

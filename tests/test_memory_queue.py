@@ -54,6 +54,20 @@ def test_cancel_one_consumer_keeps_shared_request():
     assert queue.snapshot()[0].consumer_probabilities == {"r1": 0.7}
 
 
+def test_batch_cancel_groups_consumers_and_reports_depleted_resources():
+    queue = MemoryRequestQueue()
+    add(queue, 1, 0.5, 3)
+    add(queue, 1, 0.7, 2, consumer="r1")
+    add(queue, 2, 0.4, 4)
+    depleted = queue.cancel_many([(key(1), "r0"), (key(1), "r0"), (key(2), "r0")])
+
+    assert depleted == {key(2)}
+    remaining = queue.snapshot()
+    assert len(remaining) == 1
+    assert remaining[0].key == key(1)
+    assert remaining[0].consumer_probabilities == {"r1": 0.7}
+
+
 def test_step_cannot_move_backwards():
     queue = MemoryRequestQueue()
     queue.set_step(3)

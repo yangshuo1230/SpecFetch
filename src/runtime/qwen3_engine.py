@@ -240,8 +240,7 @@ class Qwen3SparseOffloadEngine:
         return EngineOutput(logits, BatchState(request_ids, [tokens] * batch, caches), {})
 
     def enqueue_predictions(self, state: BatchState, predictions: list[StepPredictions]) -> None:
-        for key, consumer in state.speculative_consumers:
-            self.runtime.cancel(key, consumer)
+        self.runtime.cancel_many(state.speculative_consumers)
         state.speculative_consumers.clear()
         layers = len(self.model.model.layers)
         prefetch_requests = []

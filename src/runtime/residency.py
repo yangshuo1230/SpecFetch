@@ -250,6 +250,18 @@ class ResidencyManager:
                 record.consumer_leases.pop(consumer, None)
             self._refresh_priority(record)
 
+    def cancel_leases(self, cancellations: list[tuple[ResourceKey, str]]) -> None:
+        """在一次驻留锁内批量撤销 consumer lease。"""
+        grouped: dict[ResourceKey, set[str]] = {}
+        for key, consumer in cancellations:
+            grouped.setdefault(key, set()).add(consumer)
+        with self._condition:
+            for key, consumers in grouped.items():
+                record = self._records[key]
+                for consumer in consumers:
+                    record.consumer_leases.pop(consumer, None)
+                self._refresh_priority(record)
+
     def mark_demand(self, key: ResourceKey) -> None:
         with self._condition:
             record = self._records[key]

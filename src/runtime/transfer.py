@@ -542,6 +542,15 @@ class OffloadRuntime:
             self.residency.unqueue(key)
         return removed
 
+    def cancel_many(self, cancellations: list[tuple[ResourceKey, str]]) -> None:
+        """批量撤销同一预测窗口产生的队列项和驻留 lease。"""
+        if not cancellations:
+            return
+        depleted = self.queue.cancel_many(cancellations)
+        self.residency.cancel_leases(cancellations)
+        for key in depleted:
+            self.residency.unqueue(key)
+
     def release(self, key: ResourceKey) -> None:
         record_use = getattr(self.worker.backend, "record_use", None)
         if callable(record_use):

@@ -28,6 +28,8 @@ An in-flight DMA is not preempted.
 
 同一预测窗口产生的 expert 与 KV 请求会先跨层、跨请求汇总，再通过一次队列事务完成
 upsert 和唤醒；这只合并提交开销，不改变每个对象的 probability、deadline 或最终堆顺序。
+预测窗口失效时，consumer cancellation 同样按资源批量合并，并在队列和驻留管理器中各
+只获取一次锁；共享资源仅撤销对应 consumer，其余请求的 lease 和优先级继续保留。
 
 ## Sparse KV stopping
 

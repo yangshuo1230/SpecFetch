@@ -218,6 +218,24 @@ def test_discarding_worker_close_unqueues_pending_resources():
     assert residency.state(resource(0)) == ResourceState.CPU_ONLY
 
 
+def test_batch_cancel_returns_depleted_queued_resources_to_cpu_state():
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    for index in range(2):
+        residency.register_cpu(resource(index), f"cpu:{index}", 1024)
+    worker = TransferWorker(queue, residency, FakeBackend())
+    runtime = OffloadRuntime(queue, residency, worker)
+    runtime.prefetch(resource(0), consumer="a", probability=0.8, deadline=1, miss_cost_ms=1)
+    runtime.prefetch(resource(1), consumer="b", probability=0.7, deadline=1, miss_cost_ms=1)
+
+    runtime.cancel_many([(resource(0), "a"), (resource(1), "b")])
+
+    assert len(queue) == 0
+    assert residency.state(resource(0)) == ResourceState.CPU_ONLY
+    assert residency.state(resource(1)) == ResourceState.CPU_ONLY
+    worker.close()
+
+
 def test_low_priority_prefetch_cannot_evict_high_priority_lease():
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
     residency.register_cpu(resource(0), "a", 1)
