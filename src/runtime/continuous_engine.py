@@ -33,18 +33,40 @@ class ContinuousBatchResult:
     request_timings: dict[str, dict[str, float]]
 
 
-def _request_state(state: BatchState, request_id: str) -> BatchState:
-    index = state.request_ids.index(request_id)
+def _subset_state(state: BatchState, request_ids: list[str]) -> BatchState:
+    indices = [state.request_ids.index(request_id) for request_id in request_ids]
+    selected = set(request_ids)
     return BatchState(
-        [request_id],
-        [state.lengths[index]],
-        {
-            (owner, layer): cache
-            for (owner, layer), cache in state.kv.items()
-            if owner == request_id
-        },
+        list(request_ids),
+        [state.lengths[index] for index in indices],
+        {(owner, layer): cache for (owner, layer), cache in state.kv.items() if owner in selected},
         step=state.step,
     )
+
+
+def _request_state(state: BatchState, request_id: str) -> BatchState:
+    return _subset_state(state, [request_id])
+
+
+def _split_predictions(
+    predictions: list[StepPredictions], request_ids: list[str]
+) -> dict[str, list[StepPredictions]]:
+    """将批量 Draft 信号按请求拆分，同时保持 horizon 顺序。"""
+    split = {request_id: [] for request_id in request_ids}
+    for prediction in predictions:
+        for index, request_id in enumerate(request_ids):
+            split[request_id].append(
+                StepPredictions(
+                    kv={
+                        key: scores for key, scores in prediction.kv.items() if key[0] == request_id
+                    },
+                    experts={
+                        layer: probabilities[index : index + 1]
+                        for layer, probabilities in prediction.experts.items()
+                    },
+                )
+            )
+    return split
 
 
 def merge_predictions(
@@ -206,16 +228,18 @@ class ContinuousBatchRunner:
                     continuing_ids = [request.request_id for _, request in continuing]
                     batch_provider = self.provider_factory()
                     batch_provider.initialize(input_ids[continuing_indices], continuing_ids)
+                    batch_plan = batch_provider.predict(_subset_state(output.state, continuing_ids))
+                    split_horizons = _split_predictions(batch_plan.horizons, continuing_ids)
                     providers = batch_provider.split_requests()
                 else:
                     providers = []
+                    split_horizons = {}
                 for provider, (index, request) in zip(providers, continuing):
                     request_id = request.request_id
-                    plan = provider.predict(_request_state(output.state, request_id))
                     executions[request_id] = RequestExecution(
                         provider,
                         tokens[index],
-                        plan.horizons,
+                        split_horizons[request_id],
                         generated[request_id],
                     )
                 if finished_ids:

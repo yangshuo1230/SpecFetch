@@ -2,8 +2,14 @@ import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.runtime.batch_scheduler import ServingRequest
-from src.runtime.continuous_engine import ContinuousBatchRunner
+from src.runtime.continuous_engine import (
+    ContinuousBatchRunner,
+    RequestExecution,
+    _split_predictions,
+    merge_predictions,
+)
 from src.runtime.predictor import DraftSignalProvider
+from src.runtime.qwen3_engine import StepPredictions
 from tests.test_qwen3_engine import build_engine, tiny_model
 
 
@@ -57,6 +63,8 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     engine, worker = build_engine(tiny_model())
     draft = tiny_draft()
     providers = []
+    draft_forwards = []
+    hook = draft.register_forward_hook(lambda *_: draft_forwards.append(1))
 
     def provider_factory():
         provider = DraftSignalProvider(draft, None, lookahead=2)
@@ -89,6 +97,9 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     assert result.maximum_draft_prefill_batch == 2
     # 两轮准入各只初始化一次批量 Draft provider。
     assert len(providers) == 2
+    # 每轮均为一次前缀前向加两次批量 lookahead，不随组内请求数增加。
+    assert len(draft_forwards) == 6
+    hook.remove()
     assert result.request_timings["a"]["completion_seconds"] > 0
     assert (
         result.request_timings["c"]["admission_seconds"]
@@ -141,3 +152,19 @@ def test_prefill_only_requests_report_peak_admitted_batch_without_draft():
     assert result.draft_prefill_batches == 0
     assert result.maximum_draft_prefill_batch == 0
     assert engine.prefill_request_ids == [["a", "b"], ["c"]]
+
+
+def test_split_draft_predictions_round_trip_in_request_order():
+    prediction = StepPredictions(
+        kv={("a", 0): {1: 0.75}, ("b", 0): {2: 0.5}},
+        experts={0: torch.tensor([[0.1, 0.9], [0.8, 0.2]])},
+    )
+    split = _split_predictions([prediction], ["a", "b"])
+    executions = {
+        request_id: RequestExecution(None, torch.tensor(0), horizons)  # type: ignore[arg-type]
+        for request_id, horizons in split.items()
+    }
+    merged = merge_predictions(["b", "a"], executions, 0)
+
+    assert merged.kv == prediction.kv
+    assert torch.equal(merged.experts[0], prediction.experts[0].flip(0))
