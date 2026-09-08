@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 06:23 UTC
+Updated: 2026-09-08 06:50 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## Objective and semantics
@@ -64,7 +64,8 @@ count. Unseen Target mass is never used online.
 
 ## Correctness evidence
 
-- 61 CPU tests pass; two CUDA tests are opt-in to avoid touching a busy GPU.
+- 62 CPU tests pass; two CUDA tests are opt-in to avoid touching a busy GPU. The full
+  CPU suite plus Ruff lint/format and `git diff --check` passed again at this checkpoint.
 - On a random miniature Qwen3-MoE, custom dense prefill and incremental decode logits
   match the Transformers reference when all KV is selected.
 - The vectorized and grouped expert executors match numerically.
@@ -157,8 +158,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
    4/context 512. SpecFetch prefill alone takes 15.3 seconds because it uses per-expert
    PyTorch GEMMs; slot-mapped fused prefill is the current optimization task.
 2. Slot-mapped fused prefill has CPU mapping tests, but its newest multi-chunk CUDA test
-   was refused when an unrelated job reoccupied all four GPUs. It must pass before a
-   real-model fused-prefill benchmark is trusted.
+   was refused when an unrelated eight-process image-generation job reoccupied all four
+   GPUs (about 45.5 GiB each at 70--100% utilization). It must pass before a real-model
+   fused-prefill benchmark is trusted; no external process was disturbed.
 3. Context 4K, full-model continuous batching, and longer-output steady-state runs remain.
 4. The continuous runner performs admitted prefills sequentially. Chunked prefill and
    prefill/decode kernel-level interleaving remain future production integration work.
