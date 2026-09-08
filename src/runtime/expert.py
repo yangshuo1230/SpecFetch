@@ -217,21 +217,31 @@ class OffloadedExpertExecutor:
         outputs = outputs.reshape(*selected.shape, hidden_states.shape[-1])
         return (outputs * routing[..., None]).sum(dim=1).to(hidden_states.dtype)
 
-    def _grouped(
+    def _grouped_streaming(
         self,
         hidden_states: torch.Tensor,
         selected: torch.Tensor,
         routing: torch.Tensor,
-        loaded: dict[int, tuple[ResourceKey, ExpertWeights]],
+        layer: int,
+        request_ids: list[str],
     ) -> torch.Tensor:
+        """Bound residency during prefill by computing one expert at a time."""
         result = torch.zeros_like(hidden_states)
-        for expert, (_, weights) in loaded.items():
+        for expert in selected.unique().tolist():
             token_indices, route_indices = torch.where(selected == expert)
+            key = self.registry.ensure(layer, expert)
+            weights = self.runtime.demand(
+                key,
+                consumer="demand:"
+                + ",".join(request_ids[index] for index in token_indices),
+                miss_cost_ms=self.miss_cost_ms,
+            )
             inputs = hidden_states[token_indices]
             activated = F.silu(F.linear(inputs, weights.gate)) * F.linear(inputs, weights.up)
             outputs = F.linear(activated, weights.down)
             outputs *= routing[token_indices, route_indices, None]
             result.index_add_(0, token_indices, outputs.to(result.dtype))
+            self.runtime.release(key)
         return result
 
     def __call__(
@@ -249,11 +259,17 @@ class OffloadedExpertExecutor:
         routing = torch.softmax(router_logits.float(), dim=-1)
         routing, selected = routing.topk(min(self.top_k, routing.shape[-1]), dim=-1)
         routing = (routing / routing.sum(dim=-1, keepdim=True)).to(hidden_states.dtype)
-        loaded = self._load(selected, layer, request_ids)
         if len(hidden_states) <= self.vectorized_token_limit:
+            loaded = self._load(selected, layer, request_ids)
             result = self._vectorized(hidden_states, selected, routing, loaded)
+            for key, _ in loaded.values():
+                self.runtime.release(key)
         else:
-            result = self._grouped(hidden_states, selected, routing, loaded)
-        for key, _ in loaded.values():
-            self.runtime.release(key)
+            result = self._grouped_streaming(
+                hidden_states,
+                selected,
+                routing,
+                layer,
+                request_ids,
+            )
         return result
