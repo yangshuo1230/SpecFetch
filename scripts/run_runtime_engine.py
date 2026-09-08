@@ -269,6 +269,7 @@ def main() -> None:
             "output": str(args.output),
             "probes": str(args.probes) if args.probes else None,
             "policy": "demand_only" if args.disable_prefetch else "speculative",
+            "resolved_moe_backend": engine.moe_backend,
         },
         "performance": {
             "prefill_seconds": prefill_seconds,

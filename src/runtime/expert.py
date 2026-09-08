@@ -328,9 +328,15 @@ def optional_vllm_fused_moe(mode: str, backend) -> Callable[..., torch.Tensor] |
             raise RuntimeError("vLLM fused MoE requires a packed expert backend")
         return None
     try:
+        from vllm import envs
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
     except Exception:
         if mode == "vllm":
             raise
         return None
+    # The direct functional adapter bypasses FusedMoE layer setup, including its
+    # platform checks. Force the portable Triton path: AC-MoE produced incorrect
+    # results for physical slot IDs on PPU, while DeepGemm shape warmup is unbounded.
+    envs.VLLM_MOE_USE_ACEXT = False
+    envs.VLLM_USE_DEEP_GEMM = False
     return fused_experts

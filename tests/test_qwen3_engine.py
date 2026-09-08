@@ -60,6 +60,7 @@ def test_prefill_matches_transformers_dense_reference():
     reference = tiny_model()
     reference.load_state_dict(model.state_dict())
     engine, worker = build_engine(model)
+    assert engine.moe_backend == "torch"
     tokens = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1]])
     expected = reference(tokens, use_cache=False).logits
     actual = engine.prefill(tokens, ["a", "b"])

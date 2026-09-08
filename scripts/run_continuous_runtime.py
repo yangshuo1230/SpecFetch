@@ -164,6 +164,7 @@ def main() -> None:
             "probes": str(args.probes) if args.probes else None,
             "resolved_output_lengths": lengths,
             "policy": "demand_only" if args.disable_prefetch else "speculative",
+            "resolved_moe_backend": engine.moe_backend,
         },
         "performance": {
             "initialization_seconds": initialization_seconds,

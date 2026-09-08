@@ -38,6 +38,7 @@ def test_cuda_backend_copies_nested_expert_payload():
 def test_cuda_batched_packed_vllm_fused_moe_matches_torch(monkeypatch):
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "0")
     monkeypatch.setenv("VLLM_MOE_USE_DEEP_GEMM", "0")
+    monkeypatch.setenv("VLLM_MOE_USE_ACEXT", "0")
     generator = torch.Generator().manual_seed(31)
     experts = [
         ExpertWeights(
@@ -82,6 +83,10 @@ def test_cuda_batched_packed_vllm_fused_moe_matches_torch(monkeypatch):
             expected[token] += (
                 F.linear(F.silu(gate) * up, weights.down.cuda()) * routing[token, route]
             )
-    assert torch.allclose(actual, expected, atol=0.2, rtol=0.02)
+    relative_l2 = torch.linalg.vector_norm(actual.float() - expected.float())
+    relative_l2 /= torch.linalg.vector_norm(expected.float())
+    cosine = F.cosine_similarity(actual.float().reshape(1, -1), expected.float().reshape(1, -1))
+    assert relative_l2 < 0.01
+    assert cosine > 0.9999
     assert worker.metrics.maximum_transfer_batch >= 2
     worker.close()

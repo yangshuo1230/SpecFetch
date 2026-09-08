@@ -117,11 +117,13 @@ class Qwen3SparseOffloadEngine:
         self.residency = residency
         self.config = config
         self.expert_registry = ExpertRegistry(expert_source, residency)
+        fused_moe = optional_vllm_fused_moe(moe_backend, runtime.worker.backend)
+        self.moe_backend = "vllm" if fused_moe is not None else "torch"
         self.experts = OffloadedExpertExecutor(
             runtime,
             self.expert_registry,
             top_k=model.config.num_experts_per_tok,
-            fused_moe=optional_vllm_fused_moe(moe_backend, runtime.worker.backend),
+            fused_moe=fused_moe,
         )
 
     @classmethod
