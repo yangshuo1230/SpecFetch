@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import time
 from pathlib import Path
 
@@ -153,6 +154,8 @@ def main() -> None:
 
     generated = run_result.generated_token_ids
     token_count = sum(map(len, generated.values()))
+    ttft = [timing["time_to_first_token_seconds"] for timing in run_result.request_timings.values()]
+    latency = [timing["completion_seconds"] for timing in run_result.request_timings.values()]
     result = {
         "configuration": {
             **vars(args),
@@ -170,6 +173,10 @@ def main() -> None:
             "decode_cycles": run_result.decode_cycles,
             "admission_events": run_result.admission_events,
             "maximum_active_requests": run_result.maximum_active_requests,
+            "mean_ttft_seconds": statistics.mean(ttft),
+            "p50_ttft_seconds": statistics.median(ttft),
+            "mean_request_latency_seconds": statistics.mean(latency),
+            "p50_request_latency_seconds": statistics.median(latency),
         },
         "transfer": vars(worker.metrics_snapshot()),
         "residency": {
@@ -177,6 +184,7 @@ def main() -> None:
             "wasted_prefetches": residency.wasted_prefetches,
         },
         "generated_token_ids": generated,
+        "request_timings": run_result.request_timings,
         "generated_text": {
             request_id: tokenizer.decode(tokens) for request_id, tokens in generated.items()
         },

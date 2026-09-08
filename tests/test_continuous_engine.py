@@ -46,5 +46,14 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     }
     assert result.admission_events == 2
     assert result.maximum_active_requests == 2
+    assert result.request_timings["a"]["completion_seconds"] > 0
+    assert (
+        result.request_timings["c"]["admission_seconds"]
+        > result.request_timings["b"]["time_to_first_token_seconds"]
+    )
+    assert all(
+        timing["completion_seconds"] >= timing["time_to_first_token_seconds"]
+        for timing in result.request_timings.values()
+    )
     assert not any(key.request_id for key in engine.residency.resident_keys())
     worker.close()

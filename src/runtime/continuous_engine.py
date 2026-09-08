@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -25,6 +26,7 @@ class ContinuousBatchResult:
     decode_cycles: int
     admission_events: int
     maximum_active_requests: int
+    request_timings: dict[str, dict[str, float]]
 
 
 def _request_state(state: BatchState, request_id: str) -> BatchState:
@@ -116,12 +118,24 @@ class ContinuousBatchRunner:
         decode_cycles = 0
         admission_events = 0
         maximum_active = 0
+        run_start = time.perf_counter()
+        request_timings = {
+            request.request_id: {
+                "admission_seconds": 0.0,
+                "time_to_first_token_seconds": 0.0,
+                "completion_seconds": 0.0,
+            }
+            for request in requests
+        }
 
         while not scheduler.done:
             admitted = scheduler.admit()
             if admitted:
                 admission_events += 1
             for request in admitted:
+                request_timings[request.request_id]["admission_seconds"] = (
+                    time.perf_counter() - run_start
+                )
                 input_ids = torch.tensor(request.prompt_token_ids, dtype=torch.long)[None]
                 output = self.engine.prefill(input_ids, [request.request_id])
                 provider = self.provider_factory()
@@ -129,6 +143,9 @@ class ContinuousBatchRunner:
                 plan = provider.predict(output.state)
                 token = output.logits[0, -1].argmax().detach().cpu()
                 generated[request.request_id].append(int(token))
+                request_timings[request.request_id]["time_to_first_token_seconds"] = (
+                    time.perf_counter() - run_start
+                )
                 executions[request.request_id] = RequestExecution(
                     provider,
                     token,
@@ -142,7 +159,10 @@ class ContinuousBatchRunner:
                 [request.request_id for request in admitted]
             )
             if first_token_finished:
+                completed_at = time.perf_counter() - run_start
                 finished_ids = [request.request_id for request in first_token_finished]
+                for request_id in finished_ids:
+                    request_timings[request_id]["completion_seconds"] = completed_at
                 self.engine.remove_requests(state, finished_ids)
                 for request_id in finished_ids:
                     executions.pop(request_id)
@@ -177,7 +197,10 @@ class ContinuousBatchRunner:
 
             finished = scheduler.record_decode(active_ids)
             if finished:
+                completed_at = time.perf_counter() - run_start
                 finished_ids = [request.request_id for request in finished]
+                for request_id in finished_ids:
+                    request_timings[request_id]["completion_seconds"] = completed_at
                 self.engine.remove_requests(state, finished_ids)
                 for request_id in finished_ids:
                     executions.pop(request_id)
@@ -187,4 +210,5 @@ class ContinuousBatchRunner:
             decode_cycles,
             admission_events,
             maximum_active,
+            request_timings,
         )
