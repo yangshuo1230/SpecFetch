@@ -93,7 +93,7 @@ def test_grouped_prefill_streams_more_experts_than_cache_capacity():
 
     class PackedBackend:
         def __init__(self):
-            self.slots = PackedExpertSlots(1, "cpu")
+            self.slots = PackedExpertSlots(2, "cpu")
 
         def copy_to_gpu(self, key, value):
             return self.slots.acquire(key, value)
@@ -105,7 +105,7 @@ def test_grouped_prefill_streams_more_experts_than_cache_capacity():
     experts = [make_expert(0), make_expert(1), make_expert(2)]
     hidden = torch.randn(3, 4, generator=torch.Generator().manual_seed(9))
     logits = torch.tensor([[4.0, 3.0, 0.0], [0.0, 4.0, 3.0], [3.0, 0.0, 4.0]])
-    runtime, registry, worker = runtime_with(experts, capacity=1, backend=PackedBackend())
+    runtime, registry, worker = runtime_with(experts, capacity=2, backend=PackedBackend())
     executor = OffloadedExpertExecutor(runtime, registry, top_k=2, vectorized_token_limit=0)
     actual = executor(hidden, logits, layer=0, request_ids=["a", "b", "c"])
 
@@ -120,6 +120,7 @@ def test_grouped_prefill_streams_more_experts_than_cache_capacity():
             value *= F.linear(hidden[token], expert.up)
             expected[token] += F.linear(value, expert.down) * weights[token, route]
     assert torch.allclose(actual, expected, atol=1e-5)
+    assert worker.metrics.maximum_transfer_batch == 2
     worker.close()
 
 

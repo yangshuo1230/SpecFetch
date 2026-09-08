@@ -183,10 +183,14 @@ class OffloadedExpertExecutor:
         self.fused_moe = fused_moe
 
     def _load(
-        self, selected: torch.Tensor, layer: int, request_ids: list[str]
+        self,
+        selected: torch.Tensor,
+        layer: int,
+        request_ids: list[str],
+        expert_ids: list[int] | None = None,
     ) -> dict[int, tuple[ResourceKey, ExpertWeights]]:
         dependencies = {}
-        for expert in selected.unique().tolist():
+        for expert in expert_ids if expert_ids is not None else selected.unique().tolist():
             token_indices, _ = torch.where(selected == expert)
             key = self.registry.ensure(layer, expert)
             dependencies[expert] = (
@@ -245,30 +249,33 @@ class OffloadedExpertExecutor:
             activation="silu",
         )
 
-    def _grouped_streaming(
+    def _grouped_batched(
         self,
         hidden_states: torch.Tensor,
         selected: torch.Tensor,
         routing: torch.Tensor,
         layer: int,
         request_ids: list[str],
+        expert_ids: list[int],
     ) -> torch.Tensor:
-        """Bound residency during prefill by computing one expert at a time."""
+        """Batch H2D within the slot bound, then compute each routed expert."""
         result = torch.zeros_like(hidden_states)
-        for expert in selected.unique().tolist():
-            token_indices, route_indices = torch.where(selected == expert)
-            key = self.registry.ensure(layer, expert)
-            weights = self.runtime.demand(
-                key,
-                consumer="demand:" + ",".join(request_ids[index] for index in token_indices),
-                miss_cost_ms=self.miss_cost_ms,
+        capacity = self.runtime.residency.capacities[ResourceKind.EXPERT]
+        for offset in range(0, len(expert_ids), capacity):
+            loaded = self._load(
+                selected,
+                layer,
+                request_ids,
+                expert_ids=expert_ids[offset : offset + capacity],
             )
-            inputs = hidden_states[token_indices]
-            activated = F.silu(F.linear(inputs, weights.gate)) * F.linear(inputs, weights.up)
-            outputs = F.linear(activated, weights.down)
-            outputs *= routing[token_indices, route_indices, None]
-            result.index_add_(0, token_indices, outputs.to(result.dtype))
-            self.runtime.release(key)
+            for expert, (key, weights) in loaded.items():
+                token_indices, route_indices = torch.where(selected == expert)
+                inputs = hidden_states[token_indices]
+                activated = F.silu(F.linear(inputs, weights.gate)) * F.linear(inputs, weights.up)
+                outputs = F.linear(activated, weights.down)
+                outputs *= routing[token_indices, route_indices, None]
+                result.index_add_(0, token_indices, outputs.to(result.dtype))
+                self.runtime.release(key)
         return result
 
     def __call__(
@@ -286,8 +293,10 @@ class OffloadedExpertExecutor:
         routing = torch.softmax(router_logits.float(), dim=-1)
         routing, selected = routing.topk(min(self.top_k, routing.shape[-1]), dim=-1)
         routing = (routing / routing.sum(dim=-1, keepdim=True)).to(hidden_states.dtype)
-        if len(hidden_states) <= self.vectorized_token_limit:
-            loaded = self._load(selected, layer, request_ids)
+        unique_experts = selected.unique().tolist()
+        capacity = self.runtime.residency.capacities[ResourceKind.EXPERT]
+        if len(hidden_states) <= self.vectorized_token_limit and len(unique_experts) <= capacity:
+            loaded = self._load(selected, layer, request_ids, expert_ids=unique_experts)
             backend = self.runtime.worker.backend
             packed = hasattr(backend, "packed_expert_weights") and hasattr(backend, "expert_slot")
             if self.fused_moe is not None and packed and hidden_states.is_cuda:
@@ -297,12 +306,13 @@ class OffloadedExpertExecutor:
             for key, _ in loaded.values():
                 self.runtime.release(key)
         else:
-            result = self._grouped_streaming(
+            result = self._grouped_batched(
                 hidden_states,
                 selected,
                 routing,
                 layer,
                 request_ids,
+                unique_experts,
             )
         return result
 
