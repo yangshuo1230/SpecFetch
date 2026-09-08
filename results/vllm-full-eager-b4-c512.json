@@ -1,0 +1,65 @@
+{
+  "configuration": {
+    "batch_size": 4,
+    "context_tokens": 512,
+    "cpu_offload_gb": 0.0,
+    "enforce_eager": true,
+    "gpu_memory_utilization": 0.9,
+    "kv_offloading_size": null,
+    "max_new_tokens": 5,
+    "model": "/root/models/Qwen3-30B-A3B",
+    "output": "results/vllm-full-eager-b4-c512.json",
+    "physical_gpu_index": 1,
+    "prompts": "prompts.json"
+  },
+  "engine_options": {
+    "cpu_offload_gb": 0.0,
+    "dtype": "bfloat16",
+    "enforce_eager": true,
+    "gpu_memory_utilization": 0.9,
+    "model": "/root/models/Qwen3-30B-A3B",
+    "trust_remote_code": true
+  },
+  "generated_text": [
+    "<think>\nOkay, the",
+    "erts models save compute?\n",
+    " is prime.\n<think>\n",
+    " limited' into Chinese.\n"
+  ],
+  "generated_token_ids": [
+    [
+      151667,
+      198,
+      32313,
+      11,
+      279
+    ],
+    [
+      15546,
+      4119,
+      3581,
+      12564,
+      5267
+    ],
+    [
+      374,
+      10250,
+      624,
+      151667,
+      198
+    ],
+    [
+      7199,
+      6,
+      1119,
+      8453,
+      624
+    ]
+  ],
+  "performance": {
+    "initialization_seconds": 29.481892914976925,
+    "mean_tpot_ms_including_prefill": 22.874556807801127,
+    "request_seconds": 0.45749113615602255,
+    "throughput_tokens_per_second": 43.71669398460041
+  }
+}

@@ -55,13 +55,19 @@ def test_cuda_batched_packed_vllm_fused_moe_matches_torch(monkeypatch):
             return experts[expert]
 
     queue = MemoryRequestQueue()
-    residency = ResidencyManager({ResourceKind.EXPERT: 4, ResourceKind.KV: 1})
-    backend = CudaTransferBackend("cuda:0", expert_slots=4)
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    backend = CudaTransferBackend("cuda:0", expert_slots=2)
     worker = TransferWorker(queue, residency, backend)
     runtime = OffloadRuntime(queue, residency, worker)
     registry = ExpertRegistry(Source(), residency)
     fused = optional_vllm_fused_moe("vllm", backend)
-    executor = OffloadedExpertExecutor(runtime, registry, top_k=2, fused_moe=fused)
+    executor = OffloadedExpertExecutor(
+        runtime,
+        registry,
+        top_k=2,
+        vectorized_token_limit=0,
+        fused_moe=fused,
+    )
     worker.start()
     hidden = torch.randn(3, 128, dtype=torch.bfloat16, device="cuda:0")
     logits = torch.tensor(
@@ -88,5 +94,5 @@ def test_cuda_batched_packed_vllm_fused_moe_matches_torch(monkeypatch):
     cosine = F.cosine_similarity(actual.float().reshape(1, -1), expected.float().reshape(1, -1))
     assert relative_l2 < 0.01
     assert cosine > 0.9999
-    assert worker.metrics.maximum_transfer_batch >= 2
+    assert worker.metrics.maximum_transfer_batch == 2
     worker.close()

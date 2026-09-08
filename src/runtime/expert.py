@@ -233,20 +233,28 @@ class OffloadedExpertExecutor:
         selected: torch.Tensor,
         routing: torch.Tensor,
         loaded: dict[int, tuple[ResourceKey, ExpertWeights]],
+        global_num_experts: int,
     ) -> torch.Tensor:
         backend = self.runtime.worker.backend
         w1, w2 = backend.packed_expert_weights()
-        physical_ids = torch.empty_like(selected)
+        expert_map = torch.full(
+            (global_num_experts,),
+            -1,
+            dtype=torch.int32,
+            device=selected.device,
+        )
         for expert, (key, _) in loaded.items():
-            physical_ids.masked_fill_(selected == expert, backend.expert_slot(key))
+            expert_map[expert] = backend.expert_slot(key)
         return self.fused_moe(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
             topk_weights=routing,
-            topk_ids=physical_ids,
+            topk_ids=selected,
             inplace=False,
             activation="silu",
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
         )
 
     def _grouped_batched(
@@ -257,6 +265,7 @@ class OffloadedExpertExecutor:
         layer: int,
         request_ids: list[str],
         expert_ids: list[int],
+        global_num_experts: int,
     ) -> torch.Tensor:
         """Batch H2D within the slot bound, then compute each routed expert."""
         result = torch.zeros_like(hidden_states)
@@ -268,13 +277,27 @@ class OffloadedExpertExecutor:
                 request_ids,
                 expert_ids=expert_ids[offset : offset + capacity],
             )
-            for expert, (key, weights) in loaded.items():
-                token_indices, route_indices = torch.where(selected == expert)
-                inputs = hidden_states[token_indices]
-                activated = F.silu(F.linear(inputs, weights.gate)) * F.linear(inputs, weights.up)
-                outputs = F.linear(activated, weights.down)
-                outputs *= routing[token_indices, route_indices, None]
-                result.index_add_(0, token_indices, outputs.to(result.dtype))
+            backend = self.runtime.worker.backend
+            packed = hasattr(backend, "packed_expert_weights") and hasattr(backend, "expert_slot")
+            if self.fused_moe is not None and packed and hidden_states.is_cuda:
+                result += self._fused(
+                    hidden_states,
+                    selected,
+                    routing,
+                    loaded,
+                    global_num_experts,
+                )
+            else:
+                for expert, (_, weights) in loaded.items():
+                    token_indices, route_indices = torch.where(selected == expert)
+                    inputs = hidden_states[token_indices]
+                    activated = F.silu(F.linear(inputs, weights.gate)) * F.linear(
+                        inputs, weights.up
+                    )
+                    outputs = F.linear(activated, weights.down)
+                    outputs *= routing[token_indices, route_indices, None]
+                    result.index_add_(0, token_indices, outputs.to(result.dtype))
+            for key, _ in loaded.values():
                 self.runtime.release(key)
         return result
 
@@ -300,7 +323,13 @@ class OffloadedExpertExecutor:
             backend = self.runtime.worker.backend
             packed = hasattr(backend, "packed_expert_weights") and hasattr(backend, "expert_slot")
             if self.fused_moe is not None and packed and hidden_states.is_cuda:
-                result = self._fused(hidden_states, selected, routing, loaded)
+                result = self._fused(
+                    hidden_states,
+                    selected,
+                    routing,
+                    loaded,
+                    router_logits.shape[-1],
+                )
             else:
                 result = self._vectorized(hidden_states, selected, routing, loaded)
             for key, _ in loaded.values():
@@ -313,6 +342,7 @@ class OffloadedExpertExecutor:
                 layer,
                 request_ids,
                 unique_experts,
+                router_logits.shape[-1],
             )
         return result
 

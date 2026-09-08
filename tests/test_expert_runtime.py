@@ -150,11 +150,12 @@ def test_fused_adapter_maps_logical_experts_to_packed_slots():
         w2 = kwargs["w2"]
         weights = kwargs["topk_weights"]
         selected = kwargs["topk_ids"]
+        expert_map = kwargs["expert_map"]
         width = w1.shape[1] // 2
         result = torch.zeros_like(hidden)
         for token in range(len(hidden)):
             for route in range(selected.shape[1]):
-                expert = selected[token, route]
+                expert = expert_map[selected[token, route]]
                 gate_up = F.linear(hidden[token], w1[expert])
                 activated = F.silu(gate_up[:width]) * gate_up[width:]
                 result[token] += F.linear(activated, w2[expert]) * weights[token, route]
@@ -170,7 +171,7 @@ def test_fused_adapter_maps_logical_experts_to_packed_slots():
     routing, selected = routing.topk(2, dim=-1)
     routing /= routing.sum(dim=-1, keepdim=True)
     loaded = executor._load(selected, 0, ["a", "b"])
-    actual = executor._fused(hidden, selected, routing, loaded)
+    actual = executor._fused(hidden, selected, routing, loaded, global_num_experts=3)
     expected = executor._vectorized(hidden, selected, routing, loaded)
     assert torch.allclose(actual, expected, atol=1e-5)
     for key, _ in loaded.values():

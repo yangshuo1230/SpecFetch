@@ -145,6 +145,7 @@ class CudaTransferBackend:
         self.expert_slots = (
             PackedExpertSlots(expert_slots, self.device) if expert_slots is not None else None
         )
+        self._use_events: dict[ResourceKey, torch.cuda.Event] = {}
 
     def _copy(self, value: Any) -> Any:
         if isinstance(value, torch.Tensor):
@@ -185,7 +186,18 @@ class CudaTransferBackend:
     def release_gpu(self, key: ResourceKey, gpu_value: Any) -> None:
         del gpu_value
         if key.kind == ResourceKind.EXPERT and self.expert_slots is not None:
+            event = self._use_events.pop(key, None)
+            if event is not None:
+                self.stream.wait_event(event)
             self.expert_slots.release(key)
+
+    def record_use(self, key: ResourceKey) -> None:
+        """Prevent H2D slot reuse until compute-stream readers have finished."""
+        if key.kind != ResourceKind.EXPERT or self.expert_slots is None:
+            return
+        event = torch.cuda.Event()
+        event.record(torch.cuda.current_stream(self.device))
+        self._use_events[key] = event
 
     def expert_slot(self, key: ResourceKey) -> int:
         if self.expert_slots is None:
@@ -531,6 +543,9 @@ class OffloadRuntime:
         return removed
 
     def release(self, key: ResourceKey) -> None:
+        record_use = getattr(self.worker.backend, "record_use", None)
+        if callable(record_use):
+            record_use(key)
         self.residency.release(key)
 
     def drop(self, key: ResourceKey, timeout: float | None = None) -> None:
