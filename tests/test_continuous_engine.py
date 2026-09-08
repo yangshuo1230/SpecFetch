@@ -7,6 +7,32 @@ from src.runtime.predictor import DraftSignalProvider
 from tests.test_qwen3_engine import build_engine, tiny_model
 
 
+class PrefillOnlyEngine:
+    def prefill(self, input_ids, request_ids):
+        state = type("State", (), {})()
+        state.request_ids = list(request_ids)
+        state.lengths = [input_ids.shape[1]]
+        state.kv = {}
+        state.speculative_consumers = []
+        logits = torch.zeros((1, 1, 4))
+        logits[..., 2] = 1
+        return type("Output", (), {"logits": logits, "state": state})()
+
+    def add_state(self, state, admitted):
+        state.request_ids.extend(admitted.request_ids)
+        state.lengths.extend(admitted.lengths)
+
+    def remove_requests(self, state, request_ids):
+        removing = set(request_ids)
+        retained = [
+            (request_id, length)
+            for request_id, length in zip(state.request_ids, state.lengths)
+            if request_id not in removing
+        ]
+        state.request_ids = [item[0] for item in retained]
+        state.lengths = [item[1] for item in retained]
+
+
 def tiny_draft():
     config = Qwen3Config(
         vocab_size=32,
@@ -78,3 +104,26 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
         assert timing["request_latency_seconds"] == timing["completion_seconds"]
     assert not any(key.request_id for key in engine.residency.resident_keys())
     worker.close()
+
+
+def test_prefill_only_requests_report_peak_admitted_batch_without_draft():
+    def unexpected_provider():
+        raise AssertionError("单 token 请求不应创建 Draft provider")
+
+    runner = ContinuousBatchRunner(
+        PrefillOnlyEngine(),
+        unexpected_provider,
+        max_batch_size=2,
+        prefetch=False,
+    )
+    result = runner.run(
+        [
+            ServingRequest("a", [1], 1),
+            ServingRequest("b", [2], 1),
+            ServingRequest("c", [3], 1),
+        ]
+    )
+    assert result.generated_token_ids == {"a": [2], "b": [2], "c": [2]}
+    assert result.decode_cycles == 0
+    assert result.admission_events == 2
+    assert result.maximum_active_requests == 2

@@ -150,6 +150,7 @@ class ContinuousBatchRunner:
             admitted = scheduler.admit()
             if admitted:
                 admission_events += 1
+                maximum_active = max(maximum_active, len(scheduler.active))
             for request in admitted:
                 admitted_at = time.perf_counter() - run_start
                 request_timings[request.request_id]["admission_seconds"] = admitted_at
@@ -179,8 +180,6 @@ class ContinuousBatchRunner:
                     plan.horizons,
                     generated[request.request_id],
                 )
-
-            maximum_active = max(maximum_active, len(scheduler.active))
 
             active_ids = scheduler.active_ids
             if not active_ids:
