@@ -155,7 +155,12 @@ def main() -> None:
     generated = run_result.generated_token_ids
     token_count = sum(map(len, generated.values()))
     ttft = [timing["time_to_first_token_seconds"] for timing in run_result.request_timings.values()]
-    latency = [timing["completion_seconds"] for timing in run_result.request_timings.values()]
+    latency = [timing["request_latency_seconds"] for timing in run_result.request_timings.values()]
+    queue_seconds = [timing["queue_seconds"] for timing in run_result.request_timings.values()]
+    prefill_seconds = [timing["prefill_seconds"] for timing in run_result.request_timings.values()]
+    service_seconds = [
+        timing["active_service_seconds"] for timing in run_result.request_timings.values()
+    ]
     result = {
         "configuration": {
             **vars(args),
@@ -178,6 +183,12 @@ def main() -> None:
             "p50_ttft_seconds": statistics.median(ttft),
             "mean_request_latency_seconds": statistics.mean(latency),
             "p50_request_latency_seconds": statistics.median(latency),
+            "mean_queue_seconds": statistics.mean(queue_seconds),
+            "p50_queue_seconds": statistics.median(queue_seconds),
+            "mean_prefill_seconds": statistics.mean(prefill_seconds),
+            "p50_prefill_seconds": statistics.median(prefill_seconds),
+            "mean_active_service_seconds": statistics.mean(service_seconds),
+            "p50_active_service_seconds": statistics.median(service_seconds),
         },
         "transfer": vars(worker.metrics_snapshot()),
         "residency": {

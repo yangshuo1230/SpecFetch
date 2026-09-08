@@ -1,7 +1,11 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 06:50 UTC
+Updated: 2026-09-08 06:36 UTC
 Branch: `feature/sparse-offload-runtime`
+
+## 协作约定
+
+- 后续进度更新、问题说明、文档新增内容和最终交付说明全部使用中文。
 
 ## Objective and semantics
 
@@ -55,6 +59,9 @@ count. Unseen Target mass is never used online.
 - Fixed-batch Qwen3 adapter and a framework-neutral continuous-batch admission core.
 - Runnable variable-length continuous batching with independent per-request Draft caches,
   separate prefill admission, completion removal, backfill, and request-private KV cleanup.
+- 连续批处理结果现已分别记录排队时延、Target 预填充、解码服务、活跃服务、TTFT
+  和端到端请求时延。单 token 请求会在预填充 token 可用时立即完成，不再初始化无用的
+  Draft provider。
 - Optional vLLM Triton FusedMoE adapter over physical expert slot IDs, with the readable
   PyTorch executor retained as the default until the CUDA path is benchmarked.
 - Phase-separated transfer/residency counters and an opt-in CPU full-attention shadow.

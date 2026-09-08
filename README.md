@@ -92,6 +92,9 @@ python -m scripts.run_continuous_runtime \
   --output results/runtime-continuous.json
 ~~~
 
+结果会分别记录等待队列时延、单请求预填充、解码服务、活跃服务、TTFT 和端到端请求
+时延，使准入与回填成本保持可见，而不是全部折叠进单一吞吐量指标。
+
 The primary experiment treats the draft as a prefetch oracle, not as a source of tokens for target
 verification. At every target step, the draft independently rolls out from only the currently known
 target prefix. Its attention and hidden states issue hypothetical CPU-to-GPU prefetch requests;

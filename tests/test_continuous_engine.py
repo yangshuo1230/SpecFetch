@@ -26,9 +26,16 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     torch.manual_seed(21)
     engine, worker = build_engine(tiny_model())
     draft = tiny_draft()
+    providers = []
+
+    def provider_factory():
+        provider = DraftSignalProvider(draft, None, lookahead=2)
+        providers.append(provider)
+        return provider
+
     runner = ContinuousBatchRunner(
         engine,
-        lambda: DraftSignalProvider(draft, None, lookahead=2),
+        provider_factory,
         max_batch_size=2,
         prefetch=False,
     )
@@ -46,6 +53,8 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     }
     assert result.admission_events == 2
     assert result.maximum_active_requests == 2
+    # The one-token request completes directly from prefill and needs no draft state.
+    assert len(providers) == 2
     assert result.request_timings["a"]["completion_seconds"] > 0
     assert (
         result.request_timings["c"]["admission_seconds"]
@@ -55,5 +64,17 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
         timing["completion_seconds"] >= timing["time_to_first_token_seconds"]
         for timing in result.request_timings.values()
     )
+    for timing in result.request_timings.values():
+        assert timing["queue_seconds"] == timing["admission_seconds"]
+        assert timing["prefill_seconds"] == (
+            timing["time_to_first_token_seconds"] - timing["admission_seconds"]
+        )
+        assert timing["decode_service_seconds"] == (
+            timing["completion_seconds"] - timing["time_to_first_token_seconds"]
+        )
+        assert timing["active_service_seconds"] == (
+            timing["completion_seconds"] - timing["admission_seconds"]
+        )
+        assert timing["request_latency_seconds"] == timing["completion_seconds"]
     assert not any(key.request_id for key in engine.residency.resident_keys())
     worker.close()
