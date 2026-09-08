@@ -127,6 +127,24 @@ class RequestLayerKV:
         *,
         consumer: str | None = None,
     ) -> list[tuple[ResourceKey, str]]:
+        requests, queued = self.prefetch_requests(
+            draft_mass,
+            deadline,
+            miss_cost_ms,
+            consumer=consumer,
+        )
+        self.runtime.prefetch_many(requests)
+        return queued
+
+    def prefetch_requests(
+        self,
+        draft_mass: dict[int, float],
+        deadline: int,
+        miss_cost_ms: float,
+        *,
+        consumer: str | None = None,
+    ) -> tuple[list[PrefetchRequest], list[tuple[ResourceKey, str]]]:
+        """构造 KV 预测请求，供调用方跨请求、跨层合并提交。"""
         queued = []
         requests = []
         consumer = consumer or self.request_id
@@ -137,8 +155,7 @@ class RequestLayerKV:
                 PrefetchRequest(self.old[chunk], consumer, probability, deadline, miss_cost_ms)
             )
             queued.append((self.old[chunk], consumer))
-        self.runtime.prefetch_many(requests)
-        return queued
+        return requests, queued
 
     def predicted_keep_set(self, draft_mass: dict[int, float]) -> set[int]:
         keep = set()

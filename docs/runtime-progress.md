@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 08:02 UTC
+Updated: 2026-09-08 08:06 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -45,6 +45,9 @@ count. Unseen Target mass is never used online.
 - Coalesced speculative admission and same-class transfer batches. A decode layer
   promotes all missing experts before waiting, then issues their copies with one CUDA
   stream synchronization. Demand and speculation are never mixed in one transfer batch.
+- 每个预测窗口的全部 expert 与 KV speculative 请求现在先跨 horizon、层和请求汇总，再以
+  一次队列事务提交；deadline 仍由统一堆排序。batch-4/context-512 的调用结构由每步 240
+  次提交降为每步 1 次，实际时延收益待 GPU 复测。
 - Fixed packed expert slots: gate/up share a fused weight bank and evicted slots are
   overwritten in place rather than allocated again. Prefill batches experts within the
   physical-slot bound; compute-stream CUDA events prevent H2D from overwriting a slot
@@ -94,7 +97,7 @@ count. Unseen Target mass is never used online.
 
 ## Correctness evidence
 
-- 当前 67 项 CPU 测试全部通过；两项 CUDA 测试为显式启用，以免触碰繁忙 GPU。本检查点
+- 当前 68 项 CPU 测试全部通过；两项 CUDA 测试为显式启用，以免触碰繁忙 GPU。本检查点
   再次通过完整 CPU 测试、Ruff lint/format 与 `git diff --check`。
 - On a random miniature Qwen3-MoE, custom dense prefill and incremental decode logits
   match the Transformers reference when all KV is selected.

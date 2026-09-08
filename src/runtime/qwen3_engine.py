@@ -12,7 +12,7 @@ from src.runtime.expert import (
     ExpertRegistry,
     ExpertWeights,
     OffloadedExpertExecutor,
-    enqueue_expert_predictions,
+    expert_prediction_requests,
     optional_vllm_fused_moe,
 )
 from src.runtime.kv_cache import RequestLayerKV, SparseAttentionResult
@@ -244,6 +244,7 @@ class Qwen3SparseOffloadEngine:
             self.runtime.cancel(key, consumer)
         state.speculative_consumers.clear()
         layers = len(self.model.model.layers)
+        prefetch_requests = []
         for horizon, prediction in enumerate(predictions, 1):
             for layer_index in range(layers):
                 deadline = (state.step + horizon - 1) * layers + layer_index
@@ -252,29 +253,29 @@ class Qwen3SparseOffloadEngine:
                     f"{request_id}@{state.step + horizon}" for request_id in state.request_ids
                 ]
                 if expert_probabilities is not None:
-                    state.speculative_consumers.extend(
-                        enqueue_expert_predictions(
-                            expert_probabilities,
-                            layer=layer_index,
-                            request_ids=consumers,
-                            top_k=self.model.config.num_experts_per_tok,
-                            deadline=deadline,
-                            miss_cost_ms=0.5,
-                            registry=self.expert_registry,
-                            runtime=self.runtime,
-                        )
+                    expert_requests, expert_consumers = expert_prediction_requests(
+                        expert_probabilities,
+                        layer=layer_index,
+                        request_ids=consumers,
+                        top_k=self.model.config.num_experts_per_tok,
+                        deadline=deadline,
+                        miss_cost_ms=0.5,
+                        registry=self.expert_registry,
                     )
+                    prefetch_requests.extend(expert_requests)
+                    state.speculative_consumers.extend(expert_consumers)
                 for request_id, consumer in zip(state.request_ids, consumers):
                     cache = state.kv[(request_id, layer_index)]
                     scores = prediction.kv.get((request_id, layer_index), {})
-                    state.speculative_consumers.extend(
-                        cache.enqueue(
-                            scores,
-                            deadline,
-                            miss_cost_ms=0.05,
-                            consumer=consumer,
-                        )
+                    kv_requests, kv_consumers = cache.prefetch_requests(
+                        scores,
+                        deadline,
+                        miss_cost_ms=0.05,
+                        consumer=consumer,
                     )
+                    prefetch_requests.extend(kv_requests)
+                    state.speculative_consumers.extend(kv_consumers)
+        self.runtime.prefetch_many(prefetch_requests)
         for layer_index in range(layers):
             for request_id in state.request_ids:
                 cache = state.kv[(request_id, layer_index)]

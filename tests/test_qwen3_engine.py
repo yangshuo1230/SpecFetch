@@ -75,6 +75,23 @@ def test_torch_backend_moe_warmup_is_a_noop():
     worker.close()
 
 
+def test_prediction_window_submits_expert_and_kv_requests_as_one_queue_batch():
+    engine, worker = build_engine(tiny_model())
+    state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
+    prediction = StepPredictions(
+        kv={
+            ("a", layer): {chunk: 1.0 for chunk in state.kv[("a", layer)].old} for layer in range(2)
+        },
+        experts={layer: torch.tensor([[0.7, 0.2, 0.1, 0.0]]) for layer in range(2)},
+    )
+    before = worker.metrics.prefetch_batches
+    engine.enqueue_predictions(state, [prediction])
+    assert worker.metrics.prefetch_batches - before == 1
+    assert state.speculative_consumers
+    engine.remove_requests(state, ["a"])
+    worker.close()
+
+
 def test_decode_matches_full_sequence_when_all_kv_is_resident():
     torch.manual_seed(12)
     model = tiny_model()

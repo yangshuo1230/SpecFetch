@@ -147,6 +147,30 @@ def enqueue_expert_predictions(
     runtime: OffloadRuntime,
 ) -> list[tuple[ResourceKey, str]]:
     """Merge per-request predicted routes into shared expert queue entries."""
+    requests, queued = expert_prediction_requests(
+        probabilities,
+        layer=layer,
+        request_ids=request_ids,
+        top_k=top_k,
+        deadline=deadline,
+        miss_cost_ms=miss_cost_ms,
+        registry=registry,
+    )
+    runtime.prefetch_many(requests)
+    return queued
+
+
+def expert_prediction_requests(
+    probabilities: torch.Tensor,
+    *,
+    layer: int,
+    request_ids: list[str],
+    top_k: int,
+    deadline: int,
+    miss_cost_ms: float,
+    registry: ExpertRegistry,
+) -> tuple[list[PrefetchRequest], list[tuple[ResourceKey, str]]]:
+    """构造专家预测请求，供调用方跨层合并提交。"""
     if probabilities.ndim != 2 or len(probabilities) != len(request_ids):
         raise ValueError("probabilities must align with request IDs")
     queued = []
@@ -159,8 +183,7 @@ def enqueue_expert_predictions(
                 PrefetchRequest(key, request_id, float(probability), deadline, miss_cost_ms)
             )
             queued.append((key, request_id))
-    runtime.prefetch_many(requests)
-    return queued
+    return requests, queued
 
 
 class OffloadedExpertExecutor:

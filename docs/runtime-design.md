@@ -26,6 +26,9 @@ An upsert on an existing resource merges consumers and refreshes its probability
 deadline. Heap entries carry versions, so old priorities are discarded after an update.
 An in-flight DMA is not preempted.
 
+同一预测窗口产生的 expert 与 KV 请求会先跨层、跨请求汇总，再通过一次队列事务完成
+upsert 和唤醒；这只合并提交开销，不改变每个对象的 probability、deadline 或最终堆顺序。
+
 ## Sparse KV stopping
 
 Old KV chunks are visited in draft-attention order. The online controller stops only
