@@ -244,6 +244,40 @@ class Qwen3SparseOffloadEngine:
                 ]
                 cache.retain_predicted(keep_predictions)
 
+    def add_state(self, state: BatchState, admitted: BatchState) -> None:
+        """Append separately-prefilled requests to an active decode batch."""
+        overlap = set(state.request_ids) & set(admitted.request_ids)
+        if overlap:
+            raise ValueError(f"requests are already active: {sorted(overlap)}")
+        state.request_ids.extend(admitted.request_ids)
+        state.lengths.extend(admitted.lengths)
+        state.kv.update(admitted.kv)
+        state.speculative_consumers.extend(admitted.speculative_consumers)
+
+    def remove_requests(self, state: BatchState, request_ids: list[str]) -> None:
+        """Cancel predictions and free KV storage for completed requests."""
+        removing = set(request_ids)
+        if not removing <= set(state.request_ids):
+            raise KeyError("cannot remove a request that is not active")
+        retained_consumers = []
+        for key, consumer in state.speculative_consumers:
+            owner = consumer.rsplit("@", 1)[0]
+            if owner in removing:
+                self.runtime.cancel(key, consumer)
+            else:
+                retained_consumers.append((key, consumer))
+        state.speculative_consumers = retained_consumers
+        for request_id in removing:
+            for layer_index in range(len(self.model.model.layers)):
+                state.kv.pop((request_id, layer_index)).close()
+        retained = [
+            (request_id, length)
+            for request_id, length in zip(state.request_ids, state.lengths)
+            if request_id not in removing
+        ]
+        state.request_ids = [item[0] for item in retained]
+        state.lengths = [item[1] for item in retained]
+
     @torch.inference_mode()
     def decode(
         self,

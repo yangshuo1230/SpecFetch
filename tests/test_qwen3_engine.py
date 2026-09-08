@@ -81,3 +81,20 @@ def test_decode_matches_full_sequence_when_all_kv_is_resident():
     expected = reference(full, use_cache=False).logits[:, -1]
     assert torch.allclose(actual, expected, atol=3e-5, rtol=3e-5)
     worker.close()
+
+
+def test_admitted_state_can_be_added_and_completed_state_removed():
+    torch.manual_seed(13)
+    engine, worker = build_engine(tiny_model())
+    first = engine.prefill(torch.tensor([[1, 2, 3]]), ["a"]).state
+    second = engine.prefill(torch.tensor([[4, 5]]), ["b"]).state
+    engine.add_state(first, second)
+    assert first.request_ids == ["a", "b"]
+    assert first.lengths == [3, 2]
+    engine.decode(torch.tensor([6, 7]), first, StepPredictions())
+    engine.remove_requests(first, ["a"])
+    assert first.request_ids == ["b"]
+    assert all(request_id == "b" for request_id, _ in first.kv)
+    engine.remove_requests(first, ["b"])
+    assert not first.request_ids
+    worker.close()

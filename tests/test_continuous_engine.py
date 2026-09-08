@@ -1,0 +1,50 @@
+import torch
+from transformers import Qwen3Config, Qwen3ForCausalLM
+
+from src.runtime.batch_scheduler import ServingRequest
+from src.runtime.continuous_engine import ContinuousBatchRunner
+from src.runtime.predictor import DraftSignalProvider
+from tests.test_qwen3_engine import build_engine, tiny_model
+
+
+def tiny_draft():
+    config = Qwen3Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        max_position_embeddings=64,
+    )
+    config._attn_implementation = "eager"
+    return Qwen3ForCausalLM(config).eval()
+
+
+def test_continuous_runner_backfills_and_releases_qwen_states():
+    torch.manual_seed(21)
+    engine, worker = build_engine(tiny_model())
+    draft = tiny_draft()
+    runner = ContinuousBatchRunner(
+        engine,
+        lambda: DraftSignalProvider(draft, None, lookahead=2),
+        max_batch_size=2,
+        prefetch=False,
+    )
+    result = runner.run(
+        [
+            ServingRequest("a", [1, 2, 3], 1),
+            ServingRequest("b", [4, 5], 3),
+            ServingRequest("c", [6, 7, 8, 9], 2),
+        ]
+    )
+    assert {key: len(value) for key, value in result.generated_token_ids.items()} == {
+        "a": 1,
+        "b": 3,
+        "c": 2,
+    }
+    assert result.admission_events == 2
+    assert result.maximum_active_requests == 2
+    assert not any(key.request_id for key in engine.residency.resident_keys())
+    worker.close()
