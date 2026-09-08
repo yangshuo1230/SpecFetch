@@ -113,6 +113,38 @@ class DraftSignalProvider:
             providers.append(provider)
         return providers
 
+    @classmethod
+    def merge_requests(cls, providers: list[DraftSignalProvider]) -> DraftSignalProvider:
+        """合并兼容的单请求 provider，用于批量推进和 rollout。"""
+        if not providers:
+            raise ValueError("至少需要一个 Draft provider")
+        first = providers[0]
+        if first.cache is None or first.next_logits is None:
+            raise RuntimeError("合并前必须先初始化 Draft provider")
+        cache_length = first.cache.get_seq_length()
+        for provider in providers:
+            if provider.cache is None or provider.next_logits is None:
+                raise RuntimeError("合并前必须先初始化全部 Draft provider")
+            if len(provider.request_ids) != 1:
+                raise ValueError("只能合并单请求 Draft provider")
+            if (
+                provider.model is not first.model
+                or provider.probe_bank is not first.probe_bank
+                or provider.lookahead != first.lookahead
+                or provider.cache.get_seq_length() != cache_length
+                or provider.next_logits.shape[0] != 1
+            ):
+                raise ValueError("Draft provider 的模型、配置或缓存长度不兼容")
+        cache_type = type(first.cache)
+        merge_cache = getattr(cache_type, "from_batch_splits", None)
+        if not callable(merge_cache):
+            raise TypeError("Draft KV cache 不支持合并 batch split")
+        merged = cls(first.model, first.probe_bank, first.lookahead)
+        merged.cache = merge_cache([provider.cache for provider in providers])
+        merged.next_logits = torch.cat([provider.next_logits for provider in providers])
+        merged.request_ids = [provider.request_ids[0] for provider in providers]
+        return merged
+
     @torch.inference_mode()
     def advance(self, actual_token_ids: torch.Tensor) -> None:
         if self.cache is None or len(actual_token_ids) != len(self.request_ids):

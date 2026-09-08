@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 07:44 UTC
+Updated: 2026-09-08 07:48 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -72,6 +72,9 @@ count. Unseen Target mass is never used online.
   DynamicCache batch split 拆成可独立推进的请求私有 KV；结果另行报告 Draft 预填充
   批次数和最大批大小。首轮 lookahead 也在拆分前按组执行，随后按请求拆分 KV/专家信号；
   测试验证拆分后再按任意请求顺序合并可恢复原信号。
+- lookahead 耗尽后的 Draft 刷新会按模型、probe、lookahead、缓存长度和待推进 token 数分组；
+  兼容请求临时合并 KV，批量 advance/rollout 后再拆回私有状态。不同长度或不同进度的
+  请求不会强行合并；结果报告刷新批次数和最大刷新批大小。
 - Optional vLLM Triton FusedMoE adapter over physical expert slot IDs, with the readable
   PyTorch executor retained as the default until the CUDA path is benchmarked.
 - Phase-separated transfer/residency counters and an opt-in CPU full-attention shadow.
@@ -81,7 +84,7 @@ count. Unseen Target mass is never used online.
 
 ## Correctness evidence
 
-- 当前 65 项 CPU 测试全部通过；两项 CUDA 测试为显式启用，以免触碰繁忙 GPU。本检查点
+- 当前 66 项 CPU 测试全部通过；两项 CUDA 测试为显式启用，以免触碰繁忙 GPU。本检查点
   再次通过完整 CPU 测试、Ruff lint/format 与 `git diff --check`。
 - On a random miniature Qwen3-MoE, custom dense prefill and incremental decode logits
   match the Transformers reference when all KV is selected.

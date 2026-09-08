@@ -183,6 +183,8 @@ def main() -> None:
             "maximum_prefill_batch": run_result.maximum_prefill_batch,
             "draft_prefill_batches": run_result.draft_prefill_batches,
             "maximum_draft_prefill_batch": run_result.maximum_draft_prefill_batch,
+            "draft_refresh_batches": run_result.draft_refresh_batches,
+            "maximum_draft_refresh_batch": run_result.maximum_draft_refresh_batch,
             "mean_ttft_seconds": statistics.mean(ttft),
             "p50_ttft_seconds": statistics.median(ttft),
             "mean_request_latency_seconds": statistics.mean(latency),

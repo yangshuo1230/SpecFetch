@@ -95,6 +95,8 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     assert result.maximum_prefill_batch == 2
     assert result.draft_prefill_batches == 2
     assert result.maximum_draft_prefill_batch == 2
+    assert result.draft_refresh_batches == 0
+    assert result.maximum_draft_refresh_batch == 0
     # 两轮准入各只初始化一次批量 Draft provider。
     assert len(providers) == 2
     # 每轮均为一次前缀前向加两次批量 lookahead，不随组内请求数增加。
@@ -151,6 +153,8 @@ def test_prefill_only_requests_report_peak_admitted_batch_without_draft():
     assert result.maximum_prefill_batch == 2
     assert result.draft_prefill_batches == 0
     assert result.maximum_draft_prefill_batch == 0
+    assert result.draft_refresh_batches == 0
+    assert result.maximum_draft_refresh_batch == 0
     assert engine.prefill_request_ids == [["a", "b"], ["c"]]
 
 
@@ -168,3 +172,34 @@ def test_split_draft_predictions_round_trip_in_request_order():
 
     assert merged.kv == prediction.kv
     assert torch.equal(merged.experts[0], prediction.experts[0].flip(0))
+
+
+def test_continuous_runner_batches_compatible_draft_refreshes():
+    torch.manual_seed(22)
+    engine, worker = build_engine(tiny_model())
+    draft = tiny_draft()
+    draft_forwards = []
+    hook = draft.register_forward_hook(lambda *_: draft_forwards.append(1))
+    runner = ContinuousBatchRunner(
+        engine,
+        lambda: DraftSignalProvider(draft, None, lookahead=2),
+        max_batch_size=2,
+        prefetch=False,
+    )
+    result = runner.run(
+        [
+            ServingRequest("a", [1, 2, 3], 4),
+            ServingRequest("b", [4, 5, 6], 4),
+        ]
+    )
+
+    assert {key: len(value) for key, value in result.generated_token_ids.items()} == {
+        "a": 4,
+        "b": 4,
+    }
+    # 首轮：prefix + 2 lookahead；刷新轮：advance + 2 lookahead。
+    assert len(draft_forwards) == 6
+    assert result.draft_refresh_batches == 1
+    assert result.maximum_draft_refresh_batch == 2
+    hook.remove()
+    worker.close()

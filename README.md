@@ -97,6 +97,8 @@ python -m scripts.run_continuous_runtime \
 同一轮准入中长度相同的 prompt 会合并为一次 Target 预填充；不同长度仍分组执行，且每个
 请求继续维护独立的 Draft KV 状态。同组请求的 Draft 前缀也只批量计算一次，随后拆成
 请求私有 KV 缓存供独立推进；首轮 lookahead 同样先按组计算，再拆分为请求私有预测。
+后续刷新只合并缓存长度与推进进度兼容的请求，完成批量 advance/rollout 后立即恢复私有
+状态，并在结果中记录刷新批次及其峰值大小。
 
 The primary experiment treats the draft as a prefetch oracle, not as a source of tokens for target
 verification. At every target step, the draft independently rolls out from only the currently known

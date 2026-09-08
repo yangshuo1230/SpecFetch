@@ -30,6 +30,8 @@ class ContinuousBatchResult:
     maximum_prefill_batch: int
     draft_prefill_batches: int
     maximum_draft_prefill_batch: int
+    draft_refresh_batches: int
+    maximum_draft_refresh_batch: int
     request_timings: dict[str, dict[str, float]]
 
 
@@ -42,10 +44,6 @@ def _subset_state(state: BatchState, request_ids: list[str]) -> BatchState:
         {(owner, layer): cache for (owner, layer), cache in state.kv.items() if owner in selected},
         step=state.step,
     )
-
-
-def _request_state(state: BatchState, request_id: str) -> BatchState:
-    return _subset_state(state, [request_id])
 
 
 def _split_predictions(
@@ -129,20 +127,49 @@ class ContinuousBatchRunner:
         self.prefetch_horizons = prefetch_horizons
         self.prefetch = prefetch
 
-    def _refresh(
+    def _refresh_many(
         self,
         state: BatchState,
-        request_id: str,
-        execution: RequestExecution,
-    ) -> None:
-        if execution.horizons:
-            return
-        if execution.pending_actual:
-            actual = torch.stack(execution.pending_actual)[None]
-            execution.provider.advance(actual)
-            execution.pending_actual.clear()
-        plan = execution.provider.predict(_request_state(state, request_id))
-        execution.horizons = plan.horizons
+        request_ids: list[str],
+        executions: dict[str, RequestExecution],
+    ) -> tuple[int, int]:
+        groups: dict[tuple[int, int, int, int, int], list[str]] = {}
+        for request_id in request_ids:
+            execution = executions[request_id]
+            if execution.horizons:
+                continue
+            cache = execution.provider.cache
+            if cache is None:
+                raise RuntimeError("刷新前必须先初始化 Draft provider")
+            key = (
+                id(execution.provider.model),
+                id(execution.provider.probe_bank),
+                execution.provider.lookahead,
+                cache.get_seq_length(),
+                len(execution.pending_actual),
+            )
+            groups.setdefault(key, []).append(request_id)
+
+        for grouped_ids in groups.values():
+            providers = [executions[request_id].provider for request_id in grouped_ids]
+            batch_provider = DraftSignalProvider.merge_requests(providers)
+            pending_count = len(executions[grouped_ids[0]].pending_actual)
+            if pending_count:
+                actual = torch.stack(
+                    [
+                        torch.stack(executions[request_id].pending_actual)
+                        for request_id in grouped_ids
+                    ]
+                )
+                batch_provider.advance(actual)
+                for request_id in grouped_ids:
+                    executions[request_id].pending_actual.clear()
+            plan = batch_provider.predict(_subset_state(state, grouped_ids))
+            split_horizons = _split_predictions(plan.horizons, grouped_ids)
+            for request_id, provider in zip(grouped_ids, batch_provider.split_requests()):
+                executions[request_id].provider = provider
+                executions[request_id].horizons = split_horizons[request_id]
+        return len(groups), max((len(group) for group in groups.values()), default=0)
 
     def run(self, requests: list[ServingRequest]) -> ContinuousBatchResult:
         scheduler = ContinuousBatchScheduler(self.max_batch_size)
@@ -158,6 +185,8 @@ class ContinuousBatchRunner:
         maximum_prefill_batch = 0
         draft_prefill_batches = 0
         maximum_draft_prefill_batch = 0
+        draft_refresh_batches = 0
+        maximum_draft_refresh_batch = 0
         run_start = time.perf_counter()
         request_timings = {
             request.request_id: {
@@ -248,8 +277,9 @@ class ContinuousBatchRunner:
             active_ids = scheduler.active_ids
             if not active_ids:
                 continue
-            for request_id in active_ids:
-                self._refresh(state, request_id, executions[request_id])
+            refresh_batches, refresh_peak = self._refresh_many(state, active_ids, executions)
+            draft_refresh_batches += refresh_batches
+            maximum_draft_refresh_batch = max(maximum_draft_refresh_batch, refresh_peak)
             available_horizons = min(
                 self.prefetch_horizons,
                 min(len(executions[request_id].horizons) for request_id in active_ids),
@@ -290,5 +320,7 @@ class ContinuousBatchRunner:
             maximum_prefill_batch,
             draft_prefill_batches,
             maximum_draft_prefill_batch,
+            draft_refresh_batches,
+            maximum_draft_refresh_batch,
             request_timings,
         )

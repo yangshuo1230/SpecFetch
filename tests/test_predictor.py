@@ -1,3 +1,4 @@
+import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
@@ -90,3 +91,11 @@ def test_batched_draft_prefix_splits_into_independent_request_caches():
     plan = second.predict(BatchState(["b"], [3], {}))
     assert plan.token_ids.shape == (1, 2)
     assert second.cache.get_seq_length() == 3
+
+    with pytest.raises(ValueError, match="缓存长度不兼容"):
+        DraftSignalProvider.merge_requests([first, second])
+    second.advance(torch.tensor([8]))
+    merged = DraftSignalProvider.merge_requests([first, second])
+    assert merged.request_ids == ["a", "b"]
+    assert merged.next_logits.shape == (2, config.vocab_size)
+    assert merged.cache.get_seq_length() == 4
