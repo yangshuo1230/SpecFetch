@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-pin-experts", action="store_true")
     parser.add_argument("--lazy-expert-store", action="store_true")
+    parser.add_argument("--moe-backend", choices=("auto", "torch", "vllm"), default="torch")
     return parser.parse_args()
 
 
@@ -135,7 +136,14 @@ def main() -> None:
     backend = CudaTransferBackend(args.device, expert_slots=config.expert_cache_slots)
     worker = TransferWorker(queue, residency, backend)
     runtime = OffloadRuntime(queue, residency, worker)
-    engine = Qwen3SparseOffloadEngine(target, expert_source, runtime, residency, config)
+    engine = Qwen3SparseOffloadEngine(
+        target,
+        expert_source,
+        runtime,
+        residency,
+        config,
+        moe_backend=args.moe_backend,
+    )
     provider = DraftSignalProvider(draft, probes, args.lookahead)
     request_ids = [f"request-{index}" for index in range(args.batch_size)]
     expert_preload_start = time.perf_counter()

@@ -25,6 +25,8 @@ class PackedExpertSlots:
         self.device = torch.device(device)
         self._buffers: dict[str, torch.Tensor] | None = None
         self._payload_type: type | None = None
+        self._expert_layout = False
+        self._expert_width = 0
         self._free = list(reversed(range(capacity)))
         self._assigned: dict[ResourceKey, int] = {}
 
@@ -43,12 +45,34 @@ class PackedExpertSlots:
         if not tensors:
             raise TypeError("packed expert payload has no tensor fields")
         self._payload_type = type(payload)
-        self._buffers = {
-            name: torch.empty(
-                (self.capacity, *value.shape), dtype=value.dtype, device=self.device
-            )
-            for name, value in tensors.items()
-        }
+        self._expert_layout = (
+            set(tensors) == {"gate", "up", "down"}
+            and tensors["gate"].shape == tensors["up"].shape
+            and tensors["down"].shape
+            == (tensors["gate"].shape[1], tensors["gate"].shape[0])
+            and len({value.dtype for value in tensors.values()}) == 1
+        )
+        if self._expert_layout:
+            self._expert_width = tensors["gate"].shape[0]
+            self._buffers = {
+                "gate_up": torch.empty(
+                    (self.capacity, self._expert_width * 2, tensors["gate"].shape[1]),
+                    dtype=tensors["gate"].dtype,
+                    device=self.device,
+                ),
+                "down": torch.empty(
+                    (self.capacity, *tensors["down"].shape),
+                    dtype=tensors["down"].dtype,
+                    device=self.device,
+                ),
+            }
+        else:
+            self._buffers = {
+                name: torch.empty(
+                    (self.capacity, *value.shape), dtype=value.dtype, device=self.device
+                )
+                for name, value in tensors.items()
+            }
 
     def acquire(self, key: ResourceKey, payload: Any) -> Any:
         if key in self._assigned:
@@ -61,6 +85,22 @@ class PackedExpertSlots:
         if not self._free:
             raise RuntimeError("no free packed expert slot")
         slot = self._free.pop()
+        if self._expert_layout:
+            gate = self._buffers["gate_up"][slot, : self._expert_width]
+            up = self._buffers["gate_up"][slot, self._expert_width :]
+            down = self._buffers["down"][slot]
+            sources = (payload.gate, payload.up, payload.down)
+            destinations = (gate, up, down)
+            if any(
+                source.shape != destination.shape or source.dtype != destination.dtype
+                for source, destination in zip(sources, destinations)
+            ):
+                self._free.append(slot)
+                raise ValueError("expert tensor shape or dtype changed after slot allocation")
+            for source, destination in zip(sources, destinations):
+                destination.copy_(source, non_blocking=self.device.type == "cuda")
+            self._assigned[key] = slot
+            return self._payload_type(gate=gate, up=up, down=down)
         values = {}
         for item in fields(payload):
             source = getattr(payload, item.name)
@@ -82,6 +122,14 @@ class PackedExpertSlots:
             return False
         self._free.append(slot)
         return True
+
+    def slot_for(self, key: ResourceKey) -> int:
+        return self._assigned[key]
+
+    def fused_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._buffers is None or not self._expert_layout:
+            raise RuntimeError("packed payload does not use the fused expert layout")
+        return self._buffers["gate_up"], self._buffers["down"]
 
 
 class CudaTransferBackend:
@@ -125,6 +173,16 @@ class CudaTransferBackend:
         del gpu_value
         if key.kind == ResourceKind.EXPERT and self.expert_slots is not None:
             self.expert_slots.release(key)
+
+    def expert_slot(self, key: ResourceKey) -> int:
+        if self.expert_slots is None:
+            raise RuntimeError("fixed expert slots are disabled")
+        return self.expert_slots.slot_for(key)
+
+    def packed_expert_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.expert_slots is None:
+            raise RuntimeError("fixed expert slots are disabled")
+        return self.expert_slots.fused_weights()
 
 
 @dataclass

@@ -123,6 +123,60 @@ def test_grouped_prefill_streams_more_experts_than_cache_capacity():
     worker.close()
 
 
+def test_fused_adapter_maps_logical_experts_to_packed_slots():
+    from src.runtime.transfer import PackedExpertSlots
+
+    class PackedBackend:
+        def __init__(self):
+            self.slots = PackedExpertSlots(3, "cpu")
+
+        def copy_to_gpu(self, key, value):
+            return self.slots.acquire(key, value)
+
+        def release_gpu(self, key, value):
+            del value
+            self.slots.release(key)
+
+        def packed_expert_weights(self):
+            return self.slots.fused_weights()
+
+        def expert_slot(self, key):
+            return self.slots.slot_for(key)
+
+    def fake_fused_moe(**kwargs):
+        hidden = kwargs["hidden_states"]
+        w1 = kwargs["w1"]
+        w2 = kwargs["w2"]
+        weights = kwargs["topk_weights"]
+        selected = kwargs["topk_ids"]
+        width = w1.shape[1] // 2
+        result = torch.zeros_like(hidden)
+        for token in range(len(hidden)):
+            for route in range(selected.shape[1]):
+                expert = selected[token, route]
+                gate_up = F.linear(hidden[token], w1[expert])
+                activated = F.silu(gate_up[:width]) * gate_up[width:]
+                result[token] += F.linear(activated, w2[expert]) * weights[token, route]
+        return result
+
+    experts = [make_expert(0), make_expert(1), make_expert(2)]
+    backend = PackedBackend()
+    runtime, registry, worker = runtime_with(experts, backend=backend)
+    executor = OffloadedExpertExecutor(runtime, registry, top_k=2, fused_moe=fake_fused_moe)
+    hidden = torch.randn(2, 4, generator=torch.Generator().manual_seed(10))
+    logits = torch.tensor([[3.0, 2.0, 0.0], [0.0, 2.0, 3.0]])
+    routing = torch.softmax(logits, dim=-1)
+    routing, selected = routing.topk(2, dim=-1)
+    routing /= routing.sum(dim=-1, keepdim=True)
+    loaded = executor._load(selected, 0, ["a", "b"])
+    actual = executor._fused(hidden, selected, routing, loaded)
+    expected = executor._vectorized(hidden, selected, routing, loaded)
+    assert torch.allclose(actual, expected, atol=1e-5)
+    for key, _ in loaded.values():
+        runtime.release(key)
+    worker.close()
+
+
 def test_predictions_merge_shared_expert_consumers():
     experts = [make_expert(0), make_expert(1)]
     runtime, registry, worker = runtime_with(experts)

@@ -13,6 +13,7 @@ from src.runtime.expert import (
     ExpertWeights,
     OffloadedExpertExecutor,
     enqueue_expert_predictions,
+    optional_vllm_fused_moe,
 )
 from src.runtime.kv_cache import RequestLayerKV, SparseAttentionResult
 from src.runtime.memory_queue import ResourceKey
@@ -108,6 +109,8 @@ class Qwen3SparseOffloadEngine:
         runtime: OffloadRuntime,
         residency: ResidencyManager,
         config: RuntimeConfig,
+        *,
+        moe_backend: str = "torch",
     ) -> None:
         self.model = model.eval()
         self.runtime = runtime
@@ -118,6 +121,7 @@ class Qwen3SparseOffloadEngine:
             runtime,
             self.expert_registry,
             top_k=model.config.num_experts_per_tok,
+            fused_moe=optional_vllm_fused_moe(moe_backend, runtime.worker.backend),
         )
 
     @classmethod
@@ -129,9 +133,10 @@ class Qwen3SparseOffloadEngine:
         config: RuntimeConfig,
         *,
         pin_experts: bool = False,
+        moe_backend: str = "torch",
     ) -> Qwen3SparseOffloadEngine:
         source = ModuleExpertSource(model, pin_memory=pin_experts)
-        return cls(model, source, runtime, residency, config)
+        return cls(model, source, runtime, residency, config, moe_backend=moe_backend)
 
     @property
     def device(self) -> torch.device:

@@ -4,6 +4,7 @@ import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -172,12 +173,14 @@ class OffloadedExpertExecutor:
         top_k: int = 8,
         miss_cost_ms: float = 0.5,
         vectorized_token_limit: int = 8,
+        fused_moe: Callable[..., torch.Tensor] | None = None,
     ) -> None:
         self.runtime = runtime
         self.registry = registry
         self.top_k = top_k
         self.miss_cost_ms = miss_cost_ms
         self.vectorized_token_limit = vectorized_token_limit
+        self.fused_moe = fused_moe
 
     def _load(
         self, selected: torch.Tensor, layer: int, request_ids: list[str]
@@ -216,6 +219,28 @@ class OffloadedExpertExecutor:
         outputs = torch.bmm(down, activated.unsqueeze(-1)).squeeze(-1)
         outputs = outputs.reshape(*selected.shape, hidden_states.shape[-1])
         return (outputs * routing[..., None]).sum(dim=1).to(hidden_states.dtype)
+
+    def _fused(
+        self,
+        hidden_states: torch.Tensor,
+        selected: torch.Tensor,
+        routing: torch.Tensor,
+        loaded: dict[int, tuple[ResourceKey, ExpertWeights]],
+    ) -> torch.Tensor:
+        backend = self.runtime.worker.backend
+        w1, w2 = backend.packed_expert_weights()
+        physical_ids = torch.empty_like(selected)
+        for expert, (key, _) in loaded.items():
+            physical_ids.masked_fill_(selected == expert, backend.expert_slot(key))
+        return self.fused_moe(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=routing,
+            topk_ids=physical_ids,
+            inplace=False,
+            activation="silu",
+        )
 
     def _grouped_streaming(
         self,
@@ -261,7 +286,14 @@ class OffloadedExpertExecutor:
         routing = (routing / routing.sum(dim=-1, keepdim=True)).to(hidden_states.dtype)
         if len(hidden_states) <= self.vectorized_token_limit:
             loaded = self._load(selected, layer, request_ids)
-            result = self._vectorized(hidden_states, selected, routing, loaded)
+            backend = self.runtime.worker.backend
+            packed = hasattr(backend, "packed_expert_weights") and hasattr(
+                backend, "expert_slot"
+            )
+            if self.fused_moe is not None and packed and hidden_states.is_cuda:
+                result = self._fused(hidden_states, selected, routing, loaded)
+            else:
+                result = self._vectorized(hidden_states, selected, routing, loaded)
             for key, _ in loaded.values():
                 self.runtime.release(key)
         else:
@@ -273,3 +305,22 @@ class OffloadedExpertExecutor:
                 request_ids,
             )
         return result
+
+
+def optional_vllm_fused_moe(mode: str, backend) -> Callable[..., torch.Tensor] | None:
+    """Resolve the optional production kernel without coupling the core to vLLM."""
+    if mode not in {"auto", "torch", "vllm"}:
+        raise ValueError("MoE backend must be auto, torch, or vllm")
+    if mode == "torch":
+        return None
+    if not hasattr(backend, "packed_expert_weights"):
+        if mode == "vllm":
+            raise RuntimeError("vLLM fused MoE requires a packed expert backend")
+        return None
+    try:
+        from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+    except Exception:  # noqa: BLE001 - auto mode is an optional acceleration path
+        if mode == "vllm":
+            raise
+        return None
+    return fused_experts

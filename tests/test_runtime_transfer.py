@@ -92,6 +92,9 @@ def test_packed_expert_slots_reuse_released_storage():
     )
     resident = slots.acquire(first_key, first)
     gate_pointer = resident.gate.data_ptr()
+    w1, w2 = slots.fused_weights()
+    assert resident.gate.data_ptr() == w1[0, :2].data_ptr()
+    assert resident.down.data_ptr() == w2[0].data_ptr()
     assert slots.release(first_key)
     replaced = slots.acquire(second_key, second)
     assert replaced.gate.data_ptr() == gate_pointer
