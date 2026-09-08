@@ -55,6 +55,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expert-cache-slots", type=int, default=64)
     parser.add_argument("--kv-cache-slots", type=int, default=512)
     parser.add_argument("--disable-prefetch", action="store_true")
+    parser.add_argument(
+        "--shadow-attention",
+        action="store_true",
+        help="Compute a CPU full-attention shadow for quality metrics; invalidates latency",
+    )
+    parser.add_argument(
+        "--shadow-thresholds",
+        default="",
+        help="Comma-separated counterfactual mass thresholds evaluated by the CPU shadow",
+    )
     parser.add_argument("--no-pin-experts", action="store_true")
     parser.add_argument("--lazy-expert-store", action="store_true")
     return parser.parse_args()
@@ -62,6 +72,13 @@ def parse_args() -> argparse.Namespace:
 
 def synchronize(device: str) -> None:
     torch.cuda.synchronize(torch.device(device))
+
+
+def parse_thresholds(value: str) -> tuple[float, ...]:
+    thresholds = tuple(float(item) for item in value.split(",") if item.strip())
+    if any(not 0 < item <= 1 for item in thresholds):
+        raise ValueError("shadow thresholds must be in (0, 1]")
+    return thresholds
 
 
 def main() -> None:
@@ -72,6 +89,7 @@ def main() -> None:
         raise ValueError("draft-refresh-tokens must be in [1, lookahead]")
     if not 0 < args.prefetch_horizons <= args.lookahead:
         raise ValueError("prefetch-horizons must be in [1, lookahead]")
+    shadow_thresholds = parse_thresholds(args.shadow_thresholds)
     config = RuntimeConfig(
         sink_tokens=args.sink_tokens,
         recent_tokens=args.recent_tokens,
@@ -153,6 +171,11 @@ def main() -> None:
         step_seconds = []
         selected_chunks = []
         predicted_mass = []
+        target_mass_coverage = []
+        relative_l2_error = []
+        cosine_similarity = []
+        shadow_seconds = 0.0
+        threshold_sweep: dict[str, dict[str, list[float]]] = {}
         pending_actual: list[torch.Tensor] = []
         remaining_horizons = plan.horizons[:refresh_tokens]
         for _ in range(max(0, args.max_new_tokens - 1)):
@@ -172,6 +195,8 @@ def main() -> None:
                 output.state,
                 remaining_horizons[: args.prefetch_horizons],
                 prefetch=not args.disable_prefetch,
+                shadow_attention=args.shadow_attention,
+                shadow_thresholds=shadow_thresholds,
             )
             synchronize(args.device)
             target_decode_seconds.append(time.perf_counter() - target_start)
@@ -187,6 +212,37 @@ def main() -> None:
             predicted_mass.extend(
                 trace.predicted_mass for trace in output.sparse_attention.values()
             )
+            target_mass_coverage.extend(
+                trace.target_mass_coverage
+                for trace in output.sparse_attention.values()
+                if trace.target_mass_coverage is not None
+            )
+            relative_l2_error.extend(
+                trace.relative_l2_error
+                for trace in output.sparse_attention.values()
+                if trace.relative_l2_error is not None
+            )
+            cosine_similarity.extend(
+                trace.cosine_similarity
+                for trace in output.sparse_attention.values()
+                if trace.cosine_similarity is not None
+            )
+            shadow_seconds += sum(
+                trace.shadow_seconds for trace in output.sparse_attention.values()
+            )
+            for trace in output.sparse_attention.values():
+                for threshold, metrics in (trace.threshold_sweep or {}).items():
+                    aggregate = threshold_sweep.setdefault(
+                        threshold,
+                        {
+                            "selected_old_chunks": [],
+                            "target_mass_coverage": [],
+                            "relative_l2_error": [],
+                            "cosine_similarity": [],
+                        },
+                    )
+                    for name, value in metrics.items():
+                        aggregate[name].append(value)
     finally:
         worker.close()
 
@@ -221,12 +277,30 @@ def main() -> None:
             "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(args.device)) / 2**30,
             "initialization_seconds": initialization_seconds,
             "expert_preload_seconds": expert_preload_seconds,
+            "shadow_attention_seconds": shadow_seconds,
+            "latency_valid": not (args.shadow_attention or shadow_thresholds),
         },
         "sparse_kv": {
             "mean_selected_old_chunks_per_layer_request": statistics.mean(selected_chunks)
             if selected_chunks
             else 0,
             "mean_predicted_mass": statistics.mean(predicted_mass) if predicted_mass else 0,
+            "mean_target_mass_coverage": statistics.mean(target_mass_coverage)
+            if target_mass_coverage
+            else None,
+            "mean_relative_l2_error": statistics.mean(relative_l2_error)
+            if relative_l2_error
+            else None,
+            "mean_cosine_similarity": statistics.mean(cosine_similarity)
+            if cosine_similarity
+            else None,
+            "threshold_sweep": {
+                threshold: {
+                    f"mean_{name}": statistics.mean(values)
+                    for name, values in metrics.items()
+                }
+                for threshold, metrics in threshold_sweep.items()
+            },
         },
         "transfer": vars(transfer_end),
         "transfer_by_phase": {

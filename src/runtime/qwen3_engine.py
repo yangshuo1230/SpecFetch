@@ -286,6 +286,8 @@ class Qwen3SparseOffloadEngine:
         predictions: StepPredictions | list[StepPredictions],
         *,
         prefetch: bool = True,
+        shadow_attention: bool = False,
+        shadow_thresholds: tuple[float, ...] = (),
     ) -> EngineOutput:
         if token_ids.ndim != 1 or len(token_ids) != len(state.request_ids):
             raise ValueError("decode requires one token per active request")
@@ -317,7 +319,11 @@ class Qwen3SparseOffloadEngine:
                     count = len(cache.old)
                     scores = {index: 1 / count for index in cache.old} if count else {}
                 result = cache.sparse_attention(
-                    query[request_index, :, 0], scores, miss_cost_ms=0.05
+                    query[request_index, :, 0],
+                    scores,
+                    miss_cost_ms=0.05,
+                    shadow=shadow_attention,
+                    shadow_thresholds=shadow_thresholds,
                 )
                 traces[(request_id, layer_index)] = result
                 attended.append(result.output)

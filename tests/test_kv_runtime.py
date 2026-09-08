@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from src.runtime.config import RuntimeConfig
@@ -86,4 +87,40 @@ def test_close_unregisters_all_request_private_old_chunks():
     cache.enqueue({chunk: 1.0 for chunk in cache.old}, deadline=1, miss_cost_ms=1)
     cache.close()
     assert all(not residency.contains(identity) for identity in identities)
+    worker.close()
+
+
+def test_full_attention_shadow_measures_sparse_quality_without_extra_residency():
+    config = RuntimeConfig(
+        sink_tokens=2,
+        recent_tokens=2,
+        kv_chunk_tokens=2,
+        predicted_mass_threshold=0.5,
+        marginal_mass_threshold=1.0,
+        marginal_patience=1,
+        minimum_old_chunks=1,
+    )
+    cache, residency, worker = build_cache(config)
+    generator = torch.Generator().manual_seed(8)
+    key = torch.randn(8, 1, 2, generator=generator)
+    value = torch.randn(8, 1, 2, generator=generator)
+    query = torch.randn(2, 2, generator=generator)
+    cache.initialize(key, value)
+    result = cache.sparse_attention(
+        query,
+        {0: 0.9, 1: 0.1},
+        miss_cost_ms=1,
+        shadow=True,
+        shadow_thresholds=(0.5, 0.99),
+    )
+    assert result.selected_old_chunks == [0]
+    assert 0 < result.target_mass_coverage < 1
+    assert result.relative_l2_error > 0
+    assert -1 <= result.cosine_similarity <= 1
+    assert result.shadow_seconds > 0
+    assert result.threshold_sweep["0.5"]["selected_old_chunks"] == 1
+    assert result.threshold_sweep["0.99"]["selected_old_chunks"] == 2
+    assert result.threshold_sweep["0.99"]["target_mass_coverage"] == pytest.approx(1.0)
+    assert residency.state(cache.old[0]) == ResourceState.GPU_RESIDENT
+    assert residency.state(cache.old[1]) == ResourceState.CPU_ONLY
     worker.close()

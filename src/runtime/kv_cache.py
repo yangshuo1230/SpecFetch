@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import torch
@@ -28,6 +29,11 @@ class SparseAttentionResult:
     selected_old_chunks: list[int]
     predicted_mass: float
     target_marginals: list[float]
+    target_mass_coverage: float | None = None
+    relative_l2_error: float | None = None
+    cosine_similarity: float | None = None
+    shadow_seconds: float = 0.0
+    threshold_sweep: dict[str, dict[str, float]] | None = None
 
 
 def _cpu_payload(key: torch.Tensor, value: torch.Tensor, pin: bool) -> tuple[torch.Tensor, ...]:
@@ -165,6 +171,8 @@ class RequestLayerKV:
         draft_mass: dict[int, float],
         *,
         miss_cost_ms: float,
+        shadow: bool = False,
+        shadow_thresholds: tuple[float, ...] = (),
     ) -> SparseAttentionResult:
         if self.sink is None or self.recent is None:
             raise RuntimeError("KV cache is not initialized")
@@ -199,6 +207,92 @@ class RequestLayerKV:
             if controller.observe(draft_mass[chunk], marginal):
                 break
         output = attention_output(query, always + selected_payloads)
+        coverage = None
+        relative_l2 = None
+        cosine = None
+        shadow_seconds = 0.0
+        threshold_sweep = None
+        if shadow or shadow_thresholds:
+            shadow_start = time.perf_counter()
+            cpu_query = query.detach().float().cpu()
+            cpu_always = [
+                (key.detach().float().cpu(), value.detach().float().cpu())
+                for key, value in always
+            ]
+            cpu_old = {
+                chunk: tuple(
+                    tensor.detach().float().cpu()
+                    for tensor in self.residency.record(identity).cpu_value
+                )
+                for chunk, identity in self.old.items()
+            }
+            full_chunks = cpu_always + list(cpu_old.values())
+            selected_chunks = cpu_always + [cpu_old[chunk] for chunk in selected]
+            exact = attention_output(cpu_query, full_chunks)
+            approximate = output.detach().float().cpu()
+            difference = torch.linalg.vector_norm(approximate - exact)
+            relative_l2 = float(difference / torch.linalg.vector_norm(exact).clamp_min(1e-12))
+            cosine = float(
+                torch.nn.functional.cosine_similarity(
+                    approximate.reshape(1, -1), exact.reshape(1, -1)
+                )[0]
+            )
+            full_partition = empty_partition(len(cpu_query))
+            selected_partition = empty_partition(len(cpu_query))
+            for key, _ in full_chunks:
+                full_partition = update_partition(
+                    full_partition, chunk_logsumexp(cpu_query, key)
+                )
+            for key, _ in selected_chunks:
+                selected_partition = update_partition(
+                    selected_partition, chunk_logsumexp(cpu_query, key)
+                )
+            coverage = float(torch.exp(selected_partition - full_partition).mean())
+            threshold_sweep = {}
+            ordered_chunks = [
+                chunk
+                for chunk in sorted(draft_mass, key=draft_mass.get, reverse=True)
+                if chunk in cpu_old
+            ]
+            for threshold in shadow_thresholds:
+                sweep_controller = HybridStopController(
+                    threshold,
+                    self.config.marginal_mass_threshold,
+                    self.config.marginal_patience,
+                    min(self.config.minimum_old_chunks, len(self.old)),
+                )
+                sweep_partition = empty_partition(len(cpu_query))
+                for key, _ in cpu_always:
+                    sweep_partition = update_partition(
+                        sweep_partition, chunk_logsumexp(cpu_query, key)
+                    )
+                sweep_selected = []
+                for chunk in ordered_chunks:
+                    chunk_lse = chunk_logsumexp(cpu_query, cpu_old[chunk][0])
+                    marginal = mean_target_marginal(sweep_partition, chunk_lse)
+                    sweep_partition = update_partition(sweep_partition, chunk_lse)
+                    sweep_selected.append(chunk)
+                    if sweep_controller.observe(draft_mass[chunk], marginal):
+                        break
+                sweep_chunks = cpu_always + [cpu_old[chunk] for chunk in sweep_selected]
+                sweep_output = attention_output(cpu_query, sweep_chunks)
+                sweep_difference = torch.linalg.vector_norm(sweep_output - exact)
+                label = f"{threshold:.4g}"
+                threshold_sweep[label] = {
+                    "selected_old_chunks": float(len(sweep_selected)),
+                    "target_mass_coverage": float(
+                        torch.exp(sweep_partition - full_partition).mean()
+                    ),
+                    "relative_l2_error": float(
+                        sweep_difference / torch.linalg.vector_norm(exact).clamp_min(1e-12)
+                    ),
+                    "cosine_similarity": float(
+                        torch.nn.functional.cosine_similarity(
+                            sweep_output.reshape(1, -1), exact.reshape(1, -1)
+                        )[0]
+                    ),
+                }
+            shadow_seconds = time.perf_counter() - shadow_start
         for chunk in selected:
             self.runtime.release(self.old[chunk])
         return SparseAttentionResult(
@@ -206,6 +300,11 @@ class RequestLayerKV:
             selected,
             controller.predicted_mass,
             marginals,
+            coverage,
+            relative_l2,
+            cosine,
+            shadow_seconds,
+            threshold_sweep,
         )
 
     def reconcile(
