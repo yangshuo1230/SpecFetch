@@ -198,8 +198,11 @@ class RequestLayerKV:
             selected_payloads.append((key, value))
             if controller.observe(draft_mass[chunk], marginal):
                 break
+        output = attention_output(query, always + selected_payloads)
+        for chunk in selected:
+            self.runtime.release(self.old[chunk])
         return SparseAttentionResult(
-            attention_output(query, always + selected_payloads),
+            output,
             selected,
             controller.predicted_mass,
             marginals,
@@ -231,3 +234,13 @@ class RequestLayerKV:
             if self.residency.state(identity) == ResourceState.GPU_RESIDENT:
                 self.residency.evict(identity)
                 self._unwanted.remove(identity)
+
+    def close(self) -> None:
+        """Release all request-private offloaded chunks."""
+        for identity in self.old.values():
+            self.runtime.drop(identity)
+        self.old.clear()
+        self.old_ranges.clear()
+        self._unwanted.clear()
+        self.sink = None
+        self.recent = None

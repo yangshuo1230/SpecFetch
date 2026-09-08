@@ -128,6 +128,35 @@ def test_residency_eviction_returns_packed_expert_slot():
     worker.close()
 
 
+def test_drop_removes_request_private_resource_record():
+    runtime, residency, worker, _ = build_runtime()
+    key = resource(0)
+    runtime.demand(key, consumer="r0", miss_cost_ms=1)
+    runtime.drop(key)
+    assert not residency.contains(key)
+    worker.close()
+
+
+def test_consumer_lease_cancellation_and_demand_scope_recompute_priority():
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    key = resource(0)
+    residency.register_cpu(key, "cpu", 1)
+    assert residency.begin_transfer(
+        key,
+        priority=5,
+        deadline=1,
+        consumer_leases={"a": (2, 1), "b": (3, 2)},
+    )
+    residency.complete_transfer(key, "gpu")
+    assert residency.record(key).priority == 5
+    residency.cancel_lease(key, "a")
+    assert residency.record(key).priority == 3
+    residency.mark_demand(key)
+    assert residency.record(key).priority == float("inf")
+    residency.release(key)
+    assert residency.record(key).priority == 3
+
+
 def test_low_priority_prefetch_cannot_evict_high_priority_lease():
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
     residency.register_cpu(resource(0), "a", 1)

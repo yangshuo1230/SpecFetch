@@ -195,11 +195,23 @@ class TransferWorker:
             request = self.queue.pop(block=True)
             if request is None:
                 return
+            mib = max(request.size_bytes / 2**20, 1e-6)
+            consumer_leases = {
+                consumer: (
+                    request.miss_cost_ms
+                    * probability
+                    / max(1, request.consumer_deadlines[consumer] - self.queue.current_step)
+                    / mib,
+                    request.consumer_deadlines[consumer],
+                )
+                for consumer, probability in request.consumer_probabilities.items()
+            }
             if not self.residency.begin_transfer(
                 request.key,
                 priority=request.priority(self.queue.current_step),
                 deadline=request.deadline,
                 demand=request.demand,
+                consumer_leases=consumer_leases,
             ):
                 if not request.demand:
                     self.metrics.dropped_speculative += 1
@@ -280,7 +292,7 @@ class OffloadRuntime:
         self.worker.metrics.prefetch_batches += 1
         self.worker.metrics.prefetch_requests += len(requests)
         queued: list[QueueUpdate] = []
-        leases: dict[ResourceKey, tuple[float, int, float]] = {}
+        leases: list[tuple[ResourceKey, str, float, int, float]] = []
         for request in requests:
             key = request.key
             if not 0 <= request.probability <= 1:
@@ -290,13 +302,14 @@ class OffloadRuntime:
             state = self.residency.state(key)
             record = self.residency.record(key)
             if state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
-                expected_uses, earliest, largest_cost = leases.get(
-                    key, (0.0, request.deadline, request.miss_cost_ms)
-                )
-                leases[key] = (
-                    expected_uses + request.probability,
-                    min(earliest, request.deadline),
-                    max(largest_cost, request.miss_cost_ms),
+                leases.append(
+                    (
+                        key,
+                        request.consumer,
+                        request.probability,
+                        request.deadline,
+                        request.miss_cost_ms,
+                    )
                 )
                 continue
             self.residency.mark_queued(key)
@@ -311,16 +324,16 @@ class OffloadRuntime:
                 )
             )
         current_step = self.queue.current_step
-        for key, (expected_uses, deadline, miss_cost_ms) in leases.items():
+        for key, consumer, probability, deadline, miss_cost_ms in leases:
             record = self.residency.record(key)
             urgency = 1 / max(1, deadline - current_step)
             priority = (
                 miss_cost_ms
-                * expected_uses
+                * probability
                 * urgency
                 / max(record.size_bytes / 2**20, 1e-6)
             )
-            self.residency.update_lease(key, priority, deadline)
+            self.residency.update_lease(key, priority, deadline, consumer)
         self.queue.upsert_many(queued)
         self.worker.metrics.prefetch_enqueued += len(queued)
         self.worker.metrics.prefetch_enqueue_ms += (time.perf_counter() - start) * 1000
@@ -337,9 +350,12 @@ class OffloadRuntime:
         state = self.residency.state(key)
         if state == ResourceState.GPU_RESIDENT:
             self.worker.metrics.demand_hits += 1
+            self.residency.mark_demand(key)
             return self.residency.get_gpu(key)
         self.worker.metrics.demand_misses += 1
         record = self.residency.record(key)
+        if state == ResourceState.IN_FLIGHT:
+            self.residency.mark_demand(key)
         if state != ResourceState.IN_FLIGHT:
             self.residency.mark_queued(key)
             self.queue.promote_demand(
@@ -358,9 +374,28 @@ class OffloadRuntime:
 
     def cancel(self, key: ResourceKey, consumer: str | None = None) -> bool:
         removed = self.queue.cancel(key, consumer)
+        self.residency.cancel_lease(key, consumer)
         if removed and not self.queue.contains(key):
             self.residency.unqueue(key)
         return removed
 
     def release(self, key: ResourceKey) -> None:
         self.residency.release(key)
+
+    def drop(self, key: ResourceKey, timeout: float | None = None) -> None:
+        """Cancel and free a request-private resource at request completion."""
+        removed = self.queue.cancel(key)
+        if removed and not self.queue.contains(key):
+            self.residency.unqueue(key)
+        state = self.residency.state(key)
+        if state == ResourceState.QUEUED:
+            if not self.residency.wait_not_queued(key, timeout):
+                raise TimeoutError(f"queued resource did not settle during drop: {key}")
+            state = self.residency.state(key)
+        if state == ResourceState.IN_FLIGHT:
+            self.residency.wait_resident(key, timeout)
+            self.worker.check()
+            state = self.residency.state(key)
+        if state == ResourceState.GPU_RESIDENT:
+            self.residency.evict(key)
+        self.residency.unregister_cpu(key)

@@ -61,6 +61,7 @@ def test_sparse_attention_matches_dense_when_all_old_chunks_selected():
     expected = attention_output(query, [(key, value)])
     assert actual.selected_old_chunks == [0, 1]
     assert torch.allclose(actual.output, expected, atol=1e-5)
+    assert all(not cache.residency.record(identity).demand_active for identity in cache.old.values())
     worker.close()
 
 
@@ -73,4 +74,16 @@ def test_reconcile_evicts_chunks_not_predicted_for_next_decode():
     cache.sparse_attention(torch.ones(2, 2), {0: 0.8, 1: 0.2}, miss_cost_ms=1)
     cache.reconcile({1: 1.0}, deadline=2, miss_cost_ms=1)
     assert residency.state(cache.old[0]) == ResourceState.CPU_ONLY
+    worker.close()
+
+
+def test_close_unregisters_all_request_private_old_chunks():
+    config = RuntimeConfig(sink_tokens=2, recent_tokens=2, kv_chunk_tokens=2)
+    cache, residency, worker = build_cache(config)
+    values = torch.randn(10, 1, 2)
+    cache.initialize(values, values)
+    identities = list(cache.old.values())
+    cache.enqueue({chunk: 1.0 for chunk in cache.old}, deadline=1, miss_cost_ms=1)
+    cache.close()
+    assert all(not residency.contains(identity) for identity in identities)
     worker.close()

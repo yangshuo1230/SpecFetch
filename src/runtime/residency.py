@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
@@ -32,6 +32,8 @@ class ResourceRecord:
     deadline: int = 0
     speculative: bool = False
     used: bool = False
+    demand_active: bool = False
+    consumer_leases: dict[str, tuple[float, int]] = field(default_factory=dict)
 
 
 class ResidencyManager:
@@ -76,6 +78,18 @@ class ResidencyManager:
             except KeyError as error:
                 raise KeyError(f"unregistered resource {key}") from error
 
+    def contains(self, key: ResourceKey) -> bool:
+        with self._condition:
+            return key in self._records
+
+    def unregister_cpu(self, key: ResourceKey) -> None:
+        """Forget an inactive CPU source after its owning request completes."""
+        with self._condition:
+            record = self._records[key]
+            if record.state != ResourceState.CPU_ONLY:
+                raise RuntimeError(f"cannot unregister active resource {key}")
+            del self._records[key]
+
     def state(self, key: ResourceKey) -> ResourceState:
         return self.record(key).state
 
@@ -84,6 +98,7 @@ class ResidencyManager:
             record = self._records[key]
             if record.state == ResourceState.CPU_ONLY:
                 record.state = ResourceState.QUEUED
+                self._condition.notify_all()
                 return True
             return record.state == ResourceState.QUEUED
 
@@ -93,6 +108,7 @@ class ResidencyManager:
             if record.state != ResourceState.QUEUED:
                 return False
             record.state = ResourceState.CPU_ONLY
+            self._condition.notify_all()
             return True
 
     def _eviction_candidate(
@@ -109,6 +125,17 @@ class ResidencyManager:
                 order[key],
             ),
             default=None,
+        )
+
+    @staticmethod
+    def _refresh_priority(record: ResourceRecord) -> None:
+        if record.demand_active:
+            record.priority = float("inf")
+        else:
+            record.priority = sum(priority for priority, _ in record.consumer_leases.values())
+        record.deadline = min(
+            (deadline for _, deadline in record.consumer_leases.values()),
+            default=0,
         )
 
     def _evict_one(self, kind: ResourceKind, protected: set[ResourceKey]) -> None:
@@ -133,6 +160,7 @@ class ResidencyManager:
         priority: float = 0.0,
         deadline: int = 0,
         demand: bool = False,
+        consumer_leases: dict[str, tuple[float, int]] | None = None,
         protected: set[ResourceKey] | None = None,
     ) -> bool:
         with self._condition:
@@ -157,6 +185,15 @@ class ResidencyManager:
             record.deadline = deadline
             record.speculative = not demand
             record.used = demand
+            record.demand_active = demand
+            if demand:
+                record.consumer_leases = {}
+            elif consumer_leases is None:
+                record.consumer_leases = {"__transfer__": (priority, deadline)}
+            else:
+                record.consumer_leases = dict(consumer_leases)
+            self._refresh_priority(record)
+            self._condition.notify_all()
             return True
 
     def complete_transfer(self, key: ResourceKey, gpu_value: Any) -> None:
@@ -191,19 +228,41 @@ class ResidencyManager:
         with self._condition:
             self._records[key].pinned = pinned
 
-    def update_lease(self, key: ResourceKey, priority: float, deadline: int) -> None:
+    def update_lease(
+        self,
+        key: ResourceKey,
+        priority: float,
+        deadline: int,
+        consumer: str,
+    ) -> None:
         with self._condition:
             record = self._records[key]
-            record.priority = max(record.priority, priority)
-            record.deadline = min(record.deadline, deadline) if record.deadline else deadline
+            record.consumer_leases[consumer] = (priority, deadline)
             record.speculative = True
             record.used = False
+            self._refresh_priority(record)
+
+    def cancel_lease(self, key: ResourceKey, consumer: str | None = None) -> None:
+        with self._condition:
+            record = self._records[key]
+            if consumer is None:
+                record.consumer_leases.clear()
+            else:
+                record.consumer_leases.pop(consumer, None)
+            self._refresh_priority(record)
+
+    def mark_demand(self, key: ResourceKey) -> None:
+        with self._condition:
+            record = self._records[key]
+            record.demand_active = True
+            record.used = True
+            self._refresh_priority(record)
 
     def release(self, key: ResourceKey) -> None:
         with self._condition:
             record = self._records[key]
-            record.priority = 0.0
-            record.deadline = 0
+            record.demand_active = False
+            self._refresh_priority(record)
 
     def evict(self, key: ResourceKey) -> bool:
         with self._condition:
@@ -231,6 +290,13 @@ class ResidencyManager:
                     timeout=timeout,
                 )
                 and self._records[key].state == ResourceState.GPU_RESIDENT
+            )
+
+    def wait_not_queued(self, key: ResourceKey, timeout: float | None = None) -> bool:
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: self._records[key].state != ResourceState.QUEUED,
+                timeout=timeout,
             )
 
     def resident_keys(self, kind: ResourceKind | None = None) -> set[ResourceKey]:
