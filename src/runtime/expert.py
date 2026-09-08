@@ -237,14 +237,16 @@ class OffloadedExpertExecutor:
     ) -> torch.Tensor:
         backend = self.runtime.worker.backend
         w1, w2 = backend.packed_expert_weights()
-        expert_map = torch.full(
-            (global_num_experts,),
-            -1,
-            dtype=torch.int32,
-            device=selected.device,
-        )
-        for expert, (key, _) in loaded.items():
-            expert_map[expert] = backend.expert_slot(key)
+        logical_ids = list(loaded)
+        if any(not 0 <= expert < global_num_experts for expert in logical_ids):
+            raise ValueError("逻辑 expert ID 超出全局 expert 范围")
+        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32, device="cpu")
+        if logical_ids:
+            physical_ids = [backend.expert_slot(loaded[expert][0]) for expert in logical_ids]
+            expert_map[torch.tensor(logical_ids, device="cpu")] = torch.tensor(
+                physical_ids, dtype=torch.int32, device="cpu"
+            )
+        expert_map = expert_map.to(selected.device)
         return self.fused_moe(
             hidden_states=hidden_states,
             w1=w1,

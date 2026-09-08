@@ -1,3 +1,4 @@
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -174,6 +175,8 @@ def test_fused_adapter_maps_logical_experts_to_packed_slots():
     actual = executor._fused(hidden, selected, routing, loaded, global_num_experts=3)
     expected = executor._vectorized(hidden, selected, routing, loaded)
     assert torch.allclose(actual, expected, atol=1e-5)
+    with pytest.raises(ValueError, match="超出全局 expert 范围"):
+        executor._fused(hidden, selected, routing, loaded, global_num_experts=2)
     for key, _ in loaded.values():
         runtime.release(key)
     worker.close()

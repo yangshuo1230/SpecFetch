@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 07:51 UTC
+Updated: 2026-09-08 07:55 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -49,6 +49,9 @@ count. Unseen Target mass is never used online.
   overwritten in place rather than allocated again. Prefill batches experts within the
   physical-slot bound; compute-stream CUDA events prevent H2D from overwriting a slot
   while a kernel still reads it.
+- 融合 MoE 的 logical-to-physical `expert_map` 先在 CPU 完整构造，再一次性复制到计算
+  设备，取代最多 64 次逐 expert 的 GPU 标量写入；越界逻辑 expert 会在进入 kernel 前
+  明确报错。实际性能收益与 CUDA 数值仍按空闲后的门禁实验确认。
 - Sink/recent/old KV layout, pinned-CPU old chunks, sparse retrieval, next-step retention
   and eviction.
 - Original Qwen3 safetensors expert source, including experts whose three matrices cross
