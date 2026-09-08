@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -197,12 +197,8 @@ class OffloadedExpertExecutor:
                     self.miss_cost_ms,
                 ),
             )
-        values = self.runtime.demand_many(
-            [request for _, request in dependencies.values()]
-        )
-        return {
-            expert: (key, values[key]) for expert, (key, _) in dependencies.items()
-        }
+        values = self.runtime.demand_many([request for _, request in dependencies.values()])
+        return {expert: (key, values[key]) for expert, (key, _) in dependencies.items()}
 
     def _vectorized(
         self,
@@ -264,8 +260,7 @@ class OffloadedExpertExecutor:
             key = self.registry.ensure(layer, expert)
             weights = self.runtime.demand(
                 key,
-                consumer="demand:"
-                + ",".join(request_ids[index] for index in token_indices),
+                consumer="demand:" + ",".join(request_ids[index] for index in token_indices),
                 miss_cost_ms=self.miss_cost_ms,
             )
             inputs = hidden_states[token_indices]
@@ -294,9 +289,7 @@ class OffloadedExpertExecutor:
         if len(hidden_states) <= self.vectorized_token_limit:
             loaded = self._load(selected, layer, request_ids)
             backend = self.runtime.worker.backend
-            packed = hasattr(backend, "packed_expert_weights") and hasattr(
-                backend, "expert_slot"
-            )
+            packed = hasattr(backend, "packed_expert_weights") and hasattr(backend, "expert_slot")
             if self.fused_moe is not None and packed and hidden_states.is_cuda:
                 result = self._fused(hidden_states, selected, routing, loaded)
             else:
@@ -326,7 +319,7 @@ def optional_vllm_fused_moe(mode: str, backend) -> Callable[..., torch.Tensor] |
         return None
     try:
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-    except Exception:  # noqa: BLE001 - auto mode is an optional acceleration path
+    except Exception:
         if mode == "vllm":
             raise
         return None

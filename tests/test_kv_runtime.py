@@ -62,7 +62,9 @@ def test_sparse_attention_matches_dense_when_all_old_chunks_selected():
     expected = attention_output(query, [(key, value)])
     assert actual.selected_old_chunks == [0, 1]
     assert torch.allclose(actual.output, expected, atol=1e-5)
-    assert all(not cache.residency.record(identity).demand_active for identity in cache.old.values())
+    assert all(
+        not cache.residency.record(identity).demand_active for identity in cache.old.values()
+    )
     worker.close()
 
 

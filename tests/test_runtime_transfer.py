@@ -179,9 +179,7 @@ def test_demand_many_uses_one_backend_transfer_batch():
     for index in range(3):
         residency.register_cpu(resource(index), f"cpu:{index}", 1024)
     worker.start()
-    values = runtime.demand_many(
-        [DemandRequest(resource(index), "r0", 1.0) for index in range(3)]
-    )
+    values = runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(3)])
     assert values == {resource(index): f"gpu:cpu:{index}" for index in range(3)}
     assert len(backend.batches) == 1
     assert set(backend.batches[0]) == {resource(0), resource(1), resource(2)}

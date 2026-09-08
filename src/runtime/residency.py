@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from src.runtime.memory_queue import ResourceKey, ResourceKind
 
@@ -53,9 +54,7 @@ class ResidencyManager:
         self.evictions = 0
         self.wasted_prefetches = 0
 
-    def set_eviction_callback(
-        self, callback: Callable[[ResourceKey, Any], None] | None
-    ) -> None:
+    def set_eviction_callback(self, callback: Callable[[ResourceKey, Any], None] | None) -> None:
         """Register storage cleanup used by fixed-slot transfer backends."""
         with self._condition:
             self._eviction_callback = callback

@@ -48,8 +48,7 @@ class PackedExpertSlots:
         self._expert_layout = (
             set(tensors) == {"gate", "up", "down"}
             and tensors["gate"].shape == tensors["up"].shape
-            and tensors["down"].shape
-            == (tensors["gate"].shape[1], tensors["gate"].shape[0])
+            and tensors["down"].shape == (tensors["gate"].shape[1], tensors["gate"].shape[0])
             and len({value.dtype for value in tensors.values()}) == 1
         )
         if self._expert_layout:
@@ -323,9 +322,7 @@ class TransferWorker:
                 if callable(copy_many):
                     values = copy_many(items)
                 else:
-                    values = [
-                        self.backend.copy_to_gpu(key, cpu_value) for key, cpu_value in items
-                    ]
+                    values = [self.backend.copy_to_gpu(key, cpu_value) for key, cpu_value in items]
                 if len(values) != len(accepted):
                     raise RuntimeError("transfer backend returned the wrong batch length")
                 for request, value in zip(accepted, values):
@@ -387,9 +384,7 @@ class OffloadRuntime:
         deadline: int,
         miss_cost_ms: float,
     ) -> None:
-        self.prefetch_many(
-            [PrefetchRequest(key, consumer, probability, deadline, miss_cost_ms)]
-        )
+        self.prefetch_many([PrefetchRequest(key, consumer, probability, deadline, miss_cost_ms)])
 
     def prefetch_many(
         self,
@@ -437,12 +432,7 @@ class OffloadRuntime:
         for key, consumer, probability, deadline, miss_cost_ms in leases:
             record = self.residency.record(key)
             urgency = 1 / max(1, deadline - current_step)
-            priority = (
-                miss_cost_ms
-                * probability
-                * urgency
-                / max(record.size_bytes / 2**20, 1e-6)
-            )
+            priority = miss_cost_ms * probability * urgency / max(record.size_bytes / 2**20, 1e-6)
             self.residency.update_lease(key, priority, deadline, consumer)
         self.queue.upsert_many(queued)
         self.worker.metrics.prefetch_enqueued += len(queued)
@@ -456,9 +446,7 @@ class OffloadRuntime:
         miss_cost_ms: float,
         timeout: float | None = None,
     ) -> Any:
-        return self.demand_many(
-            [DemandRequest(key, consumer, miss_cost_ms)], timeout=timeout
-        )[key]
+        return self.demand_many([DemandRequest(key, consumer, miss_cost_ms)], timeout=timeout)[key]
 
     def demand_many(
         self,

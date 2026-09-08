@@ -134,9 +134,7 @@ class RequestLayerKV:
             if chunk not in self.old:
                 continue
             requests.append(
-                PrefetchRequest(
-                    self.old[chunk], consumer, probability, deadline, miss_cost_ms
-                )
+                PrefetchRequest(self.old[chunk], consumer, probability, deadline, miss_cost_ms)
             )
             queued.append((self.old[chunk], consumer))
         self.runtime.prefetch_many(requests)
@@ -216,8 +214,7 @@ class RequestLayerKV:
             shadow_start = time.perf_counter()
             cpu_query = query.detach().float().cpu()
             cpu_always = [
-                (key.detach().float().cpu(), value.detach().float().cpu())
-                for key, value in always
+                (key.detach().float().cpu(), value.detach().float().cpu()) for key, value in always
             ]
             cpu_old = {
                 chunk: tuple(
@@ -240,9 +237,7 @@ class RequestLayerKV:
             full_partition = empty_partition(len(cpu_query))
             selected_partition = empty_partition(len(cpu_query))
             for key, _ in full_chunks:
-                full_partition = update_partition(
-                    full_partition, chunk_logsumexp(cpu_query, key)
-                )
+                full_partition = update_partition(full_partition, chunk_logsumexp(cpu_query, key))
             for key, _ in selected_chunks:
                 selected_partition = update_partition(
                     selected_partition, chunk_logsumexp(cpu_query, key)

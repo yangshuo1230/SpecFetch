@@ -114,9 +114,7 @@ def main() -> None:
         }
     )
     backend = CudaTransferBackend(args.device, expert_slots=config.expert_cache_slots)
-    worker = TransferWorker(
-        queue, residency, backend, max_batch_size=args.transfer_batch_size
-    )
+    worker = TransferWorker(queue, residency, backend, max_batch_size=args.transfer_batch_size)
     runtime = OffloadRuntime(queue, residency, worker)
     engine = Qwen3SparseOffloadEngine(
         target,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import torch
 
@@ -56,11 +56,7 @@ def merge_predictions(
             merged.kv.update(per_request[request_id].kv)
 
     layers = set().union(
-        *(
-            set(prediction.experts)
-            for prediction in per_request.values()
-            if prediction is not None
-        )
+        *(set(prediction.experts) for prediction in per_request.values() if prediction is not None)
     )
     for layer in layers:
         rows = [

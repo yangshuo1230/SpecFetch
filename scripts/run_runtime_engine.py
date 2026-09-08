@@ -135,9 +135,7 @@ def main() -> None:
         }
     )
     backend = CudaTransferBackend(args.device, expert_slots=config.expert_cache_slots)
-    worker = TransferWorker(
-        queue, residency, backend, max_batch_size=args.transfer_batch_size
-    )
+    worker = TransferWorker(queue, residency, backend, max_batch_size=args.transfer_batch_size)
     runtime = OffloadRuntime(queue, residency, worker)
     engine = Qwen3SparseOffloadEngine(
         target,
@@ -307,8 +305,7 @@ def main() -> None:
             else None,
             "threshold_sweep": {
                 threshold: {
-                    f"mean_{name}": statistics.mean(values)
-                    for name, values in metrics.items()
+                    f"mean_{name}": statistics.mean(values) for name, values in metrics.items()
                 }
                 for threshold, metrics in threshold_sweep.items()
             },
@@ -316,9 +313,7 @@ def main() -> None:
         "transfer": vars(transfer_end),
         "transfer_by_phase": {
             "prefill": vars(transfer_after_prefill.delta(transfer_start)),
-            "draft_prefill": vars(
-                transfer_after_draft_prefill.delta(transfer_after_prefill)
-            ),
+            "draft_prefill": vars(transfer_after_draft_prefill.delta(transfer_after_prefill)),
             "decode": vars(transfer_end.delta(transfer_after_draft_prefill)),
         },
         "residency": {
@@ -332,8 +327,7 @@ def main() -> None:
             },
             "draft_prefill": {
                 "evictions": residency_after_draft_prefill[0] - residency_after_prefill[0],
-                "wasted_prefetches": residency_after_draft_prefill[1]
-                - residency_after_prefill[1],
+                "wasted_prefetches": residency_after_draft_prefill[1] - residency_after_prefill[1],
             },
             "decode": {
                 "evictions": residency_end[0] - residency_after_draft_prefill[0],
