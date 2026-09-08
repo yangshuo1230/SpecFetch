@@ -114,7 +114,7 @@ def main() -> None:
             ResourceKind.KV: config.kv_cache_slots,
         }
     )
-    backend = CudaTransferBackend(args.device)
+    backend = CudaTransferBackend(args.device, expert_slots=config.expert_cache_slots)
     worker = TransferWorker(queue, residency, backend)
     runtime = OffloadRuntime(queue, residency, worker)
     engine = Qwen3SparseOffloadEngine(target, expert_source, runtime, residency, config)

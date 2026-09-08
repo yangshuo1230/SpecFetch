@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 import torch
 
-from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey
+from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
 
 
@@ -15,12 +15,89 @@ class TransferBackend(Protocol):
     def copy_to_gpu(self, key: ResourceKey, cpu_value: Any) -> Any: ...
 
 
+class PackedExpertSlots:
+    """Fixed GPU storage for identically-shaped expert dataclass payloads."""
+
+    def __init__(self, capacity: int, device: str | torch.device) -> None:
+        if capacity <= 0:
+            raise ValueError("expert slot capacity must be positive")
+        self.capacity = capacity
+        self.device = torch.device(device)
+        self._buffers: dict[str, torch.Tensor] | None = None
+        self._payload_type: type | None = None
+        self._free = list(reversed(range(capacity)))
+        self._assigned: dict[ResourceKey, int] = {}
+
+    @property
+    def allocated(self) -> bool:
+        return self._buffers is not None
+
+    def _initialize(self, payload: Any) -> None:
+        if not is_dataclass(payload):
+            raise TypeError("packed expert payload must be a dataclass")
+        tensors = {
+            item.name: getattr(payload, item.name)
+            for item in fields(payload)
+            if isinstance(getattr(payload, item.name), torch.Tensor)
+        }
+        if not tensors:
+            raise TypeError("packed expert payload has no tensor fields")
+        self._payload_type = type(payload)
+        self._buffers = {
+            name: torch.empty(
+                (self.capacity, *value.shape), dtype=value.dtype, device=self.device
+            )
+            for name, value in tensors.items()
+        }
+
+    def acquire(self, key: ResourceKey, payload: Any) -> Any:
+        if key in self._assigned:
+            raise RuntimeError(f"expert already owns a packed slot: {key}")
+        if self._buffers is None:
+            self._initialize(payload)
+        assert self._payload_type is not None and self._buffers is not None
+        if type(payload) is not self._payload_type:
+            raise TypeError("expert payload type changed after slot allocation")
+        if not self._free:
+            raise RuntimeError("no free packed expert slot")
+        slot = self._free.pop()
+        values = {}
+        for item in fields(payload):
+            source = getattr(payload, item.name)
+            if isinstance(source, torch.Tensor):
+                destination = self._buffers[item.name][slot]
+                if source.shape != destination.shape or source.dtype != destination.dtype:
+                    self._free.append(slot)
+                    raise ValueError("expert tensor shape or dtype changed after slot allocation")
+                destination.copy_(source, non_blocking=self.device.type == "cuda")
+                values[item.name] = destination
+            else:
+                values[item.name] = source
+        self._assigned[key] = slot
+        return self._payload_type(**values)
+
+    def release(self, key: ResourceKey) -> bool:
+        slot = self._assigned.pop(key, None)
+        if slot is None:
+            return False
+        self._free.append(slot)
+        return True
+
+
 class CudaTransferBackend:
     """Copy nested tensor payloads on one dedicated CUDA stream."""
 
-    def __init__(self, device: str | torch.device = "cuda:0") -> None:
+    def __init__(
+        self,
+        device: str | torch.device = "cuda:0",
+        *,
+        expert_slots: int | None = None,
+    ) -> None:
         self.device = torch.device(device)
         self.stream = torch.cuda.Stream(device=self.device)
+        self.expert_slots = (
+            PackedExpertSlots(expert_slots, self.device) if expert_slots is not None else None
+        )
 
     def _copy(self, value: Any) -> Any:
         if isinstance(value, torch.Tensor):
@@ -36,11 +113,18 @@ class CudaTransferBackend:
         raise TypeError(f"unsupported transfer payload {type(value)}")
 
     def copy_to_gpu(self, key: ResourceKey, cpu_value: Any) -> Any:
-        del key
         with torch.cuda.stream(self.stream):
-            gpu_value = self._copy(cpu_value)
+            if key.kind == ResourceKind.EXPERT and self.expert_slots is not None:
+                gpu_value = self.expert_slots.acquire(key, cpu_value)
+            else:
+                gpu_value = self._copy(cpu_value)
         self.stream.synchronize()
         return gpu_value
+
+    def release_gpu(self, key: ResourceKey, gpu_value: Any) -> None:
+        del gpu_value
+        if key.kind == ResourceKind.EXPERT and self.expert_slots is not None:
+            self.expert_slots.release(key)
 
 
 @dataclass
@@ -80,6 +164,9 @@ class TransferWorker:
         self.queue = queue
         self.residency = residency
         self.backend = backend
+        release_gpu = getattr(backend, "release_gpu", None)
+        if callable(release_gpu):
+            residency.set_eviction_callback(release_gpu)
         self.metrics = TransferMetrics()
         self._thread: threading.Thread | None = None
         self._error: BaseException | None = None

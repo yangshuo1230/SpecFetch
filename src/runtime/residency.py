@@ -4,7 +4,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from src.runtime.memory_queue import ResourceKey, ResourceKind
 
@@ -47,8 +47,16 @@ class ResidencyManager:
         }
         self._reserved: dict[ResourceKind, set[ResourceKey]] = {kind: set() for kind in capacities}
         self._condition = threading.Condition()
+        self._eviction_callback: Callable[[ResourceKey, Any], None] | None = None
         self.evictions = 0
         self.wasted_prefetches = 0
+
+    def set_eviction_callback(
+        self, callback: Callable[[ResourceKey, Any], None] | None
+    ) -> None:
+        """Register storage cleanup used by fixed-slot transfer backends."""
+        with self._condition:
+            self._eviction_callback = callback
 
     def register_cpu(
         self, key: ResourceKey, value: Any, size_bytes: int, *, pinned: bool = False
@@ -112,6 +120,8 @@ class ResidencyManager:
         record = self._records[victim]
         if record.speculative and not record.used:
             self.wasted_prefetches += 1
+        if self._eviction_callback is not None:
+            self._eviction_callback(victim, record.gpu_value)
         record.gpu_value = None
         record.state = ResourceState.CPU_ONLY
         self.evictions += 1
@@ -203,6 +213,8 @@ class ResidencyManager:
             self._resident[key.kind].pop(key, None)
             if record.speculative and not record.used:
                 self.wasted_prefetches += 1
+            if self._eviction_callback is not None:
+                self._eviction_callback(key, record.gpu_value)
             record.gpu_value = None
             record.state = ResourceState.CPU_ONLY
             self.evictions += 1
