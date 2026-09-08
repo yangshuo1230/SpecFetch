@@ -335,12 +335,17 @@ class TransferWorker:
                         self.metrics.speculative_transfers += 1
             except Exception as error:  # noqa: BLE001 - surface backend failures to compute
                 self._error = error
+                release_gpu = getattr(self.backend, "release_gpu", None)
                 for request in accepted:
                     if self.residency.state(request.key) == ResourceState.IN_FLIGHT:
+                        if callable(release_gpu):
+                            release_gpu(request.key, None)
                         self.metrics.failed += 1
                         self.residency.fail_transfer(request.key)
             finally:
                 self.metrics.transfer_ms += (time.perf_counter() - start) * 1000
+            if self._error is not None:
+                return
 
     def check(self) -> None:
         if self._error is not None:
@@ -356,7 +361,11 @@ class TransferWorker:
         return replace(self.metrics)
 
     def close(self, *, drain: bool = False) -> None:
+        discarded = [] if drain else [request.key for request in self.queue.snapshot()]
         self.queue.close(discard=not drain)
+        for key in discarded:
+            if self.residency.contains(key):
+                self.residency.unqueue(key)
         if self._thread is not None:
             self._thread.join()
         self.check()

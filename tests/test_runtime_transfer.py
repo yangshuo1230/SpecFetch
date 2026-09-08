@@ -188,6 +188,18 @@ def test_demand_many_uses_one_backend_transfer_batch():
     worker.close()
 
 
+def test_discarding_worker_close_unqueues_pending_resources():
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    residency.register_cpu(resource(0), "cpu", 1024)
+    worker = TransferWorker(queue, residency, FakeBackend())
+    runtime = OffloadRuntime(queue, residency, worker)
+    runtime.prefetch(resource(0), consumer="r0", probability=1.0, deadline=1, miss_cost_ms=1)
+    assert residency.state(resource(0)) == ResourceState.QUEUED
+    worker.close()
+    assert residency.state(resource(0)) == ResourceState.CPU_ONLY
+
+
 def test_low_priority_prefetch_cannot_evict_high_priority_lease():
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
     residency.register_cpu(resource(0), "a", 1)
