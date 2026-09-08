@@ -16,7 +16,7 @@ from src.runtime.expert import (
     optional_vllm_fused_moe,
 )
 from src.runtime.kv_cache import RequestLayerKV, SparseAttentionResult
-from src.runtime.memory_queue import ResourceKey
+from src.runtime.memory_queue import ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager
 from src.runtime.transfer import OffloadRuntime
 
@@ -164,6 +164,38 @@ class Qwen3SparseOffloadEngine:
             request_ids=token_requests,
         )
         return output.reshape(shape)
+
+    @torch.inference_mode()
+    def warmup_moe(self, token_counts: list[int]) -> bool:
+        """在请求计时前编译实际形状的融合 MoE，并恢复冷专家驻留。"""
+        if self.moe_backend != "vllm":
+            return False
+        counts = list(dict.fromkeys(token_counts))
+        if not counts or any(count <= 0 for count in counts):
+            raise ValueError("MoE warmup token 数必须为正")
+        top_k = min(self.model.config.num_experts_per_tok, self.model.config.num_experts)
+        dtype = self.model.model.embed_tokens.weight.dtype
+        for count in counts:
+            hidden = torch.zeros(
+                (count, self.model.config.hidden_size), dtype=dtype, device=self.device
+            )
+            router_logits = torch.full(
+                (count, self.model.config.num_experts),
+                -100.0,
+                dtype=dtype,
+                device=self.device,
+            )
+            router_logits[:, :top_k] = torch.arange(top_k, dtype=dtype, device=self.device)
+            self.experts(
+                hidden,
+                router_logits,
+                layer=0,
+                request_ids=["__moe_warmup__"] * count,
+            )
+        torch.cuda.synchronize(self.device)
+        for key in list(self.residency.resident_keys(ResourceKind.EXPERT)):
+            self.residency.evict(key)
+        return True
 
     @torch.inference_mode()
     def prefill(self, input_ids: torch.Tensor, request_ids: list[str]) -> EngineOutput:

@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-pin-experts", action="store_true")
     parser.add_argument("--lazy-expert-store", action="store_true")
     parser.add_argument("--moe-backend", choices=("auto", "torch", "vllm"), default="torch")
+    parser.add_argument("--disable-moe-warmup", action="store_true")
     return parser.parse_args()
 
 
@@ -155,7 +156,15 @@ def main() -> None:
     expert_preload_seconds = time.perf_counter() - expert_preload_start
     initialization_seconds = time.perf_counter() - initialization_start
     worker.start()
-    transfer_start = worker.metrics_snapshot()
+    try:
+        moe_warmup_start = time.perf_counter()
+        if not (args.disable_moe_warmup or args.lazy_expert_store):
+            engine.warmup_moe([args.batch_size * args.context_tokens, args.batch_size])
+        moe_warmup_seconds = time.perf_counter() - moe_warmup_start
+    except BaseException:
+        worker.close()
+        raise
+    transfer_start, _ = worker.phase_metrics_since(worker.metrics_snapshot())
     residency_start = (residency.evictions, residency.wasted_prefetches)
     torch.cuda.reset_peak_memory_stats(torch.device(args.device))
     try:
@@ -289,6 +298,7 @@ def main() -> None:
             "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(args.device)) / 2**30,
             "initialization_seconds": initialization_seconds,
             "expert_preload_seconds": expert_preload_seconds,
+            "moe_warmup_seconds": moe_warmup_seconds,
             "shadow_attention_seconds": shadow_seconds,
             "latency_valid": not (args.shadow_attention or shadow_thresholds),
         },
@@ -320,8 +330,8 @@ def main() -> None:
             "decode": vars(decode_transfer),
         },
         "residency": {
-            "evictions": residency.evictions,
-            "wasted_prefetches": residency.wasted_prefetches,
+            "evictions": residency_end[0] - residency_start[0],
+            "wasted_prefetches": residency_end[1] - residency_start[1],
         },
         "residency_by_phase": {
             "prefill": {

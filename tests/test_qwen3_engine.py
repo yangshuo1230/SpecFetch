@@ -68,6 +68,13 @@ def test_prefill_matches_transformers_dense_reference():
     worker.close()
 
 
+def test_torch_backend_moe_warmup_is_a_noop():
+    engine, worker = build_engine(tiny_model())
+    assert engine.warmup_moe([8, 2]) is False
+    assert not engine.residency.resident_keys()
+    worker.close()
+
+
 def test_decode_matches_full_sequence_when_all_kv_is_resident():
     torch.manual_seed(12)
     model = tiny_model()

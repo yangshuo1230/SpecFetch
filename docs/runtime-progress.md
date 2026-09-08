@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 07:55 UTC
+Updated: 2026-09-08 08:02 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -52,6 +52,10 @@ count. Unseen Target mass is never used online.
 - 融合 MoE 的 logical-to-physical `expert_map` 先在 CPU 完整构造，再一次性复制到计算
   设备，取代最多 64 次逐 expert 的 GPU 标量写入；越界逻辑 expert 会在进入 kernel 前
   明确报错。实际性能收益与 CUDA 数值仍按空闲后的门禁实验确认。
+- 可选 vLLM MoE 在正式请求计时前按实际预填充/解码 token 数执行纯 MoE 形状预热；预热
+  后驱逐全部专家驻留，并在快照边界清除预热产生的 transfer/residency 计数，使正式请求
+  仍从冷专家驻留开始。预热耗时单独报告，可用 `--disable-moe-warmup` 关闭；lazy expert
+  store 模式自动跳过，避免提前加载权重。CUDA 行为仍待空闲后验证。
 - Sink/recent/old KV layout, pinned-CPU old chunks, sparse retrieval, next-step retention
   and eviction.
 - Original Qwen3 safetensors expert source, including experts whose three matrices cross
@@ -90,7 +94,7 @@ count. Unseen Target mass is never used online.
 
 ## Correctness evidence
 
-- 当前 66 项 CPU 测试全部通过；两项 CUDA 测试为显式启用，以免触碰繁忙 GPU。本检查点
+- 当前 67 项 CPU 测试全部通过；两项 CUDA 测试为显式启用，以免触碰繁忙 GPU。本检查点
   再次通过完整 CPU 测试、Ruff lint/format 与 `git diff --check`。
 - On a random miniature Qwen3-MoE, custom dense prefill and incremental decode logits
   match the Transformers reference when all KV is selected.

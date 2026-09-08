@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-pin-experts", action="store_true")
     parser.add_argument("--lazy-expert-store", action="store_true")
     parser.add_argument("--moe-backend", choices=("auto", "torch", "vllm"), default="torch")
+    parser.add_argument("--disable-moe-warmup", action="store_true")
     return parser.parse_args()
 
 
@@ -143,6 +144,17 @@ def main() -> None:
     )
 
     worker.start()
+    try:
+        moe_warmup_start = time.perf_counter()
+        if not (args.disable_moe_warmup or args.lazy_expert_store):
+            warmup_batch = min(args.request_count, args.max_batch_size)
+            engine.warmup_moe([warmup_batch * args.context_tokens, warmup_batch])
+        moe_warmup_seconds = time.perf_counter() - moe_warmup_start
+    except BaseException:
+        worker.close()
+        raise
+    transfer_start, _ = worker.phase_metrics_since(worker.metrics_snapshot())
+    residency_start = (residency.evictions, residency.wasted_prefetches)
     torch.cuda.reset_peak_memory_stats(torch.device(args.device))
     start = time.perf_counter()
     try:
@@ -151,6 +163,8 @@ def main() -> None:
         request_seconds = time.perf_counter() - start
     finally:
         worker.close()
+    _, request_transfer = worker.phase_metrics_since(transfer_start)
+    residency_end = (residency.evictions, residency.wasted_prefetches)
 
     generated = run_result.generated_token_ids
     token_count = sum(map(len, generated.values()))
@@ -173,6 +187,7 @@ def main() -> None:
         },
         "performance": {
             "initialization_seconds": initialization_seconds,
+            "moe_warmup_seconds": moe_warmup_seconds,
             "request_seconds": request_seconds,
             "throughput_tokens_per_second": token_count / request_seconds,
             "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(args.device)) / 2**30,
@@ -196,10 +211,10 @@ def main() -> None:
             "mean_active_service_seconds": statistics.mean(service_seconds),
             "p50_active_service_seconds": statistics.median(service_seconds),
         },
-        "transfer": vars(worker.metrics_snapshot()),
+        "transfer": vars(request_transfer),
         "residency": {
-            "evictions": residency.evictions,
-            "wasted_prefetches": residency.wasted_prefetches,
+            "evictions": residency_end[0] - residency_start[0],
+            "wasted_prefetches": residency_end[1] - residency_start[1],
         },
         "generated_token_ids": generated,
         "request_timings": run_result.request_timings,

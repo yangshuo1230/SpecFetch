@@ -79,6 +79,8 @@ python -m scripts.run_runtime_engine \
 Shadow runs deliberately mark latency as invalid. The vLLM fused-MoE adapter is opt-in with
 `--moe-backend vllm`; the default remains `torch` until actual-model numerical and latency checks
 pass. Both backends use the same CPU source, packed GPU expert slots, queue and residency policy.
+融合 backend 会在请求计时前预热实际预填充和解码形状，随后恢复冷专家驻留并重置指标；
+预热耗时独立记录，可通过 `--disable-moe-warmup` 关闭。
 
 Variable output lengths and request backfill are available through the continuous runner:
 
