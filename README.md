@@ -95,7 +95,8 @@ python -m scripts.run_continuous_runtime \
 结果会分别记录等待队列时延、单请求预填充、解码服务、活跃服务、TTFT 和端到端请求
 时延，使准入与回填成本保持可见，而不是全部折叠进单一吞吐量指标。
 同一轮准入中长度相同的 prompt 会合并为一次 Target 预填充；不同长度仍分组执行，且每个
-请求继续维护独立的 Draft KV 状态。
+请求继续维护独立的 Draft KV 状态。同组请求的 Draft 前缀也只批量计算一次，随后拆成
+请求私有 KV 缓存供独立推进。
 
 The primary experiment treats the draft as a prefetch oracle, not as a source of tokens for target
 verification. At every target step, the draft independently rolls out from only the currently known

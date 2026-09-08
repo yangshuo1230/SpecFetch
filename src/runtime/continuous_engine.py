@@ -28,6 +28,8 @@ class ContinuousBatchResult:
     maximum_active_requests: int
     prefill_batches: int
     maximum_prefill_batch: int
+    draft_prefill_batches: int
+    maximum_draft_prefill_batch: int
     request_timings: dict[str, dict[str, float]]
 
 
@@ -132,6 +134,8 @@ class ContinuousBatchRunner:
         maximum_active = 0
         prefill_batches = 0
         maximum_prefill_batch = 0
+        draft_prefill_batches = 0
+        maximum_draft_prefill_batch = 0
         run_start = time.perf_counter()
         request_timings = {
             request.request_id: {
@@ -182,6 +186,7 @@ class ContinuousBatchRunner:
                 first_token_at = time.perf_counter() - run_start
                 self.engine.add_state(state, output.state)
                 finished_ids = []
+                continuing = []
                 for index, request in enumerate(group):
                     request_id = request.request_id
                     token = tokens[index]
@@ -193,14 +198,23 @@ class ContinuousBatchRunner:
                         finish_requests([request_id])
                         finished_ids.append(request_id)
                         continue
-
-                    provider = self.provider_factory()
-                    request_input_ids = input_ids[index : index + 1]
-                    provider.initialize(request_input_ids, [request_id])
+                    continuing.append((index, request))
+                if continuing:
+                    draft_prefill_batches += 1
+                    maximum_draft_prefill_batch = max(maximum_draft_prefill_batch, len(continuing))
+                    continuing_indices = torch.tensor([index for index, _ in continuing])
+                    continuing_ids = [request.request_id for _, request in continuing]
+                    batch_provider = self.provider_factory()
+                    batch_provider.initialize(input_ids[continuing_indices], continuing_ids)
+                    providers = batch_provider.split_requests()
+                else:
+                    providers = []
+                for provider, (index, request) in zip(providers, continuing):
+                    request_id = request.request_id
                     plan = provider.predict(_request_state(output.state, request_id))
                     executions[request_id] = RequestExecution(
                         provider,
-                        token,
+                        tokens[index],
                         plan.horizons,
                         generated[request_id],
                     )
@@ -250,5 +264,7 @@ class ContinuousBatchRunner:
             maximum_active,
             prefill_batches,
             maximum_prefill_batch,
+            draft_prefill_batches,
+            maximum_draft_prefill_batch,
             request_timings,
         )

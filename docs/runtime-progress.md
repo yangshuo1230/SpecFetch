@@ -1,11 +1,13 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 06:51 UTC
+Updated: 2026-09-08 07:40 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
 
 - 后续进度更新、问题说明、文档新增内容和最终交付说明全部使用中文。
+- GPU 被其他任务占用时不停止整体推进：优先完成 CPU 可验证的实现、测试、审计与文档；
+  GPU 空闲后按门禁顺序补跑 CUDA 正确性和性能实验，再继续后续任务。
 
 ## Objective and semantics
 
@@ -66,6 +68,9 @@ count. Unseen Target mass is never used online.
 - 同一轮准入中，prompt 长度相同的请求会合并为一次 Target 预填充，并继续保留独立的
   Draft provider。测试覆盖批量预填充后部分请求立即完成、其余请求继续解码及私有 KV
   清理；结果同时报告预填充批次数和最大预填充批大小。
+- 同组继续生成的请求现在只执行一次批量 Draft 前缀预填充，再通过 Transformers 的
+  DynamicCache batch split 拆成可独立推进的请求私有 KV；结果另行报告 Draft 预填充
+  批次数和最大批大小。
 - Optional vLLM Triton FusedMoE adapter over physical expert slot IDs, with the readable
   PyTorch executor retained as the default until the CUDA path is benchmarked.
 - Phase-separated transfer/residency counters and an opt-in CPU full-attention shadow.
@@ -75,7 +80,7 @@ count. Unseen Target mass is never used online.
 
 ## Correctness evidence
 
-- 当前 63 项 CPU 测试全部通过；两项 CUDA 测试为显式启用，以免触碰繁忙 GPU。本检查点
+- 当前 64 项 CPU 测试全部通过；两项 CUDA 测试为显式启用，以免触碰繁忙 GPU。本检查点
   再次通过完整 CPU 测试、Ruff lint/format 与 `git diff --check`。
 - On a random miniature Qwen3-MoE, custom dense prefill and incremental decode logits
   match the Transformers reference when all KV is selected.

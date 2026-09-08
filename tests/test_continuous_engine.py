@@ -71,13 +71,13 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     )
     result = runner.run(
         [
-            ServingRequest("a", [1, 2, 3], 1),
+            ServingRequest("a", [1, 2, 3], 2),
             ServingRequest("b", [4, 5, 6], 3),
             ServingRequest("c", [6, 7, 8, 9], 2),
         ]
     )
     assert {key: len(value) for key, value in result.generated_token_ids.items()} == {
-        "a": 1,
+        "a": 2,
         "b": 3,
         "c": 2,
     }
@@ -85,7 +85,9 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     assert result.maximum_active_requests == 2
     assert result.prefill_batches == 2
     assert result.maximum_prefill_batch == 2
-    # The one-token request completes directly from prefill and needs no draft state.
+    assert result.draft_prefill_batches == 2
+    assert result.maximum_draft_prefill_batch == 2
+    # 两轮准入各只初始化一次批量 Draft provider。
     assert len(providers) == 2
     assert result.request_timings["a"]["completion_seconds"] > 0
     assert (
@@ -136,4 +138,6 @@ def test_prefill_only_requests_report_peak_admitted_batch_without_draft():
     assert result.maximum_active_requests == 2
     assert result.prefill_batches == 2
     assert result.maximum_prefill_batch == 2
+    assert result.draft_prefill_batches == 0
+    assert result.maximum_draft_prefill_batch == 0
     assert engine.prefill_request_ids == [["a", "b"], ["c"]]

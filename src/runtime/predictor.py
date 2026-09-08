@@ -92,6 +92,27 @@ class DraftSignalProvider:
         self.next_logits = output.logits[:, -1]
         self.request_ids = list(request_ids)
 
+    def split_requests(self) -> list[DraftSignalProvider]:
+        """将批量前缀状态拆为可独立推进的单请求 provider。"""
+        if self.cache is None or self.next_logits is None or not self.request_ids:
+            raise RuntimeError("拆分前必须先初始化 Draft provider")
+        if len(self.request_ids) == 1:
+            return [self]
+        split_cache = getattr(self.cache, "batch_split", None)
+        if not callable(split_cache):
+            raise TypeError("Draft KV cache 不支持按 batch 拆分")
+        caches = split_cache(len(self.request_ids), 1)
+        if len(caches) != len(self.request_ids):
+            raise RuntimeError("Draft KV cache 拆分数量与请求数不一致")
+        providers = []
+        for index, (request_id, cache) in enumerate(zip(self.request_ids, caches)):
+            provider = DraftSignalProvider(self.model, self.probe_bank, self.lookahead)
+            provider.cache = cache
+            provider.next_logits = self.next_logits[index : index + 1]
+            provider.request_ids = [request_id]
+            providers.append(provider)
+        return providers
+
     @torch.inference_mode()
     def advance(self, actual_token_ids: torch.Tensor) -> None:
         if self.cache is None or len(actual_token_ids) != len(self.request_ids):
