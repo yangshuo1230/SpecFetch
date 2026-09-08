@@ -56,7 +56,11 @@ def main() -> None:
     llm = LLM(**engine_options)
     initialization_seconds = time.perf_counter() - initialization_start
     prompts = [{"prompt_token_ids": row.tolist()} for row in input_ids]
-    sampling = SamplingParams(temperature=0, max_tokens=args.max_new_tokens)
+    sampling = SamplingParams(
+        temperature=0,
+        max_tokens=args.max_new_tokens,
+        ignore_eos=True,
+    )
     start = time.perf_counter()
     outputs = llm.generate(prompts, sampling, use_tqdm=False)
     elapsed = time.perf_counter() - start

@@ -14,6 +14,15 @@ class IdentityBackend:
         return value
 
 
+class BatchBackend(IdentityBackend):
+    def __init__(self):
+        self.batches = []
+
+    def copy_many_to_gpu(self, items):
+        self.batches.append([key for key, _ in items])
+        return [value for _, value in items]
+
+
 def build_cache(config):
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.KV: config.kv_cache_slots, ResourceKind.EXPERT: 2})
@@ -65,6 +74,38 @@ def test_sparse_attention_matches_dense_when_all_old_chunks_selected():
     assert all(
         not cache.residency.record(identity).demand_active for identity in cache.old.values()
     )
+    worker.close()
+
+
+def test_sparse_attention_batches_guaranteed_predicted_mass_prefix():
+    config = RuntimeConfig(
+        sink_tokens=2,
+        recent_tokens=2,
+        kv_chunk_tokens=2,
+        predicted_mass_threshold=0.9,
+        marginal_mass_threshold=1.0,
+        marginal_patience=1,
+        minimum_old_chunks=2,
+    )
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.KV: 4, ResourceKind.EXPERT: 1})
+    backend = BatchBackend()
+    worker = TransferWorker(queue, residency, backend)
+    runtime = OffloadRuntime(queue, residency, worker)
+    worker.start()
+    cache = RequestLayerKV("r0", 0, config, residency, runtime, pin_cpu=False)
+    values = torch.randn(10, 1, 2)
+    cache.initialize(values, values)
+
+    result = cache.sparse_attention(
+        torch.ones(2, 2),
+        {0: 0.5, 1: 0.3, 2: 0.2},
+        miss_cost_ms=1,
+    )
+
+    assert result.selected_old_chunks == [0, 1, 2]
+    assert backend.batches == [[cache.old[0], cache.old[1], cache.old[2]]]
+    assert worker.metrics.transfer_batches == 1
     worker.close()
 
 

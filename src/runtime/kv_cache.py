@@ -16,7 +16,7 @@ from src.runtime.hybrid_attention import (
 )
 from src.runtime.memory_queue import ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
-from src.runtime.transfer import OffloadRuntime, PrefetchRequest
+from src.runtime.transfer import DemandRequest, OffloadRuntime, PrefetchRequest
 
 
 def kv_key(request_id: str, layer: int, chunk: int) -> ResourceKey:
@@ -204,15 +204,33 @@ class RequestLayerKV:
         selected = []
         marginals = []
         selected_payloads: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for chunk in sorted(draft_mass, key=draft_mass.get, reverse=True):
-            identity = self.old.get(chunk)
-            if identity is None:
-                continue
-            key, value = self.runtime.demand(
-                identity,
-                consumer=self.request_id,
-                miss_cost_ms=miss_cost_ms,
-            )
+        ordered_chunks = [
+            chunk
+            for chunk in sorted(draft_mass, key=draft_mass.get, reverse=True)
+            if chunk in self.old
+        ]
+        guaranteed = []
+        predicted_mass = 0.0
+        for chunk in ordered_chunks:
+            guaranteed.append(chunk)
+            predicted_mass = min(1.0, predicted_mass + draft_mass[chunk])
+            if predicted_mass >= self.config.predicted_mass_threshold and len(guaranteed) >= min(
+                self.config.minimum_old_chunks, len(self.old)
+            ):
+                break
+        guaranteed_payloads = self.runtime.demand_many(
+            [DemandRequest(self.old[chunk], self.request_id, miss_cost_ms) for chunk in guaranteed]
+        )
+        for index, chunk in enumerate(ordered_chunks):
+            identity = self.old[chunk]
+            if index < len(guaranteed):
+                key, value = guaranteed_payloads[identity]
+            else:
+                key, value = self.runtime.demand(
+                    identity,
+                    consumer=self.request_id,
+                    miss_cost_ms=miss_cost_ms,
+                )
             chunk_lse = chunk_logsumexp(query, key)
             marginal = mean_target_marginal(partition, chunk_lse)
             partition = update_partition(partition, chunk_lse)

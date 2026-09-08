@@ -431,44 +431,25 @@ class OffloadRuntime:
         start = time.perf_counter()
         self.worker.metrics.prefetch_batches += 1
         self.worker.metrics.prefetch_requests += len(requests)
-        queued: list[QueueUpdate] = []
-        leases: list[tuple[ResourceKey, str, float, int, float]] = []
         for request in requests:
-            key = request.key
             if not 0 <= request.probability <= 1:
                 raise ValueError("probability must be in [0, 1]")
             if request.miss_cost_ms < 0:
                 raise ValueError("miss_cost_ms must be non-negative")
-            state = self.residency.state(key)
-            record = self.residency.record(key)
-            if state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
-                leases.append(
-                    (
-                        key,
-                        request.consumer,
-                        request.probability,
-                        request.deadline,
-                        request.miss_cost_ms,
-                    )
-                )
-                continue
-            self.residency.mark_queued(key)
-            queued.append(
-                QueueUpdate(
-                    key,
+        current_step = self.queue.current_step
+        queued = self.residency.prepare_prefetches(
+            [
+                (
+                    request.key,
                     request.consumer,
                     request.probability,
                     request.deadline,
-                    record.size_bytes,
                     request.miss_cost_ms,
                 )
-            )
-        current_step = self.queue.current_step
-        for key, consumer, probability, deadline, miss_cost_ms in leases:
-            record = self.residency.record(key)
-            urgency = 1 / max(1, deadline - current_step)
-            priority = miss_cost_ms * probability * urgency / max(record.size_bytes / 2**20, 1e-6)
-            self.residency.update_lease(key, priority, deadline, consumer)
+                for request in requests
+            ],
+            current_step=current_step,
+        )
         self.queue.upsert_many(queued)
         self.worker.metrics.prefetch_enqueued += len(queued)
         self.worker.metrics.prefetch_enqueue_ms += (time.perf_counter() - start) * 1000

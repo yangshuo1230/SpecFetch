@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from src.runtime.memory_queue import ResourceKey, ResourceKind
+from src.runtime.memory_queue import QueueUpdate, ResourceKey, ResourceKind
 
 
 class ResourceState(str, Enum):
@@ -100,6 +100,54 @@ class ResidencyManager:
                 self._condition.notify_all()
                 return True
             return record.state == ResourceState.QUEUED
+
+    def prepare_prefetches(
+        self,
+        requests: list[tuple[ResourceKey, str, float, int, float]],
+        *,
+        current_step: int,
+    ) -> list[QueueUpdate]:
+        """Prepare one speculative batch under one residency lock.
+
+        CPU-only resources become queued and are returned for queue admission.
+        Resources already resident or in flight receive consumer leases directly.
+        """
+        queued: list[QueueUpdate] = []
+        refresh: dict[ResourceKey, ResourceRecord] = {}
+        transitioned = False
+        with self._condition:
+            for key, consumer, probability, deadline, miss_cost_ms in requests:
+                try:
+                    record = self._records[key]
+                except KeyError as error:
+                    raise KeyError(f"unregistered resource {key}") from error
+                if record.state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
+                    urgency = 1 / max(1, deadline - current_step)
+                    mib = max(record.size_bytes / 2**20, 1e-6)
+                    priority = miss_cost_ms * probability * urgency / mib
+                    record.consumer_leases[consumer] = (priority, deadline)
+                    record.speculative = True
+                    record.used = False
+                    refresh[key] = record
+                    continue
+                if record.state == ResourceState.CPU_ONLY:
+                    record.state = ResourceState.QUEUED
+                    transitioned = True
+                queued.append(
+                    QueueUpdate(
+                        key,
+                        consumer,
+                        probability,
+                        deadline,
+                        record.size_bytes,
+                        miss_cost_ms,
+                    )
+                )
+            for record in refresh.values():
+                self._refresh_priority(record)
+            if transitioned:
+                self._condition.notify_all()
+        return queued
 
     def unqueue(self, key: ResourceKey) -> bool:
         with self._condition:

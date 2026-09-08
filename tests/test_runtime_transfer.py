@@ -8,6 +8,7 @@ from src.runtime.transfer import (
     DemandRequest,
     OffloadRuntime,
     PackedExpertSlots,
+    PrefetchRequest,
     TransferMetrics,
     TransferWorker,
 )
@@ -177,6 +178,54 @@ def test_consumer_lease_cancellation_and_demand_scope_recompute_priority():
     assert residency.record(key).priority == float("inf")
     residency.release(key)
     assert residency.record(key).priority == 3
+
+
+def test_prefetch_many_updates_resident_shared_leases_in_one_batch():
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    key = resource(0)
+    residency.register_cpu(key, "cpu", 2**20)
+    assert residency.begin_transfer(key, demand=True)
+    residency.complete_transfer(key, "gpu")
+    residency.release(key)
+    worker = TransferWorker(queue, residency, FakeBackend())
+    runtime = OffloadRuntime(queue, residency, worker)
+
+    runtime.prefetch_many(
+        [
+            PrefetchRequest(key, "a", 0.5, 2, 4.0),
+            PrefetchRequest(key, "b", 0.25, 4, 8.0),
+        ]
+    )
+
+    record = residency.record(key)
+    assert record.consumer_leases == {"a": (1.0, 2), "b": (0.5, 4)}
+    assert record.priority == 1.5
+    assert record.deadline == 2
+    assert record.speculative
+    assert not record.used
+    assert len(queue) == 0
+
+
+def test_prefetch_many_queues_each_consumer_and_marks_resource_once():
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    key = resource(0)
+    residency.register_cpu(key, "cpu", 1024)
+    worker = TransferWorker(queue, residency, FakeBackend())
+    runtime = OffloadRuntime(queue, residency, worker)
+
+    runtime.prefetch_many(
+        [
+            PrefetchRequest(key, "a", 0.6, 3, 2.0),
+            PrefetchRequest(key, "b", 0.3, 5, 1.0),
+        ]
+    )
+
+    [request] = queue.snapshot()
+    assert residency.state(key) == ResourceState.QUEUED
+    assert request.consumer_probabilities == {"a": 0.6, "b": 0.3}
+    assert request.deadline == 3
 
 
 def test_demand_many_uses_one_backend_transfer_batch():
