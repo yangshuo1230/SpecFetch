@@ -8,13 +8,17 @@ from tests.test_qwen3_engine import build_engine, tiny_model
 
 
 class PrefillOnlyEngine:
+    def __init__(self):
+        self.prefill_request_ids = []
+
     def prefill(self, input_ids, request_ids):
+        self.prefill_request_ids.append(list(request_ids))
         state = type("State", (), {})()
         state.request_ids = list(request_ids)
-        state.lengths = [input_ids.shape[1]]
+        state.lengths = [input_ids.shape[1]] * len(request_ids)
         state.kv = {}
         state.speculative_consumers = []
-        logits = torch.zeros((1, 1, 4))
+        logits = torch.zeros((len(request_ids), 1, 4))
         logits[..., 2] = 1
         return type("Output", (), {"logits": logits, "state": state})()
 
@@ -68,7 +72,7 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     result = runner.run(
         [
             ServingRequest("a", [1, 2, 3], 1),
-            ServingRequest("b", [4, 5], 3),
+            ServingRequest("b", [4, 5, 6], 3),
             ServingRequest("c", [6, 7, 8, 9], 2),
         ]
     )
@@ -79,6 +83,8 @@ def test_continuous_runner_backfills_and_releases_qwen_states():
     }
     assert result.admission_events == 2
     assert result.maximum_active_requests == 2
+    assert result.prefill_batches == 2
+    assert result.maximum_prefill_batch == 2
     # The one-token request completes directly from prefill and needs no draft state.
     assert len(providers) == 2
     assert result.request_timings["a"]["completion_seconds"] > 0
@@ -110,8 +116,9 @@ def test_prefill_only_requests_report_peak_admitted_batch_without_draft():
     def unexpected_provider():
         raise AssertionError("单 token 请求不应创建 Draft provider")
 
+    engine = PrefillOnlyEngine()
     runner = ContinuousBatchRunner(
-        PrefillOnlyEngine(),
+        engine,
         unexpected_provider,
         max_batch_size=2,
         prefetch=False,
@@ -127,3 +134,6 @@ def test_prefill_only_requests_report_peak_admitted_batch_without_draft():
     assert result.decode_cycles == 0
     assert result.admission_events == 2
     assert result.maximum_active_requests == 2
+    assert result.prefill_batches == 2
+    assert result.maximum_prefill_batch == 2
+    assert engine.prefill_request_ids == [["a", "b"], ["c"]]

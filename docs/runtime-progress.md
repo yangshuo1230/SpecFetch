@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 06:40 UTC
+Updated: 2026-09-08 06:51 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -63,6 +63,9 @@ count. Unseen Target mass is never used online.
   和端到端请求时延。单 token 请求会在预填充 token 可用时立即完成，不再初始化无用的
   Draft provider；峰值活跃请求数在完成移除前采样，因此纯单-token 工作负载也不会误报
   为零。
+- 同一轮准入中，prompt 长度相同的请求会合并为一次 Target 预填充，并继续保留独立的
+  Draft provider。测试覆盖批量预填充后部分请求立即完成、其余请求继续解码及私有 KV
+  清理；结果同时报告预填充批次数和最大预填充批大小。
 - Optional vLLM Triton FusedMoE adapter over physical expert slot IDs, with the readable
   PyTorch executor retained as the default until the CUDA path is benchmarked.
 - Phase-separated transfer/residency counters and an opt-in CPU full-attention shadow.
@@ -170,8 +173,8 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
    GPUs (about 45.5 GiB each at 70--100% utilization). It must pass before a real-model
    fused-prefill benchmark is trusted; no external process was disturbed.
 3. Context 4K, full-model continuous batching, and longer-output steady-state runs remain.
-4. The continuous runner performs admitted prefills sequentially. Chunked prefill and
-   prefill/decode kernel-level interleaving remain future production integration work.
+4. 连续 runner 已合并同长度准入请求；不同 prompt 长度仍需分组串行执行。分块预填充和
+   预填充/解码的 kernel 级交错仍属于后续生产集成工作。
 5. vLLM and the custom adapter use different BF16 attention/MoE kernel orders. Their
    first six generated tokens match in the short test, after which rounding changes the
    greedy path. Quality must be assessed statistically, not by requiring bit identity to

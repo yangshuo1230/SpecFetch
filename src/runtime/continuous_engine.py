@@ -26,6 +26,8 @@ class ContinuousBatchResult:
     decode_cycles: int
     admission_events: int
     maximum_active_requests: int
+    prefill_batches: int
+    maximum_prefill_batch: int
     request_timings: dict[str, dict[str, float]]
 
 
@@ -73,6 +75,16 @@ def merge_predictions(
     return merged
 
 
+def _group_admitted_by_prompt_length(
+    requests: list[ServingRequest],
+) -> list[list[ServingRequest]]:
+    """保持准入顺序，将可使用同一稠密张量的请求合并预填充。"""
+    groups: dict[int, list[ServingRequest]] = {}
+    for request in requests:
+        groups.setdefault(len(request.prompt_token_ids), []).append(request)
+    return list(groups.values())
+
+
 class ContinuousBatchRunner:
     """Admission, backfill and variable-length decode for the Qwen runtime."""
 
@@ -118,6 +130,8 @@ class ContinuousBatchRunner:
         decode_cycles = 0
         admission_events = 0
         maximum_active = 0
+        prefill_batches = 0
+        maximum_prefill_batch = 0
         run_start = time.perf_counter()
         request_timings = {
             request.request_id: {
@@ -151,35 +165,47 @@ class ContinuousBatchRunner:
             if admitted:
                 admission_events += 1
                 maximum_active = max(maximum_active, len(scheduler.active))
+            admitted_at = time.perf_counter() - run_start
             for request in admitted:
-                admitted_at = time.perf_counter() - run_start
                 request_timings[request.request_id]["admission_seconds"] = admitted_at
                 request_timings[request.request_id]["queue_seconds"] = admitted_at
-                input_ids = torch.tensor(request.prompt_token_ids, dtype=torch.long)[None]
-                output = self.engine.prefill(input_ids, [request.request_id])
-                token = output.logits[0, -1].argmax().detach().cpu()
-                generated[request.request_id].append(int(token))
-                first_token_at = time.perf_counter() - run_start
-                request_timings[request.request_id]["time_to_first_token_seconds"] = first_token_at
-                request_timings[request.request_id]["prefill_seconds"] = (
-                    first_token_at - admitted_at
-                )
-                self.engine.add_state(state, output.state)
-                first_token_finished = scheduler.record_decode([request.request_id])
-                if first_token_finished:
-                    finish_requests([request.request_id])
-                    self.engine.remove_requests(state, [request.request_id])
-                    continue
 
-                provider = self.provider_factory()
-                provider.initialize(input_ids, [request.request_id])
-                plan = provider.predict(output.state)
-                executions[request.request_id] = RequestExecution(
-                    provider,
-                    token,
-                    plan.horizons,
-                    generated[request.request_id],
+            for group in _group_admitted_by_prompt_length(admitted):
+                prefill_batches += 1
+                maximum_prefill_batch = max(maximum_prefill_batch, len(group))
+                group_ids = [request.request_id for request in group]
+                input_ids = torch.tensor(
+                    [request.prompt_token_ids for request in group], dtype=torch.long
                 )
+                output = self.engine.prefill(input_ids, group_ids)
+                tokens = output.logits[:, -1].argmax(dim=-1).detach().cpu()
+                first_token_at = time.perf_counter() - run_start
+                self.engine.add_state(state, output.state)
+                finished_ids = []
+                for index, request in enumerate(group):
+                    request_id = request.request_id
+                    token = tokens[index]
+                    generated[request_id].append(int(token))
+                    request_timings[request_id]["time_to_first_token_seconds"] = first_token_at
+                    request_timings[request_id]["prefill_seconds"] = first_token_at - admitted_at
+                    first_token_finished = scheduler.record_decode([request_id])
+                    if first_token_finished:
+                        finish_requests([request_id])
+                        finished_ids.append(request_id)
+                        continue
+
+                    provider = self.provider_factory()
+                    request_input_ids = input_ids[index : index + 1]
+                    provider.initialize(request_input_ids, [request_id])
+                    plan = provider.predict(_request_state(output.state, request_id))
+                    executions[request_id] = RequestExecution(
+                        provider,
+                        token,
+                        plan.horizons,
+                        generated[request_id],
+                    )
+                if finished_ids:
+                    self.engine.remove_requests(state, finished_ids)
 
             active_ids = scheduler.active_ids
             if not active_ids:
@@ -222,5 +248,7 @@ class ContinuousBatchRunner:
             decode_cycles,
             admission_events,
             maximum_active,
+            prefill_batches,
+            maximum_prefill_batch,
             request_timings,
         )

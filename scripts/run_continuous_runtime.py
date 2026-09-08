@@ -179,6 +179,8 @@ def main() -> None:
             "decode_cycles": run_result.decode_cycles,
             "admission_events": run_result.admission_events,
             "maximum_active_requests": run_result.maximum_active_requests,
+            "prefill_batches": run_result.prefill_batches,
+            "maximum_prefill_batch": run_result.maximum_prefill_batch,
             "mean_ttft_seconds": statistics.mean(ttft),
             "p50_ttft_seconds": statistics.median(ttft),
             "mean_request_latency_seconds": statistics.mean(latency),
