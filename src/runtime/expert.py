@@ -11,7 +11,7 @@ from safetensors import safe_open
 
 from src.runtime.memory_queue import ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager
-from src.runtime.transfer import OffloadRuntime
+from src.runtime.transfer import OffloadRuntime, PrefetchRequest
 
 
 @dataclass(frozen=True)
@@ -149,18 +149,16 @@ def enqueue_expert_predictions(
     if probabilities.ndim != 2 or len(probabilities) != len(request_ids):
         raise ValueError("probabilities must align with request IDs")
     queued = []
+    requests = []
     for row, request_id in zip(probabilities, request_ids):
         values, experts = row.topk(min(top_k, row.numel()))
         for probability, expert in zip(values.tolist(), experts.tolist()):
             key = registry.ensure(layer, expert)
-            runtime.prefetch(
-                key,
-                consumer=request_id,
-                probability=float(probability),
-                deadline=deadline,
-                miss_cost_ms=miss_cost_ms,
+            requests.append(
+                PrefetchRequest(key, request_id, float(probability), deadline, miss_cost_ms)
             )
             queued.append((key, request_id))
+    runtime.prefetch_many(requests)
     return queued
 
 

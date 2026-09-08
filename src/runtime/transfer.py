@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 import torch
 
-from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
+from src.runtime.memory_queue import MemoryRequestQueue, QueueUpdate, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
 
 
@@ -141,6 +141,10 @@ class TransferMetrics:
     demand_requests: int = 0
     demand_hits: int = 0
     demand_misses: int = 0
+    prefetch_requests: int = 0
+    prefetch_enqueued: int = 0
+    prefetch_batches: int = 0
+    prefetch_enqueue_ms: float = 0.0
 
     def delta(self, earlier: TransferMetrics) -> TransferMetrics:
         """Return the per-field increase since an earlier snapshot."""
@@ -150,6 +154,15 @@ class TransferMetrics:
                 for item in fields(self)
             }
         )
+
+
+@dataclass(frozen=True)
+class PrefetchRequest:
+    key: ResourceKey
+    consumer: str
+    probability: float
+    deadline: int
+    miss_cost_ms: float
 
 
 class TransferWorker:
@@ -252,25 +265,65 @@ class OffloadRuntime:
         deadline: int,
         miss_cost_ms: float,
     ) -> None:
-        state = self.residency.state(key)
-        if state == ResourceState.GPU_RESIDENT:
-            record = self.residency.record(key)
-            urgency = 1 / max(1, deadline - self.queue.current_step)
-            priority = miss_cost_ms * probability * urgency / max(record.size_bytes / 2**20, 1e-6)
-            self.residency.update_lease(key, priority, deadline)
-            return
-        if state == ResourceState.IN_FLIGHT:
-            return
-        record = self.residency.record(key)
-        self.residency.mark_queued(key)
-        self.queue.upsert(
-            key,
-            consumer=consumer,
-            probability=probability,
-            deadline=deadline,
-            size_bytes=record.size_bytes,
-            miss_cost_ms=miss_cost_ms,
+        self.prefetch_many(
+            [PrefetchRequest(key, consumer, probability, deadline, miss_cost_ms)]
         )
+
+    def prefetch_many(
+        self,
+        requests: list[PrefetchRequest],
+    ) -> None:
+        """Submit one prediction group with a single queue lock acquisition."""
+        if not requests:
+            return
+        start = time.perf_counter()
+        self.worker.metrics.prefetch_batches += 1
+        self.worker.metrics.prefetch_requests += len(requests)
+        queued: list[QueueUpdate] = []
+        leases: dict[ResourceKey, tuple[float, int, float]] = {}
+        for request in requests:
+            key = request.key
+            if not 0 <= request.probability <= 1:
+                raise ValueError("probability must be in [0, 1]")
+            if request.miss_cost_ms < 0:
+                raise ValueError("miss_cost_ms must be non-negative")
+            state = self.residency.state(key)
+            record = self.residency.record(key)
+            if state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
+                expected_uses, earliest, largest_cost = leases.get(
+                    key, (0.0, request.deadline, request.miss_cost_ms)
+                )
+                leases[key] = (
+                    expected_uses + request.probability,
+                    min(earliest, request.deadline),
+                    max(largest_cost, request.miss_cost_ms),
+                )
+                continue
+            self.residency.mark_queued(key)
+            queued.append(
+                QueueUpdate(
+                    key,
+                    request.consumer,
+                    request.probability,
+                    request.deadline,
+                    record.size_bytes,
+                    request.miss_cost_ms,
+                )
+            )
+        current_step = self.queue.current_step
+        for key, (expected_uses, deadline, miss_cost_ms) in leases.items():
+            record = self.residency.record(key)
+            urgency = 1 / max(1, deadline - current_step)
+            priority = (
+                miss_cost_ms
+                * expected_uses
+                * urgency
+                / max(record.size_bytes / 2**20, 1e-6)
+            )
+            self.residency.update_lease(key, priority, deadline)
+        self.queue.upsert_many(queued)
+        self.worker.metrics.prefetch_enqueued += len(queued)
+        self.worker.metrics.prefetch_enqueue_ms += (time.perf_counter() - start) * 1000
 
     def demand(
         self,

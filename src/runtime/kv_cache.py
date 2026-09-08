@@ -15,7 +15,7 @@ from src.runtime.hybrid_attention import (
 )
 from src.runtime.memory_queue import ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
-from src.runtime.transfer import OffloadRuntime
+from src.runtime.transfer import OffloadRuntime, PrefetchRequest
 
 
 def kv_key(request_id: str, layer: int, chunk: int) -> ResourceKey:
@@ -122,18 +122,18 @@ class RequestLayerKV:
         consumer: str | None = None,
     ) -> list[tuple[ResourceKey, str]]:
         queued = []
+        requests = []
         consumer = consumer or self.request_id
         for chunk, probability in draft_mass.items():
             if chunk not in self.old:
                 continue
-            self.runtime.prefetch(
-                self.old[chunk],
-                consumer=consumer,
-                probability=probability,
-                deadline=deadline,
-                miss_cost_ms=miss_cost_ms,
+            requests.append(
+                PrefetchRequest(
+                    self.old[chunk], consumer, probability, deadline, miss_cost_ms
+                )
             )
             queued.append((self.old[chunk], consumer))
+        self.runtime.prefetch_many(requests)
         return queued
 
     def predicted_keep_set(self, draft_mass: dict[int, float]) -> set[int]:

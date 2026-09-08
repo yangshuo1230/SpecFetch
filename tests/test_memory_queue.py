@@ -1,6 +1,6 @@
 import pytest
 
-from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
+from src.runtime.memory_queue import MemoryRequestQueue, QueueUpdate, ResourceKey, ResourceKind
 
 
 def key(object_id, kind=ResourceKind.KV):
@@ -59,3 +59,18 @@ def test_step_cannot_move_backwards():
     queue.set_step(3)
     with pytest.raises(ValueError, match="backwards"):
         queue.set_step(2)
+
+
+def test_batch_upsert_merges_consumers_before_worker_observes_queue():
+    queue = MemoryRequestQueue()
+    queue.upsert_many(
+        [
+            QueueUpdate(key(1), "r0", 0.2, 5, 1024, 1.0),
+            QueueUpdate(key(1), "r1", 0.7, 2, 1024, 1.0),
+            QueueUpdate(key(2), "r0", 0.5, 3, 1024, 1.0),
+        ]
+    )
+    first = queue.pop()
+    assert first.key == key(1)
+    assert first.expected_uses == pytest.approx(0.9)
+    assert first.deadline == 2

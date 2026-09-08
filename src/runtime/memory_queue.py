@@ -49,6 +49,19 @@ class MemoryRequest:
         return self.miss_cost_ms * self.expected_uses * urgency / mib
 
 
+@dataclass(frozen=True)
+class QueueUpdate:
+    """One consumer's contribution to a queued resource request."""
+
+    key: ResourceKey
+    consumer: str
+    probability: float
+    deadline: int
+    size_bytes: int
+    miss_cost_ms: float
+    demand: bool = False
+
+
 class MemoryRequestQueue:
     """Thread-safe updatable priority queue shared by KV and expert requests."""
 
@@ -98,27 +111,69 @@ class MemoryRequestQueue:
         miss_cost_ms: float,
         demand: bool = False,
     ) -> MemoryRequest:
-        if not 0 <= probability <= 1:
+        return self.upsert_many(
+            [
+                QueueUpdate(
+                    key,
+                    consumer,
+                    probability,
+                    deadline,
+                    size_bytes,
+                    miss_cost_ms,
+                    demand,
+                )
+            ]
+        )[0]
+
+    @staticmethod
+    def _validate(update: QueueUpdate) -> None:
+        if not 0 <= update.probability <= 1:
             raise ValueError("probability must be in [0, 1]")
-        if size_bytes <= 0 or miss_cost_ms < 0:
+        if update.size_bytes <= 0 or update.miss_cost_ms < 0:
             raise ValueError("size_bytes must be positive and miss_cost_ms non-negative")
+
+    def _merge_locked(self, update: QueueUpdate) -> MemoryRequest:
+        request = self._requests.get(update.key)
+        if request is None:
+            request = MemoryRequest(
+                update.key,
+                update.size_bytes,
+                update.miss_cost_ms,
+                update.deadline,
+            )
+            self._requests[update.key] = request
+        elif request.size_bytes != update.size_bytes:
+            raise ValueError(f"size changed for existing resource {update.key}")
+        request.consumer_probabilities[update.consumer] = update.probability
+        request.consumer_deadlines[update.consumer] = update.deadline
+        request.deadline = min(request.consumer_deadlines.values())
+        request.miss_cost_ms = max(request.miss_cost_ms, update.miss_cost_ms)
+        request.demand = request.demand or update.demand
+        return request
+
+    def upsert_many(self, updates: list[QueueUpdate]) -> list[MemoryRequest]:
+        """Apply a prediction batch under one lock and wake the worker once."""
+        if not updates:
+            return []
+        for update in updates:
+            self._validate(update)
         with self._condition:
             if self._closed:
                 raise RuntimeError("queue is closed")
-            request = self._requests.get(key)
-            if request is None:
-                request = MemoryRequest(key, size_bytes, miss_cost_ms, deadline)
-                self._requests[key] = request
-            elif request.size_bytes != size_bytes:
-                raise ValueError(f"size changed for existing resource {key}")
-            request.consumer_probabilities[consumer] = probability
-            request.consumer_deadlines[consumer] = deadline
-            request.deadline = min(request.consumer_deadlines.values())
-            request.miss_cost_ms = max(request.miss_cost_ms, miss_cost_ms)
-            request.demand = request.demand or demand
-            self._push(request)
+            sizes: dict[ResourceKey, int] = {}
+            for update in updates:
+                expected_size = sizes.setdefault(update.key, update.size_bytes)
+                existing = self._requests.get(update.key)
+                if expected_size != update.size_bytes or (
+                    existing is not None and existing.size_bytes != update.size_bytes
+                ):
+                    raise ValueError(f"size changed for existing resource {update.key}")
+            requests = [self._merge_locked(update) for update in updates]
+            unique = {item.key: item for item in requests}
+            for request in unique.values():
+                self._push(request)
             self._condition.notify()
-            return request
+            return requests
 
     def promote_demand(
         self,
