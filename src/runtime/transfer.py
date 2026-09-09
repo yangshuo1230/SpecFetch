@@ -565,9 +565,7 @@ class TransferWorker:
     def close(self, *, drain: bool = False) -> None:
         discarded = [] if drain else [request.key for request in self.queue.snapshot()]
         self.queue.close(discard=not drain)
-        for key in discarded:
-            if self.residency.contains(key):
-                self.residency.unqueue(key)
+        self.residency.unqueue_many(discarded)
         if self._thread is not None:
             self._thread.join()
         self.check()
@@ -706,8 +704,7 @@ class OffloadRuntime:
             return
         depleted = self.queue.cancel_many(cancellations)
         self.residency.cancel_leases(cancellations)
-        for key in depleted:
-            self.residency.unqueue(key)
+        self.residency.unqueue_many(depleted)
 
     def release(self, key: ResourceKey) -> None:
         self.release_many([key])

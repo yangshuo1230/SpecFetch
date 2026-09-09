@@ -197,17 +197,28 @@ class ResidencyManager:
         return queued
 
     def unqueue(self, key: ResourceKey) -> bool:
+        return key in self.unqueue_many([key])
+
+    def unqueue_many(self, keys: list[ResourceKey] | set[ResourceKey]) -> set[ResourceKey]:
+        """Return queued resources to CPU-only state under one lock."""
+        transitioned = set()
         with self._condition:
-            record = self._records[key]
-            if record.state != ResourceState.QUEUED:
-                return False
-            record.state = ResourceState.CPU_ONLY
-            record.consumer_leases.clear()
-            record.speculative = False
-            record.used = False
-            self._refresh_priority(record)
-            self._condition.notify_all()
-            return True
+            for key in keys:
+                record = self._records.get(key)
+                if record is None or record.state != ResourceState.QUEUED:
+                    continue
+                record.state = ResourceState.CPU_ONLY
+                record.consumer_leases.clear()
+                record.speculative = False
+                record.used = False
+                record.lease_priority = 0.0
+                record.lease_deadline = 0
+                record.priority = 0.0
+                record.deadline = 0
+                transitioned.add(key)
+            if transitioned:
+                self._condition.notify_all()
+        return transitioned
 
     def _eviction_candidate(
         self, kind: ResourceKind, protected: set[ResourceKey]

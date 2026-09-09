@@ -120,6 +120,9 @@ event, removing per-expert scalar map kernels and duplicate event waits.
 upsert 和唤醒；这只合并提交开销，不改变每个对象的 probability、deadline 或最终堆顺序。
 预测窗口失效时，consumer cancellation 同样按资源批量合并，并在队列和驻留管理器中各
 只获取一次锁；共享资源仅撤销对应 consumer，其余请求的 lease 和优先级继续保留。
+Resources whose final queued consumer is cancelled transition back to CPU-only through
+one `unqueue_many` residency section with a single notification; the transition no longer
+reacquires the lock and recomputes empty lease aggregates once per depleted resource.
 Active prediction leases are bucketed by `(layer, absolute-token consumer)`. Layer
 retirement directly removes only the current request buckets rather than filtering the
 entire future-layer/horizon lease list at every layer; request completion removes its

@@ -431,6 +431,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     delta，cancel 直接减去贡献；仅覆盖/删除当前最早 lease 时重算 min deadline。常见单-consumer
     expert 不再在 admission 与 cancellation 两侧各扫描一次 lease dict。相同 release-shape
     admission/cancel 微基准由 19.45 降至 17.25 ms/refresh，再减少约 11.3%。
+40. Prediction cancellation 的 depleted queued resources 改由一次 `unqueue_many` 完成全部
+    QUEUED→CPU_ONLY、lease aggregate 清零与单次 notify；旧路径对约 1,384 resources 分别
+    获取 residency 锁并重算空 lease。Worker discard-close 同样复用批量转换。固定预构造
+    requests、仅切换 scalar/batch unqueue 的受控微基准为 14.744→13.850 ms/window，约降 6.1%。
 
 ## Next actions
 

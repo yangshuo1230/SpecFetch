@@ -540,7 +540,7 @@ def test_discarding_worker_close_unqueues_pending_resources():
     assert residency.state(resource(0)) == ResourceState.CPU_ONLY
 
 
-def test_batch_cancel_returns_depleted_queued_resources_to_cpu_state():
+def test_batch_cancel_returns_depleted_queued_resources_to_cpu_state(monkeypatch):
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
     for index in range(2):
@@ -549,9 +549,23 @@ def test_batch_cancel_returns_depleted_queued_resources_to_cpu_state():
     runtime = OffloadRuntime(queue, residency, worker)
     runtime.prefetch(resource(0), consumer="a", probability=0.8, deadline=1, miss_cost_ms=1)
     runtime.prefetch(resource(1), consumer="b", probability=0.7, deadline=1, miss_cost_ms=1)
+    calls = []
+    unqueue_many = residency.unqueue_many
+
+    def counted_unqueue(keys):
+        calls.append(set(keys))
+        return unqueue_many(keys)
+
+    monkeypatch.setattr(residency, "unqueue_many", counted_unqueue)
+    monkeypatch.setattr(
+        residency,
+        "unqueue",
+        lambda _key: (_ for _ in ()).throw(AssertionError("scalar unqueue is forbidden")),
+    )
 
     runtime.cancel_many([(resource(0), "a"), (resource(1), "b")])
 
+    assert calls == [{resource(0), resource(1)}]
     assert len(queue) == 0
     assert residency.state(resource(0)) == ResourceState.CPU_ONLY
     assert residency.state(resource(1)) == ResourceState.CPU_ONLY
