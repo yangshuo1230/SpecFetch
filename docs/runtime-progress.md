@@ -339,6 +339,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 13. vLLM MoE backend 现同时接入 vLLM fused router kernel，将每层的 FP32 softmax、Top-K、
     Top-K sum/divide 归一化合并；torch backend 继续保留显式 reference 路径。CPU profile 中
     独立 softmax 是 resident 小模型最重 router 算子，正式 GPU 收益仍由后续 matched run 验证。
+14. Expert eviction 在相同 priority/deadline 下改为 layer-balanced LRU：先从驻留数最多的层
+    选择 victim，再按 LRU。确定性两层循环 trace 在 capacity 3 / working-set 4 下，普通全局
+    LRU 第二轮 0 hit，而新策略保留每层代表并得到 2 hit；KV eviction 不受影响。
 
 ## Next actions
 

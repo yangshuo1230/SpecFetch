@@ -61,6 +61,37 @@ def test_lru_evicts_unpinned_resource():
     worker.close()
 
 
+def test_expert_eviction_preserves_cross_token_hits_across_layers():
+    residency = ResidencyManager({ResourceKind.EXPERT: 3, ResourceKind.KV: 1})
+    routes = [
+        ResourceKey(ResourceKind.EXPERT, layer=0, object_id=0),
+        ResourceKey(ResourceKind.EXPERT, layer=0, object_id=1),
+        ResourceKey(ResourceKind.EXPERT, layer=1, object_id=0),
+        ResourceKey(ResourceKind.EXPERT, layer=1, object_id=1),
+    ]
+    for key in routes:
+        residency.register_cpu(key, f"cpu:{key.layer}:{key.object_id}", 1)
+
+    def demand_cycle() -> int:
+        hits = 0
+        for key in routes:
+            if residency.state(key) == ResourceState.GPU_RESIDENT:
+                hits += 1
+                residency.mark_demand(key)
+                residency.get_gpu(key)
+            else:
+                assert residency.begin_transfer(key, demand=True)
+                residency.complete_transfer(key, f"gpu:{key.layer}:{key.object_id}")
+            residency.release(key)
+        return hits
+
+    assert demand_cycle() == 0
+    # A global LRU cache of size three has zero hits on this cyclic trace of
+    # four objects. Layer balancing retains one route from each layer.
+    assert demand_cycle() == 2
+    assert {key.layer for key in residency.resident_keys(ResourceKind.EXPERT)} == {0, 1}
+
+
 def test_demand_promotes_queued_resource():
     runtime, _, worker, backend = build_runtime(delay=0.005)
     runtime.prefetch(resource(0), consumer="r0", probability=0.9, deadline=1, miss_cost_ms=1)

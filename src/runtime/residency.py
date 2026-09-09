@@ -49,6 +49,9 @@ class ResidencyManager:
             kind: OrderedDict() for kind in capacities
         }
         self._reserved: dict[ResourceKind, set[ResourceKey]] = {kind: set() for kind in capacities}
+        self._resident_layer_counts: dict[ResourceKind, dict[int, int]] = {
+            kind: {} for kind in capacities
+        }
         self._condition = threading.Condition()
         self._eviction_callback: Callable[[ResourceKey, Any], None] | None = None
         self.evictions = 0
@@ -180,12 +183,18 @@ class ResidencyManager:
     ) -> ResourceKey | None:
         lru = self._resident[kind]
         victim = None
-        victim_rank: tuple[float, int, int] | None = None
+        victim_rank: tuple[float, int, int, int] | None = None
+        layer_counts = self._resident_layer_counts[kind]
         for lru_order, key in enumerate(lru):
             record = self._records[key]
             if key in protected or record.pinned:
                 continue
-            rank = (record.priority, -record.deadline, lru_order)
+            # Sequential MoE decode scans every layer once per token. Plain
+            # global LRU thrashes when that cyclic working set is larger than
+            # the cache. Among equally urgent experts, evict from the most
+            # represented layer first so every layer retains reusable entries.
+            layer_balance = -layer_counts.get(key.layer, 0) if kind == ResourceKind.EXPERT else 0
+            rank = (record.priority, -record.deadline, layer_balance, lru_order)
             if victim_rank is None or rank < victim_rank:
                 victim = key
                 victim_rank = rank
@@ -206,6 +215,7 @@ class ResidencyManager:
         lru = self._resident[kind]
         lru.pop(victim)
         record = self._records[victim]
+        self._decrement_layer_count(victim)
         if record.speculative and not record.used:
             self.wasted_prefetches += 1
         if self._eviction_callback is not None:
@@ -213,6 +223,14 @@ class ResidencyManager:
         record.gpu_value = None
         record.state = ResourceState.CPU_ONLY
         self.evictions += 1
+
+    def _decrement_layer_count(self, key: ResourceKey) -> None:
+        counts = self._resident_layer_counts[key.kind]
+        remaining = counts[key.layer] - 1
+        if remaining:
+            counts[key.layer] = remaining
+        else:
+            del counts[key.layer]
 
     def begin_transfer(
         self,
@@ -281,6 +299,8 @@ class ResidencyManager:
             record.gpu_value = gpu_value
             record.state = ResourceState.GPU_RESIDENT
             self._resident[key.kind][key] = None
+            counts = self._resident_layer_counts[key.kind]
+            counts[key.layer] = counts.get(key.layer, 0) + 1
             self._condition.notify_all()
 
     def fail_transfer(self, key: ResourceKey) -> None:
@@ -358,6 +378,7 @@ class ResidencyManager:
             if record.state != ResourceState.GPU_RESIDENT or record.pinned:
                 return False
             self._resident[key.kind].pop(key, None)
+            self._decrement_layer_count(key)
             if record.speculative and not record.used:
                 self.wasted_prefetches += 1
             if self._eviction_callback is not None:

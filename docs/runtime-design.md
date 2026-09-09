@@ -66,6 +66,10 @@ layer/horizon, overlapping routes across requests also share one registry resolu
 The vLLM MoE backend also uses its fused router kernel, combining FP32 softmax, Top-K,
 and Top-K renormalization instead of launching each PyTorch operation separately. The
 torch backend retains the explicit reference path.
+For equal prediction priority and deadline, expert eviction is layer-balanced before its
+LRU tie-break: entries are removed from the most represented layer. This avoids global
+LRU's zero-hit cyclic-scan failure when every decode token revisits all model layers but
+the expert working set is larger than the cache. KV eviction remains priority/deadline/LRU.
 
 ## Sparse KV stopping
 
