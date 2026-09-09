@@ -307,10 +307,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
    first six generated tokens match in the short test, after which rounding changes the
    greedy path. Quality must be assessed statistically, not by requiring bit identity to
    vLLM.
-6. 新增的 opt-in `--kv-storage resident` 已在 CPU 小模型上验证两步 decode 与完整序列
-   reference 一致。它按 context+最大输出长度预分配每请求/层 KV，以原位 append、原生
-   GQA SDPA 绕过 KV queue、旧块拼接与逐块 marginal 同步；但尚未在真实 GPU 上验证
-   10 GiB 上限、速度或数值，因此不改变默认 sparse 配置，也不构成性能结论。
+6. 新增的 opt-in `--kv-storage resident` 已在 CPU 小模型上验证两步 decode、连续准入/
+   完成以及完整序列 reference 一致。它按 uniform-length prefill group/层分配 batch-
+   contiguous KV，以批量原位 append 和每组/层一次原生 GQA SDPA 绕过 KV queue、旧块
+   拼接与逐块 marginal 同步；完成请求的行会压紧到更小分配，不同长度的新准入保持独立
+   group。但它尚未在真实 GPU 上验证 10 GiB 上限、速度或数值，因此不改变默认 sparse
+   配置，也不构成性能结论。
 
 ## Next actions
 

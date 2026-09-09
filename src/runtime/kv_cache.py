@@ -128,6 +128,55 @@ class RequestLayerKV:
             end = start + self.config.kv_chunk_tokens
             self._register_old(key[start:end], value[start:end], start)
 
+    def initialize_resident(
+        self,
+        buffers: tuple[torch.Tensor, torch.Tensor],
+        tokens: int,
+    ) -> None:
+        """Bind a row of a batch-owned resident allocation without copying its prefix."""
+        if self.config.kv_storage != "resident":
+            raise RuntimeError("external resident buffers require resident KV storage")
+        if self.sink is not None:
+            raise RuntimeError("KV cache is already initialized")
+        capacity = self.config.resident_kv_capacity_tokens
+        assert capacity is not None
+        if tokens < 0 or tokens > capacity:
+            raise ValueError(f"resident token count {tokens} exceeds capacity {capacity}")
+        if any(buffer.ndim != 3 or len(buffer) != capacity for buffer in buffers):
+            raise ValueError("resident buffers must have shape (capacity, kv_heads, head_dim)")
+        if buffers[0].shape != buffers[1].shape:
+            raise ValueError("resident key and value buffers must have matching shapes")
+        self._resident_buffers = buffers
+        self.sink = tuple(buffer[:0] for buffer in buffers)
+        self.recent = tuple(buffer[:tokens] for buffer in buffers)
+        self._recent_start = 0
+        self._total_tokens = tokens
+
+    def commit_resident_append(self, tokens: int = 1) -> None:
+        """Publish tokens already written by the owning batch allocation."""
+        if self._resident_buffers is None or tokens <= 0:
+            raise RuntimeError("resident KV cache must be initialized before advancing")
+        end = self._total_tokens + tokens
+        if end > len(self._resident_buffers[0]):
+            raise RuntimeError(
+                f"resident KV capacity {len(self._resident_buffers[0])} exceeded by token {end}"
+            )
+        self._total_tokens = end
+        self.recent = tuple(buffer[:end] for buffer in self._resident_buffers)
+
+    def rebind_resident(self, buffers: tuple[torch.Tensor, torch.Tensor]) -> None:
+        """Rebind after an owning batch compacts rows for completed requests."""
+        if self._resident_buffers is None:
+            raise RuntimeError("only an initialized resident cache can be rebound")
+        if any(
+            buffer.shape != self._resident_buffers[index].shape
+            for index, buffer in enumerate(buffers)
+        ):
+            raise ValueError("replacement resident buffers must preserve the cache shape")
+        self._resident_buffers = buffers
+        self.sink = tuple(buffer[:0] for buffer in buffers)
+        self.recent = tuple(buffer[: self._total_tokens] for buffer in buffers)
+
     def append(self, key: torch.Tensor, value: torch.Tensor) -> None:
         if self.recent is None or key.shape != value.shape or key.ndim != 3:
             raise ValueError("initialize first and append aligned 3-D KV tensors")

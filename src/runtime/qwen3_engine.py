@@ -61,6 +61,106 @@ class BatchState:
     kv: dict[tuple[str, int], RequestLayerKV]
     step: int = 0
     speculative_consumers: list[tuple[ResourceKey, str]] = field(default_factory=list)
+    resident_groups: list[ResidentKVGroup] = field(default_factory=list)
+
+
+@dataclass
+class ResidentKVGroup:
+    """Batch-contiguous resident KV allocated by one uniform-length prefill."""
+
+    request_ids: list[str]
+    length: int
+    layers: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+
+    def initialize_layer(
+        self,
+        layer: int,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        capacity: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if key.shape != value.shape or key.ndim != 4:
+            raise ValueError("batched KV must have shape (batch, tokens, kv_heads, head_dim)")
+        if key.shape[:2] != (len(self.request_ids), self.length):
+            raise ValueError("batched KV does not match its resident group")
+        if self.length > capacity:
+            raise ValueError(
+                f"prefix has {self.length} tokens but resident KV capacity is {capacity}"
+            )
+        buffers = tuple(
+            torch.empty(
+                (len(self.request_ids), capacity, *tensor.shape[2:]),
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            for tensor in (key, value)
+        )
+        for buffer, tensor in zip(buffers, (key, value)):
+            buffer[:, : self.length].copy_(tensor)
+        self.layers[layer] = buffers
+        return buffers
+
+    def append_layer(
+        self,
+        layer: int,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> int:
+        buffers = self.layers[layer]
+        end = self.length + key.shape[1]
+        if end > buffers[0].shape[1]:
+            raise RuntimeError(
+                f"resident KV capacity {buffers[0].shape[1]} exceeded by token {end}"
+            )
+        expected = (len(self.request_ids), key.shape[1], *buffers[0].shape[2:])
+        if key.shape != expected or value.shape != expected:
+            raise ValueError("decode KV does not match its resident group")
+        for buffer, tensor in zip(buffers, (key, value)):
+            buffer[: len(self.request_ids), self.length : end].copy_(tensor)
+        return end
+
+    def attention(self, layer: int, query: torch.Tensor, tokens: int) -> torch.Tensor:
+        key, value = self.layers[layer]
+        key = key[: len(self.request_ids), :tokens].transpose(1, 2)
+        value = value[: len(self.request_ids), :tokens].transpose(1, 2)
+        return torch.nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            enable_gqa=query.shape[1] != key.shape[1],
+        )
+
+    def compact(
+        self,
+        removing: set[str],
+        caches: dict[tuple[str, int], RequestLayerKV],
+    ) -> None:
+        retained = [
+            (source, request_id)
+            for source, request_id in enumerate(self.request_ids)
+            if request_id not in removing
+        ]
+        if len(retained) == len(self.request_ids):
+            return
+        compacted = {}
+        for layer, buffers in self.layers.items():
+            replacements = tuple(
+                torch.empty(
+                    (len(retained), *buffer.shape[1:]),
+                    dtype=buffer.dtype,
+                    device=buffer.device,
+                )
+                for buffer in buffers
+            )
+            for target, (source, _) in enumerate(retained):
+                for replacement, buffer in zip(replacements, buffers):
+                    replacement[target, : self.length].copy_(buffer[source, : self.length])
+            compacted[layer] = replacements
+        self.layers = compacted
+        self.request_ids = [request_id for _, request_id in retained]
+        for row, request_id in enumerate(self.request_ids):
+            for layer, buffers in self.layers.items():
+                caches[(request_id, layer)].rebind_resident((buffers[0][row], buffers[1][row]))
 
 
 @dataclass
@@ -208,6 +308,11 @@ class Qwen3SparseOffloadEngine:
         positions = torch.arange(tokens, device=self.device).expand(batch, -1)
         position_embeddings = self.model.model.rotary_emb(hidden, positions)
         caches = {}
+        resident_group = (
+            ResidentKVGroup(list(request_ids), tokens)
+            if self.config.kv_storage == "resident"
+            else None
+        )
         for layer_index, layer in enumerate(self.model.model.layers):
             residual = hidden
             normalized = layer.input_layernorm(hidden)
@@ -216,6 +321,16 @@ class Qwen3SparseOffloadEngine:
                 batch, tokens, -1
             )
             hidden = residual + layer.self_attn.o_proj(attended)
+            resident_buffers = None
+            if resident_group is not None:
+                capacity = self.config.resident_kv_capacity_tokens
+                assert capacity is not None
+                resident_buffers = resident_group.initialize_layer(
+                    layer_index,
+                    key.transpose(1, 2),
+                    value.transpose(1, 2),
+                    capacity,
+                )
             for request_index, request_id in enumerate(request_ids):
                 cache = RequestLayerKV(
                     request_id,
@@ -224,10 +339,16 @@ class Qwen3SparseOffloadEngine:
                     self.residency,
                     self.runtime,
                 )
-                cache.initialize(
-                    key[request_index].transpose(0, 1),
-                    value[request_index].transpose(0, 1),
-                )
+                if resident_buffers is None:
+                    cache.initialize(
+                        key[request_index].transpose(0, 1),
+                        value[request_index].transpose(0, 1),
+                    )
+                else:
+                    cache.initialize_resident(
+                        (resident_buffers[0][request_index], resident_buffers[1][request_index]),
+                        tokens,
+                    )
                 caches[(request_id, layer_index)] = cache
             residual = hidden
             hidden = residual + self._moe(
@@ -238,7 +359,12 @@ class Qwen3SparseOffloadEngine:
             )
         hidden = self.model.model.norm(hidden)
         logits = self.model.lm_head(hidden)
-        return EngineOutput(logits, BatchState(request_ids, [tokens] * batch, caches), {})
+        resident_groups = [resident_group] if resident_group is not None else []
+        return EngineOutput(
+            logits,
+            BatchState(request_ids, [tokens] * batch, caches, resident_groups=resident_groups),
+            {},
+        )
 
     def _reset_prediction_window(self, state: BatchState) -> None:
         self.runtime.cancel_many(state.speculative_consumers)
@@ -370,7 +496,9 @@ class Qwen3SparseOffloadEngine:
         state.lengths.extend(admitted.lengths)
         state.kv.update(admitted.kv)
         state.speculative_consumers.extend(admitted.speculative_consumers)
+        state.resident_groups.extend(admitted.resident_groups)
 
+    @torch.inference_mode()
     def remove_requests(self, state: BatchState, request_ids: list[str]) -> None:
         """Cancel predictions and free KV storage for completed requests."""
         removing = set(request_ids)
@@ -387,6 +515,9 @@ class Qwen3SparseOffloadEngine:
         for request_id in removing:
             for layer_index in range(len(self.model.model.layers)):
                 state.kv.pop((request_id, layer_index)).close()
+        for group in state.resident_groups:
+            group.compact(removing, state.kv)
+        state.resident_groups = [group for group in state.resident_groups if group.request_ids]
         retained = [
             (request_id, length)
             for request_id, length in zip(state.request_ids, state.lengths)
@@ -450,6 +581,53 @@ class Qwen3SparseOffloadEngine:
             residual = hidden
             normalized = layer.input_layernorm(hidden)
             query, key, value = self._project(layer, normalized, position_embeddings)
+            if state.resident_groups:
+                grouped_ids = [
+                    request_id
+                    for group in state.resident_groups
+                    for request_id in group.request_ids
+                ]
+                if grouped_ids != state.request_ids:
+                    raise RuntimeError("resident KV groups are not aligned with the decode batch")
+                attended_groups = []
+                offset = 0
+                for group in state.resident_groups:
+                    end = offset + len(group.request_ids)
+                    group_tokens = group.append_layer(
+                        layer_index,
+                        key[offset:end].transpose(1, 2),
+                        value[offset:end].transpose(1, 2),
+                    )
+                    group_output = group.attention(
+                        layer_index,
+                        query[offset:end],
+                        group_tokens,
+                    )
+                    attended_groups.append(group_output.transpose(1, 2))
+                    for row, request_id in enumerate(group.request_ids):
+                        cache = state.kv[(request_id, layer_index)]
+                        cache.commit_resident_append()
+                        traces[(request_id, layer_index)] = SparseAttentionResult(
+                            group_output[row, :, 0], [], 1.0, []
+                        )
+                    offset = end
+                attended = (
+                    attended_groups[0]
+                    if len(attended_groups) == 1
+                    else torch.cat(attended_groups, dim=0)
+                )
+                attended_tensor = attended.reshape(len(state.request_ids), 1, -1)
+                hidden = residual + layer.self_attn.o_proj(attended_tensor)
+                residual = hidden
+                hidden = residual + self._moe(
+                    layer,
+                    layer.post_attention_layernorm(hidden),
+                    layer_index,
+                    state.request_ids,
+                )
+                if prefetch:
+                    self._retire_prediction_layer(state, layer_index)
+                continue
             layer_scores = {}
             for request_index, request_id in enumerate(state.request_ids):
                 cache = state.kv[(request_id, layer_index)]
@@ -499,6 +677,8 @@ class Qwen3SparseOffloadEngine:
                 self._retire_prediction_layer(state, layer_index)
         hidden = self.model.model.norm(hidden)
         logits = self.model.lm_head(hidden)
+        for group in state.resident_groups:
+            group.length += 1
         state.lengths = [length + 1 for length in state.lengths]
         state.step += 1
         return EngineOutput(logits, state, traces)

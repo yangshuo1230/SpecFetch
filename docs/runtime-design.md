@@ -35,10 +35,12 @@ CPU_ONLY -> QUEUED -> IN_FLIGHT -> GPU_RESIDENT
 In sparse mode, the authoritative copy of every old KV chunk and routed expert remains
 in pinned CPU memory. Sink and recent KV are pinned in the GPU residency manager. Other
 GPU objects are evictable. The decode runner also exposes an opt-in `resident` KV mode:
-it preallocates each request/layer cache through the declared output bound and keeps the
-full prefix on GPU. This is an architecture experiment for contexts whose complete KV
-state fits under the same measured memory cap as the baseline; it does not weaken the
-expert-offload constraint or the matched-memory release gate.
+it preallocates a batch-contiguous cache for each uniform-length prefill group and layer
+through the declared output bound, then runs one batched GQA attention per group/layer.
+Completed rows are compacted into a smaller allocation, while later admissions with a
+different length retain an independent group. This is an architecture experiment for
+contexts whose complete KV state fits under the same measured memory cap as the baseline;
+it does not weaken the expert-offload constraint or the matched-memory release gate.
 
 ## Unified queue
 

@@ -1,4 +1,4 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
@@ -300,6 +300,83 @@ def test_preallocated_resident_kv_decode_matches_full_sequence():
         assert torch.allclose(actual, expected, atol=3e-5, rtol=3e-5)
 
     assert not engine.residency.resident_keys(ResourceKind.KV)
+    worker.close()
+
+
+def test_resident_decode_batches_attention_and_uses_shared_storage():
+    engine, worker = build_engine(
+        tiny_model(),
+        kv_storage="resident",
+        resident_kv_capacity_tokens=8,
+    )
+    state = engine.prefill(torch.tensor([[1, 2, 3], [3, 2, 1]]), ["a", "b"]).state
+    group = state.resident_groups[0]
+    for layer, buffers in group.layers.items():
+        assert buffers[0].shape == (2, 8, 2, 4)
+        for row, request_id in enumerate(group.request_ids):
+            cache_buffers = state.kv[(request_id, layer)]._resident_buffers
+            assert cache_buffers is not None
+            assert cache_buffers[0].data_ptr() == buffers[0][row].data_ptr()
+
+    attention = torch.nn.functional.scaled_dot_product_attention
+    with patch(
+        "torch.nn.functional.scaled_dot_product_attention", wraps=attention
+    ) as batched_attention:
+        engine.decode(torch.tensor([4, 5]), state, StepPredictions())
+
+    assert batched_attention.call_count == 2
+    assert all(call.args[0].shape == (2, 4, 1, 4) for call in batched_attention.call_args_list)
+    worker.close()
+
+
+def test_resident_groups_survive_admission_and_row_compaction():
+    torch.manual_seed(122)
+    model = tiny_model()
+    reference = tiny_model()
+    reference.load_state_dict(model.state_dict())
+    engine, worker = build_engine(
+        model,
+        kv_storage="resident",
+        resident_kv_capacity_tokens=8,
+    )
+    state = engine.prefill(torch.tensor([[1, 2, 3], [3, 2, 1]]), ["a", "b"]).state
+    admitted = engine.prefill(torch.tensor([[4, 5]]), ["c"]).state
+    engine.add_state(state, admitted)
+
+    first_next = torch.tensor([6, 7, 8])
+    actual = engine.decode(first_next, state, StepPredictions()).logits[:, -1]
+    sequences = {
+        "a": torch.tensor([1, 2, 3, 6]),
+        "b": torch.tensor([3, 2, 1, 7]),
+        "c": torch.tensor([4, 5, 8]),
+    }
+    expected = torch.stack(
+        [
+            reference(sequences[request_id][None], use_cache=False).logits[0, -1]
+            for request_id in state.request_ids
+        ]
+    )
+    assert torch.allclose(actual, expected, atol=3e-5, rtol=3e-5)
+
+    first_group = state.resident_groups[0]
+    engine.remove_requests(state, ["a"])
+    assert first_group.request_ids == ["b"]
+    for layer, buffers in first_group.layers.items():
+        cache_buffers = state.kv[("b", layer)]._resident_buffers
+        assert cache_buffers is not None
+        assert cache_buffers[0].data_ptr() == buffers[0][0].data_ptr()
+
+    second_next = torch.tensor([9, 10])
+    actual = engine.decode(second_next, state, StepPredictions()).logits[:, -1]
+    sequences["b"] = torch.cat((sequences["b"], second_next[:1]))
+    sequences["c"] = torch.cat((sequences["c"], second_next[1:]))
+    expected = torch.stack(
+        [
+            reference(sequences[request_id][None], use_cache=False).logits[0, -1]
+            for request_id in state.request_ids
+        ]
+    )
+    assert torch.allclose(actual, expected, atol=3e-5, rtol=3e-5)
     worker.close()
 
 
