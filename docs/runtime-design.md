@@ -80,3 +80,10 @@ in-place write into the preallocated cache and attention uses PyTorch SDPA with 
 GQA, avoiding old-chunk concatenation and per-chunk target-marginal synchronization.
 The sparse mode remains the default until matched GPU measurements establish which mode
 wins at each release context.
+
+The release runner computes the exact resident-buffer payload from every layer's K/V
+projection width, dtype, batch size, and declared token capacity before prefill. It
+rejects a run when persistent allocations plus that payload already exceed the matched
+cap, and applies the same absolute cap to PyTorch's CUDA caching allocator so temporary
+workspace cannot silently oversubscribe it. Results record the initial allocator state,
+resident payload, conservative allocated-memory lower bound, and measured peak.

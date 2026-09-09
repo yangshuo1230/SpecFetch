@@ -1,5 +1,6 @@
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
@@ -300,6 +301,33 @@ def test_preallocated_resident_kv_decode_matches_full_sequence():
         assert torch.allclose(actual, expected, atol=3e-5, rtol=3e-5)
 
     assert not engine.residency.resident_keys(ResourceKind.KV)
+    worker.close()
+
+
+def test_resident_kv_reports_exact_persistent_allocation_bytes():
+    engine, worker = build_engine(
+        tiny_model(),
+        kv_storage="resident",
+        resident_kv_capacity_tokens=8,
+    )
+
+    # 2 layers * K/V * batch 2 * capacity 8 * KV width 8 * fp32 bytes 4.
+    estimated = engine.resident_kv_allocation_bytes(2)
+    state = engine.prefill(torch.tensor([[1, 2], [3, 4]]), ["a", "b"]).state
+    actual = sum(
+        tensor.numel() * tensor.element_size()
+        for buffers in state.resident_groups[0].layers.values()
+        for tensor in buffers
+    )
+    assert estimated == actual == 2048
+    with pytest.raises(ValueError, match="batch size"):
+        engine.resident_kv_allocation_bytes(0)
+    worker.close()
+
+
+def test_sparse_kv_reports_no_resident_allocation():
+    engine, worker = build_engine(tiny_model())
+    assert engine.resident_kv_allocation_bytes(2) == 0
     worker.close()
 
 

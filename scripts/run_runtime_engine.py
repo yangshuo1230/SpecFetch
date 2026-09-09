@@ -219,6 +219,28 @@ def main() -> None:
             f"gpu-memory-limit-gib ({args.gpu_memory_limit_gib}) exceeds device capacity "
             f"({total_gpu_gib:.3f} GiB)"
         )
+    initial_gpu_allocated_gib = torch.cuda.memory_allocated(cuda_device) / 2**30
+    initial_gpu_reserved_gib = torch.cuda.memory_reserved(cuda_device) / 2**30
+    resident_kv_allocation_gib = engine.resident_kv_allocation_bytes(args.batch_size) / 2**30
+    resident_kv_lower_bound_gib = initial_gpu_allocated_gib + resident_kv_allocation_gib
+    if args.gpu_memory_limit_gib is not None:
+        if initial_gpu_reserved_gib > args.gpu_memory_limit_gib:
+            worker.close()
+            raise RuntimeError(
+                f"post-initialization reserved GPU memory {initial_gpu_reserved_gib:.3f} GiB "
+                f"already exceeds the {args.gpu_memory_limit_gib:.3f} GiB limit"
+            )
+        if resident_kv_lower_bound_gib > args.gpu_memory_limit_gib:
+            worker.close()
+            raise RuntimeError(
+                f"resident KV requires {resident_kv_allocation_gib:.3f} GiB in addition to "
+                f"{initial_gpu_allocated_gib:.3f} GiB of persistent allocations, exceeding "
+                f"the {args.gpu_memory_limit_gib:.3f} GiB limit before temporary workspace"
+            )
+        torch.cuda.set_per_process_memory_fraction(
+            args.gpu_memory_limit_gib / total_gpu_gib,
+            cuda_device,
+        )
     torch.cuda.reset_peak_memory_stats(cuda_device)
     try:
         start = time.perf_counter()
@@ -379,6 +401,11 @@ def main() -> None:
             "total_device_gib": total_gpu_gib,
             "peak_allocated_gib": peak_gpu_allocated_gib,
             "peak_reserved_gib": peak_gpu_reserved_gib,
+            "initial_allocated_gib": initial_gpu_allocated_gib,
+            "initial_reserved_gib": initial_gpu_reserved_gib,
+            "resident_kv_allocation_gib": resident_kv_allocation_gib,
+            "resident_kv_allocated_lower_bound_gib": resident_kv_lower_bound_gib,
+            "allocator_limit_enforced": args.gpu_memory_limit_gib is not None,
             "limit_satisfied": memory_limit_satisfied,
         },
         "sparse_kv": {

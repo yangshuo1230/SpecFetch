@@ -245,6 +245,27 @@ class Qwen3SparseOffloadEngine:
     def device(self) -> torch.device:
         return self.model.model.embed_tokens.weight.device
 
+    def resident_kv_allocation_bytes(self, batch_size: int) -> int:
+        """Return the exact persistent buffer payload allocated by resident KV."""
+        if batch_size <= 0:
+            raise ValueError("batch size must be positive")
+        if self.config.kv_storage != "resident":
+            return 0
+        capacity = self.config.resident_kv_capacity_tokens
+        assert capacity is not None
+        total = 0
+        for layer in self.model.model.layers:
+            attention = layer.self_attn
+            total += (
+                batch_size
+                * capacity
+                * (
+                    attention.k_proj.out_features * attention.k_proj.weight.element_size()
+                    + attention.v_proj.out_features * attention.v_proj.weight.element_size()
+                )
+            )
+        return total
+
     def _project(self, layer, hidden: torch.Tensor, position_embeddings):
         attention = layer.self_attn
         shape = (*hidden.shape[:-1], -1, attention.head_dim)

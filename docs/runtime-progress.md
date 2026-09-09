@@ -313,6 +313,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
    拼接与逐块 marginal 同步；完成请求的行会压紧到更小分配，不同长度的新准入保持独立
    group。但它尚未在真实 GPU 上验证 10 GiB 上限、速度或数值，因此不改变默认 sparse
    配置，也不构成性能结论。
+7. release runner 现在会在 prefill 前精确计算 resident KV 的持久 buffer payload；若它与
+   初始化后 persistent allocation 的下界已超过匹配显存上限则直接拒绝，并将该绝对上限
+   施加到 PyTorch CUDA caching allocator。输出同时记录初始化 allocated/reserved、resident
+   payload、下界与实测峰值，避免以先 OOM 或事后超限作为唯一反馈。
 
 ## Next actions
 
