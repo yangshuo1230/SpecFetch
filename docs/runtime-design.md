@@ -149,6 +149,9 @@ KV chunks, 64 expert slots, and 512 old-KV slots.
 Resident KV mode bypasses KV queue traffic and hybrid stopping. Each decode append is an
 in-place write into the preallocated cache and attention uses PyTorch SDPA with native
 GQA, avoiding old-chunk concatenation and per-chunk target-marginal synchronization.
+With the vLLM backend, FlashAttention's contiguous-KV decode kernel replaces the fallback:
+it appends the new K/V rows in place and performs GQA attention in one launch per group
+and layer. The result records `flash_kvcache` versus `sdpa` explicitly.
 The Draft rollout independently disables attention outputs and CPU attention aggregation
 for resident Target KV, while retaining hidden-state output when expert probes need it.
 Prediction admission likewise bypasses per-request KV retain/prefetch bookkeeping in this

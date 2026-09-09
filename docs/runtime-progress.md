@@ -411,6 +411,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 34. Attention `q_norm`/`k_norm` 也统一接入 fused RMSNorm，四维 `[B,T,H,D]` 保持 last-dim
     归一化语义；每层再消除两组 HF cast/pow/mean/rsqrt/multiply/cast 链，CUDA opt-in RMSNorm
     测试相应覆盖四维 Q layout。
+35. Resident KV 在 vLLM backend 下接入 FlashAttention `flash_attn_with_kvcache`：一次 kernel
+    原位 append 当前 K/V 并完成 native GQA decode attention，替代两个 `copy_` kernels + SDPA；
+    torch fallback 保持原路径，JSON 记录 resolved `flash_kvcache`/`sdpa`，CUDA opt-in 对照 SDPA。
 
 ## Next actions
 

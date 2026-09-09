@@ -468,6 +468,51 @@ def test_resident_decode_batches_attention_and_uses_shared_storage():
     worker.close()
 
 
+def test_resident_decode_fuses_kv_append_with_attention():
+    engine, worker = build_engine(
+        tiny_model(),
+        kv_storage="resident",
+        resident_kv_capacity_tokens=8,
+    )
+    state = engine.prefill(torch.tensor([[1, 2, 3], [3, 2, 1]]), ["a", "b"]).state
+    calls = []
+
+    def fake_flash_attention(
+        query,
+        key_cache,
+        value_cache,
+        *,
+        k,
+        v,
+        cache_seqlens,
+        softmax_scale,
+        causal,
+    ):
+        calls.append((query.shape, k.shape, cache_seqlens, causal))
+        end = cache_seqlens + k.shape[1]
+        key_cache[:, cache_seqlens:end].copy_(k)
+        value_cache[:, cache_seqlens:end].copy_(v)
+        output = torch.nn.functional.scaled_dot_product_attention(
+            query.transpose(1, 2),
+            key_cache[:, :end].transpose(1, 2),
+            value_cache[:, :end].transpose(1, 2),
+            enable_gqa=query.shape[2] != key_cache.shape[2],
+            scale=softmax_scale,
+        )
+        return output.transpose(1, 2)
+
+    engine._flash_attention = fake_flash_attention
+    engine.attention_backend = "flash_kvcache"
+    engine.decode(torch.tensor([4, 5]), state, StepPredictions())
+
+    assert len(calls) == 2
+    assert all(
+        call == (torch.Size([2, 1, 4, 4]), torch.Size([2, 1, 2, 4]), 3, True) for call in calls
+    )
+    assert state.resident_groups[0].length == 4
+    worker.close()
+
+
 def test_resident_groups_survive_admission_and_row_compaction():
     torch.manual_seed(122)
     model = tiny_model()

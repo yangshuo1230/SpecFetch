@@ -14,6 +14,7 @@ from src.runtime.expert import (
     ExpertWeights,
     OffloadedExpertExecutor,
     expert_prediction_requests,
+    optional_flash_kv_attention,
     optional_vllm_fused_add_rms_norm,
     optional_vllm_fused_moe,
     optional_vllm_fused_topk,
@@ -192,6 +193,41 @@ class ResidentKVGroup:
             enable_gqa=query.shape[1] != key.shape[1],
         )
 
+    def append_attention(
+        self,
+        layer: int,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        scaling: float,
+        flash_attention=None,
+    ) -> tuple[torch.Tensor, int]:
+        """Append decode KV and attend, using one fused kernel when available."""
+        if flash_attention is None:
+            tokens = self.append_layer(layer, key, value)
+            return self.attention(layer, query, tokens), tokens
+        key_cache, value_cache = self.layers[layer]
+        tokens = self.length + key.shape[1]
+        if tokens > key_cache.shape[1]:
+            raise RuntimeError(
+                f"resident KV capacity {key_cache.shape[1]} exceeded by token {tokens}"
+            )
+        expected = (len(self.request_ids), key.shape[1], *key_cache.shape[2:])
+        if key.shape != expected or value.shape != expected:
+            raise ValueError("decode KV does not match its resident group")
+        output = flash_attention(
+            query.transpose(1, 2),
+            key_cache,
+            value_cache,
+            k=key,
+            v=value,
+            cache_seqlens=self.length,
+            softmax_scale=scaling,
+            causal=True,
+        )
+        return output.transpose(1, 2), tokens
+
     def compact(
         self,
         removing: set[str],
@@ -290,6 +326,13 @@ class Qwen3SparseOffloadEngine:
         self._rotary_embedding = optional_vllm_rotary_embedding(
             moe_backend, runtime.worker.backend, model
         )
+        self._flash_attention = optional_flash_kv_attention(moe_backend, runtime.worker.backend)
+        if config.kv_storage == "resident":
+            self.attention_backend = (
+                "flash_kvcache" if self._flash_attention is not None else "sdpa"
+            )
+        else:
+            self.attention_backend = "sparse_hybrid"
         self.moe_backend = "vllm" if fused_moe is not None else "torch"
         self.experts = OffloadedExpertExecutor(
             runtime,
@@ -786,15 +829,13 @@ class Qwen3SparseOffloadEngine:
                 offset = 0
                 for group in state.resident_groups:
                     end = offset + len(group.request_ids)
-                    group_tokens = group.append_layer(
-                        layer_index,
-                        key[offset:end].transpose(1, 2),
-                        value[offset:end].transpose(1, 2),
-                    )
-                    group_output = group.attention(
+                    group_output, _ = group.append_attention(
                         layer_index,
                         query[offset:end],
-                        group_tokens,
+                        key[offset:end].transpose(1, 2),
+                        value[offset:end].transpose(1, 2),
+                        scaling=layer.self_attn.scaling,
+                        flash_attention=self._flash_attention,
                     )
                     attended_groups.append(group_output.transpose(1, 2))
                     for row, request_id in enumerate(group.request_ids):

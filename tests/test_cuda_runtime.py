@@ -9,6 +9,7 @@ from src.runtime.expert import (
     ExpertRegistry,
     ExpertWeights,
     OffloadedExpertExecutor,
+    optional_flash_kv_attention,
     optional_vllm_fused_add_rms_norm,
     optional_vllm_fused_moe,
     optional_vllm_fused_topk,
@@ -176,3 +177,40 @@ def test_vllm_rotary_embedding_matches_native_qwen_layout():
 
     assert torch.allclose(actual_query, expected_query, atol=2e-2, rtol=2e-2)
     assert torch.allclose(actual_key, expected_key, atol=2e-2, rtol=2e-2)
+
+
+def test_flash_attention_fuses_resident_kv_append_and_gqa_decode():
+    backend = CudaTransferBackend("cuda:0", expert_slots=1)
+    flash_attention = optional_flash_kv_attention("vllm", backend)
+    generator = torch.Generator(device="cuda:0").manual_seed(41)
+    query = torch.randn(4, 1, 8, 128, dtype=torch.bfloat16, device="cuda:0", generator=generator)
+    key = torch.randn(4, 1, 2, 128, dtype=torch.bfloat16, device="cuda:0", generator=generator)
+    value = torch.randn_like(key)
+    key_cache = torch.randn(
+        4, 16, 2, 128, dtype=torch.bfloat16, device="cuda:0", generator=generator
+    )
+    value_cache = torch.randn_like(key_cache)
+    reference_key = key_cache.clone()
+    reference_value = value_cache.clone()
+    reference_key[:, 7:8].copy_(key)
+    reference_value[:, 7:8].copy_(value)
+    expected = torch.nn.functional.scaled_dot_product_attention(
+        query.transpose(1, 2),
+        reference_key[:, :8].transpose(1, 2),
+        reference_value[:, :8].transpose(1, 2),
+        enable_gqa=True,
+    ).transpose(1, 2)
+
+    actual = flash_attention(
+        query,
+        key_cache,
+        value_cache,
+        k=key,
+        v=value,
+        cache_seqlens=7,
+        causal=True,
+    )
+
+    assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+    assert torch.equal(key_cache[:, 7:8], key)
+    assert torch.equal(value_cache[:, 7:8], value)

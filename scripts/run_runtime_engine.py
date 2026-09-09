@@ -476,6 +476,7 @@ def main() -> None:
             "draft_signals_enabled": use_draft_signals,
             "prediction_prefetch_enabled": use_prediction_prefetch,
             "resolved_expert_cache_slots": resolved_expert_cache_slots,
+            "resolved_attention_backend": engine.attention_backend,
             "resolved_moe_backend": engine.moe_backend,
         },
         "timing_protocol": "batch_decode_after_all_prefix_caches_v1",

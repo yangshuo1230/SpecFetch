@@ -582,3 +582,22 @@ def optional_vllm_rotary_embedding(mode: str, backend, model):
         dtype=model.model.embed_tokens.weight.dtype,
     )
     return rotary.to(model.model.embed_tokens.weight.device)
+
+
+def optional_flash_kv_attention(mode: str, backend):
+    """Resolve FlashAttention's fused contiguous-KV append/decode kernel."""
+    if mode not in {"auto", "torch", "vllm"}:
+        raise ValueError("MoE backend must be auto, torch, or vllm")
+    if mode == "torch":
+        return None
+    if not hasattr(backend, "packed_expert_weights"):
+        if mode == "vllm":
+            raise RuntimeError("vLLM fused MoE requires a packed expert backend")
+        return None
+    try:
+        from flash_attn import flash_attn_with_kvcache
+    except Exception:
+        if mode == "vllm":
+            raise
+        return None
+    return flash_attn_with_kvcache
