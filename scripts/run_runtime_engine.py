@@ -31,7 +31,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--physical-gpu-index", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--context-tokens", type=int, default=512)
-    parser.add_argument("--max-new-tokens", type=int, default=8)
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=65,
+        help="Total generated tokens, including the untimed first token (default: 65)",
+    )
     parser.add_argument("--lookahead", type=int, default=4)
     parser.add_argument(
         "--draft-refresh-tokens",
@@ -101,6 +106,8 @@ def parse_thresholds(value: str) -> tuple[float, ...]:
 
 def main() -> None:
     args = parse_args()
+    if args.max_new_tokens < 2:
+        raise ValueError("max-new-tokens must be at least 2 for decode-only timing")
     require_idle_gpus(1000, 10, {args.physical_gpu_index})
     refresh_tokens = args.draft_refresh_tokens or args.lookahead
     if not 0 < refresh_tokens <= args.lookahead:
@@ -194,7 +201,6 @@ def main() -> None:
         residency_after_prefill = (residency.evictions, residency.wasted_prefetches)
         start = time.perf_counter()
         provider.initialize(input_ids, request_ids)
-        plan = provider.predict(output.state)
         synchronize(args.device)
         draft_prefill_seconds = time.perf_counter() - start
         transfer_after_draft_prefill, draft_prefill_transfer = worker.phase_metrics_since(
@@ -215,9 +221,16 @@ def main() -> None:
         shadow_seconds = 0.0
         threshold_sweep: dict[str, dict[str, list[float]]] = {}
         pending_actual: list[torch.Tensor] = []
+        decode_start = time.perf_counter()
+        first_rollout_start = decode_start
+        plan = provider.predict(output.state)
+        synchronize(args.device)
+        first_rollout_seconds = time.perf_counter() - first_rollout_start
         remaining_horizons = plan.horizons[:refresh_tokens]
-        for _ in range(max(0, args.max_new_tokens - 1)):
-            step_start = time.perf_counter()
+        for step_index in range(args.max_new_tokens - 1):
+            # The first measured step starts before the initial rollout. Later
+            # steps start at their own refresh/Target boundary.
+            step_start = decode_start if step_index == 0 else time.perf_counter()
             draft_step_seconds = 0.0
             if not remaining_horizons:
                 draft_start = time.perf_counter()
@@ -281,6 +294,7 @@ def main() -> None:
                     )
                     for name, value in metrics.items():
                         aggregate[name].append(value)
+        decode_wall_seconds = time.perf_counter() - decode_start
     finally:
         worker.close()
 
@@ -288,9 +302,9 @@ def main() -> None:
     residency_end = (residency.evictions, residency.wasted_prefetches)
 
     tokens = torch.stack(generated, dim=1)
-    total_steps = sum(step_seconds)
-    total_request = prefill_seconds + draft_prefill_seconds + total_steps
-    decode_count = max(0, args.max_new_tokens - 1)
+    total_steps = decode_wall_seconds
+    total_request = prefill_seconds + draft_prefill_seconds + decode_wall_seconds
+    decode_count = args.max_new_tokens - 1
     result = {
         "configuration": {
             **vars(args),
@@ -300,14 +314,20 @@ def main() -> None:
             "policy": "demand_only" if args.disable_prefetch else "speculative",
             "resolved_moe_backend": engine.moe_backend,
         },
+        "timing_protocol": "batch_decode_after_all_prefix_caches_v1",
         "performance": {
             "prefill_seconds": prefill_seconds,
             "draft_prefill_seconds": draft_prefill_seconds,
+            "first_rollout_seconds": first_rollout_seconds,
             "target_decode_seconds": sum(target_decode_seconds),
-            "draft_decode_seconds": sum(draft_seconds),
-            "decode_step_seconds": total_steps,
+            "draft_refresh_seconds": sum(draft_seconds),
+            "draft_decode_seconds": first_rollout_seconds + sum(draft_seconds),
+            "decode_wall_seconds": decode_wall_seconds,
+            "decode_step_seconds": decode_wall_seconds,
+            "decode_tokens_per_request": decode_count,
+            "decode_tokens": args.batch_size * decode_count,
             "request_seconds": total_request,
-            "mean_tpot_ms": statistics.mean(step_seconds) * 1000 if step_seconds else 0,
+            "mean_tpot_ms": decode_wall_seconds / decode_count * 1000,
             "p50_tpot_ms": statistics.median(step_seconds) * 1000 if step_seconds else 0,
             "decode_throughput_tokens_per_second": args.batch_size * decode_count / total_steps
             if total_steps
