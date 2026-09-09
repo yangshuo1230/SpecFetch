@@ -329,6 +329,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     attention 每 horizon 一次、expert hidden features 每次完整 rollout 一次；expert probe
     同时把全部 horizon 合成一个 CPU batch。对 28 层、lookahead 4 的 release Draft，单次
     refresh 的 expert-feature D2H 同步次数由最多 112 降为 1，输出语义保持不变。
+11. Expert registry 的 preload 命中新增只读无锁快路径，且同一 layer/horizon 的跨请求重复
+    expert 只解析一次。以 batch 4、48 Target layers、4 horizons、Top-8 的窗口为例，避免了
+    最多 6,144 次没有状态变化的 registry lock 进入。
 
 ## Next actions
 

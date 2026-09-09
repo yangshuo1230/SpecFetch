@@ -118,6 +118,11 @@ class ExpertRegistry:
 
     def ensure(self, layer: int, expert: int) -> ResourceKey:
         key = expert_key(layer, expert)
+        # Registrations only grow, and release/eviction never removes the CPU
+        # record. Preloaded serving therefore takes this read-only fast path
+        # instead of acquiring one registry lock per predicted/actual route.
+        if key in self._registered:
+            return key
         with self._lock:
             if key not in self._registered:
                 weights = self.source.get(layer, expert)
@@ -175,10 +180,14 @@ def expert_prediction_requests(
         raise ValueError("probabilities must align with request IDs")
     queued = []
     requests = []
+    keys: dict[int, ResourceKey] = {}
     for row, request_id in zip(probabilities, request_ids):
         values, experts = row.topk(min(top_k, row.numel()))
         for probability, expert in zip(values.tolist(), experts.tolist()):
-            key = registry.ensure(layer, expert)
+            key = keys.get(expert)
+            if key is None:
+                key = registry.ensure(layer, expert)
+                keys[expert] = key
             requests.append(
                 PrefetchRequest(key, request_id, float(probability), deadline, miss_cost_ms)
             )

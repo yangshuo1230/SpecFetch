@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -214,6 +216,7 @@ def test_predictions_merge_shared_expert_consumers():
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 2})
     registry = ExpertRegistry(Source(experts), residency)
+    registry.ensure = Mock(wraps=registry.ensure)
     dormant_worker = TransferWorker(queue, residency, IdentityBackend())
     runtime = OffloadRuntime(queue, residency, dormant_worker)
     enqueue_expert_predictions(
@@ -229,3 +232,4 @@ def test_predictions_merge_shared_expert_consumers():
     request = queue.snapshot()[0]
     assert request.key == expert_key(0, 0)
     assert request.consumer_probabilities == {"a": 0.8999999761581421, "b": 0.800000011920929}
+    assert registry.ensure.call_count == 1

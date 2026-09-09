@@ -61,6 +61,8 @@ upsert 和唤醒；这只合并提交开销，不改变每个对象的 probabili
 Target router 的 GPU Top-K route IDs 每层只复制为一个很小的 CPU snapshot。unique expert
 发现和 request-consumer 构造使用该 snapshot，避免为每个实际 expert 分别执行 GPU
 `where` 和逐标量同步；原始 GPU selected/routing tensor 仍直接进入 fused MoE。
+Preloaded expert registry entries use a read-only lock-free lookup. Within one predicted
+layer/horizon, overlapping routes across requests also share one registry resolution.
 
 ## Sparse KV stopping
 
