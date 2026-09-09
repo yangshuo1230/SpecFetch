@@ -80,6 +80,8 @@ in-place write into the preallocated cache and attention uses PyTorch SDPA with 
 GQA, avoiding old-chunk concatenation and per-chunk target-marginal synchronization.
 The Draft rollout independently disables attention outputs and CPU attention aggregation
 for resident Target KV, while retaining hidden-state output when expert probes need it.
+Prediction admission likewise bypasses per-request KV retain/prefetch bookkeeping in this
+mode; expert prediction requests still use the unified queue and normal consumer leases.
 The sparse mode remains the default until matched GPU measurements establish which mode
 wins at each release context.
 

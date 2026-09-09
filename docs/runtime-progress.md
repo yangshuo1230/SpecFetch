@@ -319,7 +319,8 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
    payload、下界与实测峰值，避免以先 OOM 或事后超限作为唯一反馈。
 8. resident KV 不再要求 Draft 输出各层 attention，也不再把 attention 搬到 CPU 后执行无用
    的 chunk 聚合；专家 probe 所需 hidden states 独立保留。这消除了随 Draft 层数、head 数和
-   context 长度增长的纯预测开销，但真实 GPU TPOT 收益仍需空闲设备验证。
+   context 长度增长的纯预测开销。预测 admission 也跳过逐层逐请求的 KV retain/prefetch
+   调用，同时继续提交 expert 请求；真实 GPU TPOT 收益仍需空闲设备验证。
 
 ## Next actions
 

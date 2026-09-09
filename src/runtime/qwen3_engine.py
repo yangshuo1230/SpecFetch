@@ -426,16 +426,17 @@ class Qwen3SparseOffloadEngine:
                     registry=self.expert_registry,
                 )
                 prefetch_requests.extend(expert_requests)
-            for request_id, consumer in zip(state.request_ids, consumers):
-                cache = state.kv[(request_id, layer_index)]
-                scores = prediction.kv.get((request_id, layer_index), {})
-                kv_requests, _ = cache.prefetch_requests(
-                    scores,
-                    deadline,
-                    miss_cost_ms=0.05,
-                    consumer=consumer,
-                )
-                prefetch_requests.extend(kv_requests)
+            if self.config.kv_storage != "resident":
+                for request_id, consumer in zip(state.request_ids, consumers):
+                    cache = state.kv[(request_id, layer_index)]
+                    scores = prediction.kv.get((request_id, layer_index), {})
+                    kv_requests, _ = cache.prefetch_requests(
+                        scores,
+                        deadline,
+                        miss_cost_ms=0.05,
+                        consumer=consumer,
+                    )
+                    prefetch_requests.extend(kv_requests)
         candidate_count = len(prefetch_requests)
         prefetch_requests = self._apply_prefetch_budget(prefetch_requests)
         state.speculative_consumers.extend(
@@ -460,6 +461,8 @@ class Qwen3SparseOffloadEngine:
         )
 
     def _retain_predictions(self, state: BatchState, predictions: list[StepPredictions]) -> None:
+        if self.config.kv_storage == "resident":
+            return
         layers = len(self.model.model.layers)
         for layer_index in range(layers):
             for request_id in state.request_ids:

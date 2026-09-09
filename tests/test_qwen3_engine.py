@@ -119,6 +119,29 @@ def test_prediction_window_submits_expert_and_kv_requests_as_one_queue_batch():
     worker.close()
 
 
+def test_resident_prediction_window_skips_kv_bookkeeping_but_submits_experts():
+    engine, worker = build_engine(
+        tiny_model(),
+        kv_storage="resident",
+        resident_kv_capacity_tokens=16,
+    )
+    state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
+    for cache in state.kv.values():
+        cache.prefetch_requests = Mock(side_effect=AssertionError("resident KV cannot prefetch"))
+        cache.retain_predicted = Mock(side_effect=AssertionError("resident KV cannot evict"))
+    prediction = StepPredictions(
+        kv={("a", layer): {0: 1.0} for layer in range(2)},
+        experts={layer: torch.tensor([[0.7, 0.2, 0.1, 0.0]]) for layer in range(2)},
+    )
+
+    engine.enqueue_predictions(state, [prediction])
+
+    assert state.speculative_consumers
+    assert all(key.kind == ResourceKind.EXPERT for key, _ in state.speculative_consumers)
+    engine.remove_requests(state, ["a"])
+    worker.close()
+
+
 def test_prediction_budget_caps_unique_resources_and_preserves_shared_consumers():
     engine, worker = build_engine(
         tiny_model(), speculative_expert_budget=1, speculative_kv_budget=1
