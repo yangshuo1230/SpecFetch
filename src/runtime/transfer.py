@@ -275,11 +275,21 @@ class CudaTransferBackend:
 
     def record_use(self, key: ResourceKey) -> None:
         """Prevent H2D slot reuse until compute-stream readers have finished."""
-        if key.kind != ResourceKind.EXPERT or self.expert_slots is None:
+        self.record_uses([key])
+
+    def record_uses(self, keys: list[ResourceKey]) -> None:
+        """Protect one compute batch with a shared completion event."""
+        experts = [
+            key
+            for key in dict.fromkeys(keys)
+            if key.kind == ResourceKind.EXPERT and self.expert_slots is not None
+        ]
+        if not experts:
             return
         event = torch.cuda.Event()
         event.record(torch.cuda.current_stream(self.device))
-        self._use_events[key] = event
+        for key in experts:
+            self._use_events[key] = event
 
     def expert_slot(self, key: ResourceKey) -> int:
         if self.expert_slots is None:
@@ -646,10 +656,20 @@ class OffloadRuntime:
             self.residency.unqueue(key)
 
     def release(self, key: ResourceKey) -> None:
-        record_use = getattr(self.worker.backend, "record_use", None)
-        if callable(record_use):
-            record_use(key)
-        self.residency.release(key)
+        self.release_many([key])
+
+    def release_many(self, keys: list[ResourceKey]) -> None:
+        if not keys:
+            return
+        record_uses = getattr(self.worker.backend, "record_uses", None)
+        if callable(record_uses):
+            record_uses(keys)
+        else:
+            record_use = getattr(self.worker.backend, "record_use", None)
+            if callable(record_use):
+                for key in keys:
+                    record_use(key)
+        self.residency.release_many(keys)
 
     def drop(self, key: ResourceKey, timeout: float | None = None) -> None:
         """Cancel and free a request-private resource at request completion."""

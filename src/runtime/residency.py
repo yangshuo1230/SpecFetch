@@ -399,10 +399,15 @@ class ResidencyManager:
             self._refresh_priority(record)
 
     def release(self, key: ResourceKey) -> None:
+        self.release_many([key])
+
+    def release_many(self, keys: list[ResourceKey]) -> None:
+        """End one compute batch's demand scopes under one residency lock."""
         with self._condition:
-            record = self._records[key]
-            record.demand_active = False
-            self._refresh_priority(record)
+            for key in dict.fromkeys(keys):
+                record = self._records[key]
+                record.demand_active = False
+                self._refresh_priority(record)
 
     def evict(self, key: ResourceKey) -> bool:
         with self._condition:

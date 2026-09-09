@@ -345,6 +345,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 15. `demand_many` 的 residency hit/state/promotion/get 和完成等待改成两个批量临界区（等待前、
     等待后），替代每个 expert/KV 各自执行 state/record/mark/get/wait。每层最多约 32 个实际
     expert 的 queue upsert 与传输批次语义保持不变，但 Python 锁往返不再随资源数线性增加。
+16. 同一次 MoE 调用使用的全部 experts 现在通过一个共享 compute-stream CUDA event 保护 slot
+    复用，并用一次 `release_many` 清除 demand scope；此前每个 expert 都分别创建/record event
+    并获取 residency 锁。分容量执行时仍按实际 fused kernel batch 各记录一个 event。
 
 ## Next actions
 

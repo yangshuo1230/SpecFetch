@@ -236,6 +236,34 @@ def test_consumer_lease_cancellation_and_demand_scope_recompute_priority():
     assert residency.record(key).priority == 3
 
 
+def test_release_many_records_one_backend_use_batch_and_clears_demands():
+    class UseTrackingBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.use_batches = []
+
+        def record_uses(self, keys):
+            self.use_batches.append(list(keys))
+
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    keys = [resource(0), resource(1)]
+    for key in keys:
+        residency.register_cpu(key, f"cpu:{key.object_id}", 1)
+        assert residency.begin_transfer(key, demand=True)
+        residency.complete_transfer(key, f"gpu:{key.object_id}")
+    backend = UseTrackingBackend()
+    runtime = OffloadRuntime(
+        MemoryRequestQueue(),
+        residency,
+        TransferWorker(MemoryRequestQueue(), residency, backend),
+    )
+
+    runtime.release_many(keys)
+
+    assert backend.use_batches == [keys]
+    assert all(not residency.record(key).demand_active for key in keys)
+
+
 def test_prefetch_many_updates_resident_shared_leases_in_one_batch():
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
