@@ -90,6 +90,63 @@ def test_batch_upsert_merges_consumers_before_worker_observes_queue():
     assert first.deadline == 2
 
 
+def test_batch_upsert_matches_sequential_duplicate_consumer_merges():
+    updates = [
+        QueueUpdate(key(1), "r0", 0.2, 8, 1024, 1.5),
+        QueueUpdate(key(1), "r1", 0.7, 2, 1024, 3.0),
+        QueueUpdate(key(1), "r0", 0.9, 6, 1024, 2.0, demand=True),
+        QueueUpdate(key(2), "r2", 0.4, 4, 1024, 0.5),
+    ]
+    batched = MemoryRequestQueue()
+    sequential = MemoryRequestQueue()
+
+    returned = batched.upsert_many(updates)
+    for update in updates:
+        sequential.upsert(
+            update.key,
+            consumer=update.consumer,
+            probability=update.probability,
+            deadline=update.deadline,
+            size_bytes=update.size_bytes,
+            miss_cost_ms=update.miss_cost_ms,
+            demand=update.demand,
+        )
+
+    assert returned[0] is returned[1] is returned[2]
+    actual = {request.key: request for request in batched.snapshot()}
+    expected = {request.key: request for request in sequential.snapshot()}
+    assert actual.keys() == expected.keys()
+    for resource_key, left in actual.items():
+        right = expected[resource_key]
+        assert left.consumer_probabilities == right.consumer_probabilities
+        assert left.consumer_deadlines == right.consumer_deadlines
+        assert left.deadline == right.deadline
+        assert left.miss_cost_ms == right.miss_cost_ms
+        assert left.demand == right.demand
+
+
+def test_batch_upsert_pushes_each_shared_resource_once(monkeypatch):
+    queue = MemoryRequestQueue()
+    pushes = []
+    original_push = queue._push
+
+    def counting_push(request):
+        pushes.append(request.key)
+        original_push(request)
+
+    monkeypatch.setattr(queue, "_push", counting_push)
+    queue.upsert_many(
+        [QueueUpdate(key(1), f"r{index}", 0.5, 20 - index, 1024, 1.0) for index in range(10)]
+        + [QueueUpdate(key(2), "r0", 0.5, 3, 1024, 1.0)]
+    )
+
+    assert pushes == [key(1), key(2)]
+    assert {request.key: request.deadline for request in queue.snapshot()} == {
+        key(1): 11,
+        key(2): 3,
+    }
+
+
 def test_pop_many_batches_demands_without_delaying_them_for_speculation():
     queue = MemoryRequestQueue()
     add(queue, 1, 0.9, 1)

@@ -7,7 +7,13 @@ import statistics
 import timeit
 from collections.abc import Callable
 
-from src.runtime.memory_queue import ResourceKey, ResourceKind
+from src.runtime.memory_queue import (
+    MemoryRequest,
+    MemoryRequestQueue,
+    QueueUpdate,
+    ResourceKey,
+    ResourceKind,
+)
 from src.runtime.residency import ResidencyManager
 
 
@@ -61,12 +67,76 @@ def benchmark_residency_eviction(iterations: int, repeat: int) -> None:
     print(f"residency eviction speedup: {legacy / current:.2f}x")
 
 
+def _legacy_upsert_many(queue: MemoryRequestQueue, updates: list[QueueUpdate]) -> None:
+    """Reproduce the former per-consumer deadline reduction for comparison."""
+    for update in updates:
+        queue._validate(update)
+    with queue._condition:
+        if queue._closed:
+            raise RuntimeError("queue is closed")
+        sizes: dict[ResourceKey, int] = {}
+        for update in updates:
+            expected_size = sizes.setdefault(update.key, update.size_bytes)
+            existing = queue._requests.get(update.key)
+            if expected_size != update.size_bytes or (
+                existing is not None and existing.size_bytes != update.size_bytes
+            ):
+                raise ValueError(f"size changed for existing resource {update.key}")
+        requests: list[MemoryRequest] = []
+        for update in updates:
+            request = queue._requests.get(update.key)
+            if request is None:
+                request = MemoryRequest(
+                    update.key,
+                    update.size_bytes,
+                    update.miss_cost_ms,
+                    update.deadline,
+                )
+                queue._requests[update.key] = request
+            request.consumer_probabilities[update.consumer] = update.probability
+            request.consumer_deadlines[update.consumer] = update.deadline
+            request.deadline = min(request.consumer_deadlines.values())
+            request.miss_cost_ms = max(request.miss_cost_ms, update.miss_cost_ms)
+            request.demand = request.demand or update.demand
+            requests.append(request)
+        for request in {item.key: item for item in requests}.values():
+            queue._push(request)
+        queue._condition.notify()
+
+
+def benchmark_shared_queue_upsert(consumers: int, iterations: int, repeat: int) -> None:
+    """Compare deadline reduction for many consumers sharing one resource."""
+    resource = ResourceKey(ResourceKind.EXPERT, layer=0, object_id=0)
+    updates = [
+        QueueUpdate(
+            resource,
+            consumer=f"request-{index}",
+            probability=0.5,
+            deadline=consumers - index,
+            size_bytes=1024,
+            miss_cost_ms=1.0,
+        )
+        for index in range(consumers)
+    ]
+    legacy_queue = MemoryRequestQueue()
+    current_queue = MemoryRequestQueue()
+
+    legacy = _measure(lambda: _legacy_upsert_many(legacy_queue, updates), iterations, repeat)
+    current = _measure(lambda: current_queue.upsert_many(updates), iterations, repeat)
+    print(f"shared queue upsert, {consumers} consumers: legacy_per_consumer_min_us={legacy:.3f}")
+    print(f"shared queue upsert, {consumers} consumers: current_per_resource_min_us={current:.3f}")
+    print(f"shared queue upsert speedup: {legacy / current:.2f}x")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=2_000)
+    parser.add_argument("--queue-iterations", type=int, default=20)
+    parser.add_argument("--queue-consumers", type=int, default=2_000)
     parser.add_argument("--repeat", type=int, default=7)
     args = parser.parse_args()
     benchmark_residency_eviction(args.iterations, args.repeat)
+    benchmark_shared_queue_upsert(args.queue_consumers, args.queue_iterations, args.repeat)
 
 
 if __name__ == "__main__":

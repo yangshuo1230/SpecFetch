@@ -133,6 +133,7 @@ class MemoryRequestQueue:
             raise ValueError("size_bytes must be positive and miss_cost_ms non-negative")
 
     def _merge_locked(self, update: QueueUpdate) -> MemoryRequest:
+        """Merge fields that can be updated incrementally under the queue lock."""
         request = self._requests.get(update.key)
         if request is None:
             request = MemoryRequest(
@@ -146,7 +147,6 @@ class MemoryRequestQueue:
             raise ValueError(f"size changed for existing resource {update.key}")
         request.consumer_probabilities[update.consumer] = update.probability
         request.consumer_deadlines[update.consumer] = update.deadline
-        request.deadline = min(request.consumer_deadlines.values())
         request.miss_cost_ms = max(request.miss_cost_ms, update.miss_cost_ms)
         request.demand = request.demand or update.demand
         return request
@@ -168,9 +168,14 @@ class MemoryRequestQueue:
                     existing is not None and existing.size_bytes != update.size_bytes
                 ):
                     raise ValueError(f"size changed for existing resource {update.key}")
-            requests = [self._merge_locked(update) for update in updates]
-            unique = {item.key: item for item in requests}
+            requests = []
+            unique: dict[ResourceKey, MemoryRequest] = {}
+            for update in updates:
+                request = self._merge_locked(update)
+                requests.append(request)
+                unique[request.key] = request
             for request in unique.values():
+                request.deadline = min(request.consumer_deadlines.values())
                 self._push(request)
             self._condition.notify()
             return requests

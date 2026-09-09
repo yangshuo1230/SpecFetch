@@ -269,9 +269,8 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 
 ## Next actions
 
-1. GPU 继续繁忙时完成余下两项 CPU 可验证优化：同资源批量 upsert 避免逐 consumer
-   重算 deadline、TransferWorker 每批只读取一次 logical step；分别用等价性/锁访问测试
-   和微基准记录收益后提交。
+1. GPU 继续繁忙时完成最后一项 CPU 可验证优化：TransferWorker 每批只读取一次
+   logical step，用锁访问测试和微基准记录收益后提交。
 2. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 快速复测
    grouped GQA、跨请求 KV demand 和 layer lookahead 2 的 20-token 数值与时延。
 3. c512 通过后重跑 batch-4/context-4K/output-17 demand 与 speculative H1，核对
@@ -303,6 +302,15 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 LRU tie-break、pinned/protected 排除、低优先级拒绝，以及每次满缓存准入只选择一次。
 可用 `PYTHONPATH=. python benchmarks/runtime_cpu_microbench.py --iterations 2000 --repeat 7`
 复测。
+
+同一资源的批量 upsert 现在先写入全部 consumer 映射，再按批内唯一资源各重算一次
+deadline 并压入一个堆项；重复 consumer 仍以最后一次 probability/deadline 为准，
+`miss_cost_ms` 仍取最大值，`demand` 仍作 OR 合并。CPython 3.12、重复更新同一资源的
+2,000 个 consumers、每轮 20 次、7 轮中位数：旧的逐 consumer `min` 路径 53.966 ms/次，
+新的逐资源 `min` 路径 2.431 ms/次，即 22.19x。这同样只是 CPU bookkeeping 微基准，
+不代表端到端或 GPU 加速；可用同一脚本的 `--queue-consumers` 和 `--queue-iterations`
+参数调整规模。等价性测试覆盖重复 consumer、deadline、miss cost、demand 和每唯一
+资源只生成一个堆项。
 
 ## Safety and versioning
 
