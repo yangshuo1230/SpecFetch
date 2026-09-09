@@ -6,6 +6,7 @@ from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import apply_rotary_pos_emb
 
 from src.runtime.config import RuntimeConfig
+from src.runtime.expert import expert_prediction_requests
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKind
 from src.runtime.qwen3_engine import Qwen3SparseOffloadEngine, StepPredictions
 from src.runtime.residency import ResidencyManager
@@ -342,15 +343,21 @@ def test_rolling_prediction_window_submits_only_new_tail_horizon():
     )
     first_candidates = worker.metrics.prefetch_candidates
     assert {consumer for _, consumer in state.speculative_consumers} == {"a@2"}
-    engine.decode(
-        torch.tensor([4]),
-        state,
-        [prediction, prediction],
-        reuse_prediction_window=True,
-    )
+    with patch(
+        "src.runtime.qwen3_engine.expert_prediction_requests",
+        wraps=expert_prediction_requests,
+    ) as prediction_requests:
+        engine.decode(
+            torch.tensor([4]),
+            state,
+            [prediction, prediction],
+            reuse_prediction_window=True,
+        )
 
     assert first_candidates == 12
     assert worker.metrics.prefetch_candidates - first_candidates == 6
+    assert prediction_requests.call_count == 2
+    assert sum(call.args[0].shape[0] for call in prediction_requests.call_args_list) == 2
     assert {consumer for _, consumer in state.speculative_consumers} == {"a@3"}
     engine.remove_requests(state, ["a"])
     worker.close()

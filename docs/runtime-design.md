@@ -134,6 +134,9 @@ Serving runners identify their causally shifted prediction windows. With unbudge
 full-layer admission, the prior H2/H3/... leases are exactly the next H1/H2/... leases,
 so admission retains matching `(resource, absolute consumer)` pairs and submits only the
 new tail horizon. Budgeted, layer-windowed, and generic decode calls conservatively reset.
+Existing layer/consumer buckets are filtered before expert Top-K and KV request creation,
+so a shifted survivor row does not even rebuild intents that would later be deduplicated;
+mixed continuous batches construct only newly admitted request rows plus the tail horizon.
 
 Target router 的 GPU Top-K route IDs 每层只复制为一个很小的 CPU snapshot。unique expert
 发现和 request-consumer 构造使用该 snapshot，避免为每个实际 expert 分别执行 GPU

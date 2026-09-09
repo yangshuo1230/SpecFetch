@@ -89,6 +89,9 @@ class SpeculativeConsumers:
     def contains(self, key: ResourceKey, consumer: str) -> bool:
         return key in self._buckets.get((key.layer, consumer), ())
 
+    def contains_bucket(self, layer: int, consumer: str) -> bool:
+        return (layer, consumer) in self._buckets
+
     def extend(self, consumers: Iterable[tuple[ResourceKey, str]]) -> None:
         for key, consumer in consumers:
             self.add(key, consumer)
@@ -627,11 +630,21 @@ class Qwen3SparseOffloadEngine:
             deadline = (state.step + horizon - 1) * layers + layer_index
             expert_probabilities = prediction.experts.get(layer_index)
             consumers = [f"{request_id}@{state.step + horizon}" for request_id in state.request_ids]
-            if expert_probabilities is not None:
+            new_indices = [
+                index
+                for index, consumer in enumerate(consumers)
+                if not state.speculative_consumers.contains_bucket(layer_index, consumer)
+            ]
+            if expert_probabilities is not None and new_indices:
+                selected_probabilities = (
+                    expert_probabilities
+                    if len(new_indices) == len(consumers)
+                    else expert_probabilities[new_indices]
+                )
                 expert_requests, _ = expert_prediction_requests(
-                    expert_probabilities,
+                    selected_probabilities,
                     layer=layer_index,
-                    request_ids=consumers,
+                    request_ids=[consumers[index] for index in new_indices],
                     top_k=self.model.config.num_experts_per_tok,
                     deadline=deadline,
                     miss_cost_ms=0.5,
@@ -639,7 +652,9 @@ class Qwen3SparseOffloadEngine:
                 )
                 prefetch_requests.extend(expert_requests)
             if self.config.kv_storage != "resident":
-                for request_id, consumer in zip(state.request_ids, consumers):
+                for index in new_indices:
+                    request_id = state.request_ids[index]
+                    consumer = consumers[index]
                     cache = state.kv[(request_id, layer_index)]
                     scores = prediction.kv.get((request_id, layer_index), {})
                     kv_requests, _ = cache.prefetch_requests(

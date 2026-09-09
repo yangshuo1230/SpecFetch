@@ -441,6 +441,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     admission 时保留上一 token H2/H3/... 与新 H1/H2/... 完全相同的 resource+absolute-consumer
     leases，只 enqueue 新 tail horizon。Tiny 2-horizon trace 首步 12 candidates，次步由重复 12
     降为仅新增 6；budget/layer-window/generic 调用仍保守 reset。
+43. Shifted lease reuse 现在在 request 构造前按 layer/consumer bucket 过滤：已有 H1 rows 不再
+    重做 expert Top-K、registry ensure、KV lookup 或 PrefetchRequest 构造；continuous 新准入时
+    只处理新增 rows。Tiny 两层第二步 registry ensure 由两 horizons 的 8 次降为 tail 的 4 次。
 
 ## Next actions
 
