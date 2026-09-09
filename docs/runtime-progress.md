@@ -448,6 +448,8 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     `W'=W/x_scale`、`b'=y_mean-(x_mean/x_scale)@W`。每次 rollout 不再生成 standardized
     feature tensor，仅保留 batched GEMM、bias 与 sigmoid，并与逐层原公式做 1e-6 对照。
     相同 48 layers、16 samples、1024→128 微基准由 45.43 降至 27.69 ms，约减少 39.0%。
+45. Draft attention/features 的 signal snapshot 改为先按模型 dtype D2H，再在 CPU promote FP32；
+    release BF16 下 PCIe payload 减半，aggregation/probe 数值仍与原 BF16→FP32 完全一致。
 
 ## Next actions
 

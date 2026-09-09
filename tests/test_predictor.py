@@ -10,6 +10,7 @@ from src.runtime.predictor import (
     ExpertProbeBank,
     ProbeEntry,
     aggregate_old_chunk_mass,
+    to_cpu_float,
 )
 from src.runtime.qwen3_engine import BatchState
 
@@ -18,6 +19,15 @@ class StubTargetCache:
     def __init__(self, kv_storage: str, old_ranges=None):
         self.config = SimpleNamespace(kv_storage=kv_storage)
         self.old_ranges = old_ranges or {}
+
+
+def test_signal_transfer_promotes_only_after_compact_cpu_copy():
+    source = torch.tensor([1.5, -2.25], dtype=torch.bfloat16)
+    result = to_cpu_float(source)
+
+    assert result.device.type == "cpu"
+    assert result.dtype == torch.float32
+    assert torch.equal(result, source.float())
 
 
 def test_attention_aggregation_uses_target_chunk_ranges():

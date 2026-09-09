@@ -10,6 +10,11 @@ from src.runtime.qwen3_engine import BatchState, StepPredictions
 from src.trace import map_layer
 
 
+def to_cpu_float(tensor: torch.Tensor) -> torch.Tensor:
+    """Transfer compact source dtype first, then promote for CPU signal math."""
+    return tensor.detach().cpu().float()
+
+
 def aggregate_old_chunk_mass(
     attention: torch.Tensor, ranges: dict[int, tuple[int, int]]
 ) -> dict[int, float]:
@@ -39,7 +44,7 @@ class ExpertProbeBank:
 
     def predict(self, target_layer: int, hidden_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
         entry = self.entries[target_layer]
-        features = hidden_states[entry.draft_layer + 1][:, -1].float().cpu()
+        features = to_cpu_float(hidden_states[entry.draft_layer + 1][:, -1])
         return self.predict_features(target_layer, features)
 
     def predict_features(self, target_layer: int, features: torch.Tensor) -> torch.Tensor:
@@ -250,14 +255,10 @@ class DraftSignalProvider:
                 # All last-token attention rows in one horizon have the same
                 # shape. Transfer every mapped draft layer in one D2H operation
                 # instead of synchronizing once per layer.
-                cpu_attentions = (
-                    torch.stack(
-                        [output.attentions[layer][:, :, -1] for layer in unique_draft_layers]
-                    )
-                    .detach()
-                    .float()
-                    .cpu()
+                cpu_attentions = torch.stack(
+                    [output.attentions[layer][:, :, -1] for layer in unique_draft_layers]
                 )
+                cpu_attentions = to_cpu_float(cpu_attentions)
                 for target_layer, draft_layer in enumerate(target_draft_layers):
                     attention = cpu_attentions[draft_offsets[draft_layer]]
                     for request_index, request_id in enumerate(self.request_ids):
@@ -274,7 +275,7 @@ class DraftSignalProvider:
             feature_offsets = {layer: index for index, layer in enumerate(unique_feature_layers)}
             # Hidden rows are uniform across both horizons and layers. A single
             # snapshot amortizes D2H synchronization for the complete rollout.
-            cpu_features = (
+            cpu_features = to_cpu_float(
                 torch.stack(
                     [
                         torch.stack(
@@ -286,9 +287,6 @@ class DraftSignalProvider:
                         for output in outputs
                     ]
                 )
-                .detach()
-                .float()
-                .cpu()
             )
             target_features = torch.stack(
                 [

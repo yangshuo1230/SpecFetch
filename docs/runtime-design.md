@@ -185,6 +185,9 @@ Prediction admission likewise bypasses per-request KV retain/prefetch bookkeepin
 mode; expert prediction requests still use the unified queue and normal consumer leases.
 Across all modes, mapped attention rows are transferred once per horizon and expert
 features once per complete rollout, rather than one D2H synchronization per draft layer.
+Draft signals cross D2H in their compact model dtype (BF16 for release runs) and promote
+to FP32 only on CPU for aggregation/probes, halving signal-transfer bytes versus GPU-side
+promotion before the copy.
 All target-layer expert probes evaluate every horizon with one cached-parameter batched
 CPU GEMM. Predicted routes use one matrix Top-K per target layer rather than one call per
 request row.
