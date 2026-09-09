@@ -35,9 +35,7 @@ class ProbeEntry:
 class ExpertProbeBank:
     def __init__(self, entries: dict[int, ProbeEntry]) -> None:
         self.entries = entries
-        self._parameter_batches: dict[
-            tuple[int, ...], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-        ] = {}
+        self._parameter_batches: dict[tuple[int, ...], tuple[torch.Tensor, torch.Tensor]] = {}
 
     def predict(self, target_layer: int, hidden_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
         entry = self.entries[target_layer]
@@ -65,16 +63,19 @@ class ExpertProbeBank:
         parameters = self._parameter_batches.get(key)
         if parameters is None:
             probes = [self.entries[layer].probe for layer in key]
-            parameters = (
-                torch.stack([probe["x_mean"].squeeze(0) for probe in probes])[:, None],
-                torch.stack([probe["x_scale"].squeeze(0) for probe in probes])[:, None],
-                torch.stack([probe["y_mean"].squeeze(0) for probe in probes])[:, None],
-                torch.stack([probe["coef"] for probe in probes]),
-            )
+            coefficients = []
+            biases = []
+            for probe in probes:
+                scale = probe["x_scale"].squeeze(0)
+                mean = probe["x_mean"].squeeze(0)
+                coefficient = probe["coef"] / scale[:, None]
+                bias = probe["y_mean"] - (mean / scale) @ probe["coef"]
+                coefficients.append(coefficient)
+                biases.append(bias)
+            parameters = (torch.stack(coefficients), torch.stack(biases))
             self._parameter_batches[key] = parameters
-        x_mean, x_scale, y_mean, coefficients = parameters
-        normalized = (features.float() - x_mean) / x_scale
-        return torch.sigmoid(torch.bmm(normalized, coefficients) + y_mean)
+        coefficients, biases = parameters
+        return torch.sigmoid(torch.bmm(features.float(), coefficients) + biases)
 
     def save(self, path: str | Path) -> None:
         payload = {

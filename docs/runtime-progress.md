@@ -444,6 +444,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 43. Shifted lease reuse 现在在 request 构造前按 layer/consumer bucket 过滤：已有 H1 rows 不再
     重做 expert Top-K、registry ensure、KV lookup 或 PrefetchRequest 构造；continuous 新准入时
     只处理新增 rows。Tiny 两层第二步 registry ensure 由两 horizons 的 8 次降为 tail 的 4 次。
+44. Expert probe 的 `(x-x_mean)/x_scale @ W + y_mean` 在参数缓存时折叠为 `x@W'+b'`，其中
+    `W'=W/x_scale`、`b'=y_mean-(x_mean/x_scale)@W`。每次 rollout 不再生成 standardized
+    feature tensor，仅保留 batched GEMM、bias 与 sigmoid，并与逐层原公式做 1e-6 对照。
+    相同 48 layers、16 samples、1024→128 微基准由 45.43 降至 27.69 ms，约减少 39.0%。
 
 ## Next actions
 

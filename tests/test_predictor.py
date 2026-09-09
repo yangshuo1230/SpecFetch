@@ -71,7 +71,7 @@ def test_probe_bank_batched_layers_match_independent_predictions():
         [bank.predict_features(0, features[0]), bank.predict_features(1, features[1])]
     )
 
-    assert torch.allclose(actual, expected)
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
     assert len(bank._parameter_batches) == 1
 
 

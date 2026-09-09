@@ -188,6 +188,9 @@ features once per complete rollout, rather than one D2H synchronization per draf
 All target-layer expert probes evaluate every horizon with one cached-parameter batched
 CPU GEMM. Predicted routes use one matrix Top-K per target layer rather than one call per
 request row.
+Probe standardization is folded into cached linear parameters:
+`W'=W/x_scale` and `b'=y_mean-(x_mean/x_scale)W`. Refresh therefore performs only the
+batched GEMM plus bias and sigmoid, without materializing normalized feature tensors.
 When resident KV is paired with demand-only expert loading (or no expert probes), decode
 has no consumer for any Draft signal. The release runner therefore does not load or run
 the Draft model for that policy and records the resolved signal/prefetch state explicitly.
