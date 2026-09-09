@@ -223,6 +223,21 @@ def test_persistent_expert_slot_map_tracks_late_updates_and_removal():
     assert slot_map.get(4, 8).tolist()[3] == 1
 
 
+def test_deferred_expert_map_removals_merge_with_next_slot_batch():
+    slot_map = ExpertSlotMap("cpu")
+    first = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=1)
+    second = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=4)
+    replacement = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=6)
+    slot_map.update([(first, 3), (second, 5)])
+    mapping = slot_map.get(2, 8)
+
+    slot_map.remove(first, defer_device=True)
+    slot_map.remove(second, defer_device=True)
+    slot_map.update([(replacement, 7)])
+
+    assert mapping.tolist() == [-1, -1, -1, -1, -1, -1, 7, -1]
+
+
 def test_residency_eviction_returns_packed_expert_slot():
     from src.runtime.expert import ExpertWeights
 

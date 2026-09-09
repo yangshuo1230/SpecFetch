@@ -371,6 +371,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 23. Draft initialize、multi-token actual advance 和 rollout 均显式使用 Transformers 原生
     `logits_to_keep=1`。其中 4K/batch4 initialize 旧路径同样会产生约 4.64 GiB 全 vocab
     prefix logits；新路径只保留下一 token 所需末行，并有所有 Draft forward 参数回归断言。
+24. Packed expert eviction 的 device map `=-1` 不再逐 expert 发射标量 kernel；host ownership
+    立即删除，device removals 与下一 transfer batch assignments 合成每 layer 一次 indexed
+    update。同一 MoE batch 共享的 completion event 在 transfer stream 也只 wait 一次。
 
 ## Next actions
 

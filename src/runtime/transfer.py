@@ -164,6 +164,7 @@ class ExpertSlotMap:
         self._assignments: dict[int, dict[int, int]] = {}
         self._maps: dict[int, torch.Tensor] = {}
         self._sizes: dict[int, int] = {}
+        self._pending_removals: dict[int, set[int]] = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -183,27 +184,35 @@ class ExpertSlotMap:
                 mapping = self._maps.get(layer)
                 if mapping is not None and any(expert >= len(mapping) for expert, _ in updates):
                     raise ValueError("logical expert ID exceeds persistent map size")
+            changed_layers = set(grouped) | set(self._pending_removals)
             for layer, updates in grouped.items():
                 logical = self._assignments.setdefault(layer, {})
                 logical.update(updates)
+            for layer in changed_layers:
                 mapping = self._maps.get(layer)
                 if mapping is None:
                     continue
-                indices = torch.tensor(
-                    [expert for expert, _ in updates], dtype=torch.long, device=self.device
-                )
+                device_updates = {expert: -1 for expert in self._pending_removals.get(layer, set())}
+                device_updates.update(dict(grouped.get(layer, [])))
+                if not device_updates:
+                    continue
+                indices = torch.tensor(list(device_updates), dtype=torch.long, device=self.device)
                 slots = torch.tensor(
-                    [slot for _, slot in updates], dtype=torch.int32, device=self.device
+                    list(device_updates.values()), dtype=torch.int32, device=self.device
                 )
                 mapping.index_copy_(0, indices, slots)
+            self._pending_removals.clear()
 
-    def remove(self, key: ResourceKey) -> None:
+    def remove(self, key: ResourceKey, *, defer_device: bool = False) -> None:
         self._validate_key(key)
         with self._lock:
             self._assignments.get(key.layer, {}).pop(key.object_id, None)
             mapping = self._maps.get(key.layer)
             if mapping is not None and key.object_id < len(mapping):
-                mapping[key.object_id] = -1
+                if defer_device:
+                    self._pending_removals.setdefault(key.layer, set()).add(key.object_id)
+                else:
+                    mapping[key.object_id] = -1
 
     def get(self, layer: int, num_experts: int) -> torch.Tensor:
         if layer < 0 or num_experts <= 0:
@@ -213,6 +222,10 @@ class ExpertSlotMap:
             if existing is not None:
                 if self._sizes[layer] != num_experts:
                     raise ValueError("global expert count changed for an initialized layer")
+                pending = self._pending_removals.pop(layer, set())
+                if pending:
+                    indices = torch.tensor(list(pending), dtype=torch.long, device=self.device)
+                    existing.index_fill_(0, indices, -1)
                 return existing
             mapping = torch.full((num_experts,), -1, dtype=torch.int32, device=self.device)
             assignments = self._assignments.get(layer, {})
@@ -245,6 +258,7 @@ class CudaTransferBackend:
         )
         self.expert_slot_maps = ExpertSlotMap(self.device) if expert_slots is not None else None
         self._use_events: dict[ResourceKey, torch.cuda.Event] = {}
+        self._waited_use_events: set[torch.cuda.Event] = set()
 
     def _copy(self, value: Any) -> Any:
         if isinstance(value, torch.Tensor):
@@ -285,17 +299,19 @@ class CudaTransferBackend:
                     for key in acquired:
                         self.expert_slots.release(key)
                 raise
+            finally:
+                self._waited_use_events.clear()
         return values
 
     def release_gpu(self, key: ResourceKey, gpu_value: Any) -> None:
         del gpu_value
         if key.kind == ResourceKind.EXPERT and self.expert_slots is not None:
             event = self._use_events.pop(key, None)
-            if event is not None:
+            if event is not None and event not in self._waited_use_events:
                 self.stream.wait_event(event)
+                self._waited_use_events.add(event)
             assert self.expert_slot_maps is not None
-            with torch.cuda.stream(self.stream):
-                self.expert_slot_maps.remove(key)
+            self.expert_slot_maps.remove(key, defer_device=True)
             self.expert_slots.release(key)
 
     def record_use(self, key: ResourceKey) -> None:
