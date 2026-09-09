@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-09 02:58 UTC
+Updated: 2026-09-09 06:07 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -99,6 +99,10 @@ residency/cache 起点，避免把资源预取伪装成免费 prefill。
   store 模式自动跳过，避免提前加载权重。CUDA 数值与 c512/4K 实模均已验证。
 - 固定输出长度的 vLLM baseline 现在显式设置 `ignore_eos=True`，避免某个请求提前遇到
   EOS 后少生成 token，使自定义运行时和生产基线保持完全相同的 token 数。
+- 两侧 release runner 现在接受同一个绝对 `gpu_memory_limit_gib`；vLLM 从物理设备容量
+  反推实际 `gpu_memory_utilization`，两侧均在初始化结束后重置峰值统计并记录整个请求的
+  allocated/reserved 峰值。release gate 会拒绝缺失、不同、超过上限或未实际传入 vLLM
+  engine 的显存约束，旧的无显存证据 JSON 不再能进入发布结算。
 - Sink/recent/old KV layout, pinned-CPU old chunks, sparse retrieval, next-step retention
   and eviction.
 - Original Qwen3 safetensors expert source, including experts whose three matrices cross
@@ -306,7 +310,7 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 
 ## Next actions
 
-1. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
+1. GPU 空闲后先运行三项 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
    GQA、跨请求 KV demand 和 layer lookahead 2，并建立相同显存约束的 vLLM decode-only
    baseline。
 2. c512 通过后重跑 batch-4/context-4K 的长输出 demand/speculative，核对 token 因果一致、

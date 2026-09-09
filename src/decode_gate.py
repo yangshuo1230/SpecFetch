@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ RELEASE_CONTEXTS = (512, 4096)
 RELEASE_BATCH_SIZE = 4
 RELEASE_DECODE_TOKENS_PER_REQUEST = 64
 RELEASE_SPEEDUP = 1.5
+MEMORY_PROTOCOL = "post_initialization_peak_reserved_v1"
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,15 @@ def _model_identity(value: str) -> str:
     return Path(value).resolve().as_posix()
 
 
+def _positive_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) > 0
+    )
+
+
 def evaluate_decode_pair(
     runtime_result: dict[str, Any],
     vllm_result: dict[str, Any],
@@ -38,6 +49,41 @@ def evaluate_decode_pair(
     vllm_config = vllm_result["configuration"]
     runtime_performance = runtime_result["performance"]
     vllm_performance = vllm_result["performance"]
+
+    runtime_memory = runtime_result.get("gpu_memory", {})
+    vllm_memory = vllm_result.get("gpu_memory", {})
+    for label, config, memory in (
+        ("SpecFetch", runtime_config, runtime_memory),
+        ("vLLM", vllm_config, vllm_memory),
+    ):
+        if memory.get("measurement_protocol") != MEMORY_PROTOCOL:
+            raise ValueError(f"{label} result lacks the required GPU-memory measurement")
+        limit = memory.get("limit_gib")
+        peak = memory.get("peak_reserved_gib")
+        if not _positive_finite_number(limit):
+            raise ValueError(f"{label} result must declare a positive GPU-memory limit")
+        if not _positive_finite_number(peak):
+            raise ValueError(f"{label} result must report positive peak reserved GPU memory")
+        configured_limit = config.get("gpu_memory_limit_gib")
+        if not _positive_finite_number(configured_limit) or not math.isclose(
+            float(configured_limit), float(limit), rel_tol=0.0, abs_tol=1e-6
+        ):
+            raise ValueError(f"{label} configured and measured GPU-memory limits differ")
+        if float(peak) > float(limit) or memory.get("limit_satisfied") is not True:
+            raise ValueError(f"{label} result exceeds its GPU-memory limit")
+    runtime_limit = float(runtime_memory["limit_gib"])
+    vllm_limit = float(vllm_memory["limit_gib"])
+    if not math.isclose(runtime_limit, vllm_limit, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError("SpecFetch and vLLM GPU-memory limits differ")
+    vllm_total = float(vllm_memory.get("total_device_gib", 0))
+    vllm_utilization = float(vllm_result.get("engine_options", {}).get("gpu_memory_utilization", 0))
+    if (
+        not math.isfinite(vllm_total)
+        or not math.isfinite(vllm_utilization)
+        or vllm_total <= 0
+        or not math.isclose(vllm_total * vllm_utilization, vllm_limit, rel_tol=0.0, abs_tol=1e-5)
+    ):
+        raise ValueError("vLLM engine was not configured with the declared GPU-memory limit")
 
     if runtime_result.get("timing_protocol") != "batch_decode_after_all_prefix_caches_v1":
         raise ValueError("SpecFetch result does not use the decode-only timing protocol")

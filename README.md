@@ -57,6 +57,7 @@ python -m scripts.run_runtime_engine \
   --probes results/expert-probes.pt \
   --prompts prompts.json \
   --context-tokens 512 --batch-size 4 \
+  --max-new-tokens 65 --gpu-memory-limit-gib 10 \
   --output results/runtime-speculative.json
 
 python -m scripts.run_runtime_engine \
@@ -65,8 +66,18 @@ python -m scripts.run_runtime_engine \
   --probes results/expert-probes.pt \
   --prompts prompts.json \
   --context-tokens 512 --batch-size 4 \
+  --max-new-tokens 65 --gpu-memory-limit-gib 10 \
   --disable-prefetch \
   --output results/runtime-demand-only.json
+
+VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0 \
+python -m scripts.run_vllm_baseline \
+  --model /root/models/Qwen3-30B-A3B \
+  --prompts prompts.json \
+  --context-tokens 512 --batch-size 4 \
+  --max-new-tokens 65 --gpu-memory-limit-gib 10 \
+  --cpu-offload-gb 54 --enforce-eager \
+  --output results/vllm-offload.json
 ~~~
 
 Both runtime modes use the same draft-ranked sparse KV set. `demand-only` suppresses early H2D but
@@ -87,6 +98,12 @@ tokens after the first token from a matching declared residency state. Both work
 batch-1 diagnostics and preferred 128-token confirmation runs cannot substitute for either one.
 Kernel/JIT warmup may run outside the timer only if the declared residency/cache state is restored
 before measurement.
+
+Release results must set the same positive `--gpu-memory-limit-gib`. The vLLM runner derives its
+`gpu_memory_utilization` from that absolute limit and the physical device capacity; both runners
+record post-initialization peak allocated and reserved memory. The release checker rejects missing,
+different, or exceeded limits. The scope includes the complete measured request (prefix-cache build
+and decode) while excluding transient model-loading allocations, consistently on both sides.
 
 For quality analysis, one non-performance run can compare every sparse attention output with a
 CPU full-attention shadow and evaluate several stopping thresholds on the same Target queries:

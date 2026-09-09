@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import time
 from pathlib import Path
@@ -29,6 +30,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--physical-gpu-index", type=int, default=0)
+    parser.add_argument(
+        "--gpu-memory-limit-gib",
+        type=float,
+        help="Strict post-initialization GPU reserved-memory cap recorded for matched runs",
+    )
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--context-tokens", type=int, default=512)
     parser.add_argument(
@@ -108,6 +114,10 @@ def main() -> None:
     args = parse_args()
     if args.max_new_tokens < 2:
         raise ValueError("max-new-tokens must be at least 2 for decode-only timing")
+    if args.gpu_memory_limit_gib is not None and (
+        not math.isfinite(args.gpu_memory_limit_gib) or args.gpu_memory_limit_gib <= 0
+    ):
+        raise ValueError("gpu-memory-limit-gib must be positive")
     require_idle_gpus(1000, 10, {args.physical_gpu_index})
     refresh_tokens = args.draft_refresh_tokens or args.lookahead
     if not 0 < refresh_tokens <= args.lookahead:
@@ -191,7 +201,15 @@ def main() -> None:
         raise
     transfer_start, _ = worker.phase_metrics_since(worker.metrics_snapshot())
     residency_start = (residency.evictions, residency.wasted_prefetches)
-    torch.cuda.reset_peak_memory_stats(torch.device(args.device))
+    cuda_device = torch.device(args.device)
+    total_gpu_gib = torch.cuda.get_device_properties(cuda_device).total_memory / 2**30
+    if args.gpu_memory_limit_gib is not None and args.gpu_memory_limit_gib > total_gpu_gib:
+        worker.close()
+        raise ValueError(
+            f"gpu-memory-limit-gib ({args.gpu_memory_limit_gib}) exceeds device capacity "
+            f"({total_gpu_gib:.3f} GiB)"
+        )
+    torch.cuda.reset_peak_memory_stats(cuda_device)
     try:
         start = time.perf_counter()
         output = engine.prefill(input_ids, request_ids)
@@ -300,6 +318,11 @@ def main() -> None:
 
     transfer_end, decode_transfer = worker.phase_metrics_since(transfer_after_draft_prefill)
     residency_end = (residency.evictions, residency.wasted_prefetches)
+    peak_gpu_allocated_gib = torch.cuda.max_memory_allocated(cuda_device) / 2**30
+    peak_gpu_reserved_gib = torch.cuda.max_memory_reserved(cuda_device) / 2**30
+    memory_limit_satisfied = (
+        args.gpu_memory_limit_gib is None or peak_gpu_reserved_gib <= args.gpu_memory_limit_gib
+    )
 
     tokens = torch.stack(generated, dim=1)
     total_steps = decode_wall_seconds
@@ -333,12 +356,20 @@ def main() -> None:
             if total_steps
             else 0,
             "end_to_end_tokens_per_second": args.batch_size * args.max_new_tokens / total_request,
-            "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(args.device)) / 2**30,
+            "peak_gpu_gib": peak_gpu_allocated_gib,
             "initialization_seconds": initialization_seconds,
             "expert_preload_seconds": expert_preload_seconds,
             "moe_warmup_seconds": moe_warmup_seconds,
             "shadow_attention_seconds": shadow_seconds,
             "latency_valid": not (args.shadow_attention or shadow_thresholds),
+        },
+        "gpu_memory": {
+            "measurement_protocol": "post_initialization_peak_reserved_v1",
+            "limit_gib": args.gpu_memory_limit_gib,
+            "total_device_gib": total_gpu_gib,
+            "peak_allocated_gib": peak_gpu_allocated_gib,
+            "peak_reserved_gib": peak_gpu_reserved_gib,
+            "limit_satisfied": memory_limit_satisfied,
         },
         "sparse_kv": {
             "mean_selected_old_chunks_per_layer_request": statistics.mean(selected_chunks)
@@ -391,6 +422,11 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True, default=str) + "\n")
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    if not memory_limit_satisfied:
+        raise RuntimeError(
+            f"peak reserved GPU memory {peak_gpu_reserved_gib:.3f} GiB exceeds "
+            f"the {args.gpu_memory_limit_gib:.3f} GiB limit"
+        )
 
 
 if __name__ == "__main__":

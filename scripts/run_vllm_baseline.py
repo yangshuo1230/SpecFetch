@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--physical-gpu-index", type=int, default=0)
+    parser.add_argument(
+        "--gpu-memory-limit-gib",
+        type=float,
+        help="Strict post-initialization GPU reserved-memory cap for matched runs",
+    )
     parser.add_argument("--context-tokens", type=int, default=512)
     parser.add_argument(
         "--max-new-tokens",
@@ -28,7 +34,11 @@ def parse_args() -> argparse.Namespace:
         default=65,
         help="Total generated tokens, including the untimed first token (default: 65)",
     )
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        help="vLLM memory fraction; defaults to 0.9 or is derived from --gpu-memory-limit-gib",
+    )
     parser.add_argument("--cpu-offload-gb", type=float, default=0.0)
     parser.add_argument("--kv-offloading-size", type=float)
     parser.add_argument("--enforce-eager", action="store_true")
@@ -91,7 +101,12 @@ def main() -> None:
     args = parse_args()
     if args.max_new_tokens < 2:
         raise ValueError("max-new-tokens must be at least 2 for decode-only timing")
+    if args.gpu_memory_limit_gib is not None and (
+        not math.isfinite(args.gpu_memory_limit_gib) or args.gpu_memory_limit_gib <= 0
+    ):
+        raise ValueError("gpu-memory-limit-gib must be positive")
     require_idle_gpus(1000, 10, {args.physical_gpu_index})
+    import torch
     from vllm import LLM, SamplingParams
     from vllm.sampling_params import RequestOutputKind
 
@@ -102,10 +117,33 @@ def main() -> None:
         args.batch_size,
         args.context_tokens,
     )
+    cuda_device = torch.device("cuda:0")
+    total_gpu_gib = torch.cuda.get_device_properties(cuda_device).total_memory / 2**30
+    if args.gpu_memory_limit_gib is not None:
+        if args.gpu_memory_limit_gib > total_gpu_gib:
+            raise ValueError(
+                f"gpu-memory-limit-gib ({args.gpu_memory_limit_gib}) exceeds device capacity "
+                f"({total_gpu_gib:.3f} GiB)"
+            )
+        derived_utilization = args.gpu_memory_limit_gib / total_gpu_gib
+        if (
+            args.gpu_memory_utilization is not None
+            and not abs(args.gpu_memory_utilization - derived_utilization) < 1e-6
+        ):
+            raise ValueError(
+                "gpu-memory-utilization conflicts with the fraction implied by gpu-memory-limit-gib"
+            )
+        gpu_memory_utilization = derived_utilization
+    else:
+        gpu_memory_utilization = (
+            0.9 if args.gpu_memory_utilization is None else args.gpu_memory_utilization
+        )
+    if not math.isfinite(gpu_memory_utilization) or not 0 < gpu_memory_utilization <= 1:
+        raise ValueError("gpu-memory-utilization must be in (0, 1]")
     engine_options = {
         "model": args.model,
         "dtype": "bfloat16",
-        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "gpu_memory_utilization": gpu_memory_utilization,
         "cpu_offload_gb": args.cpu_offload_gb,
         "enforce_eager": args.enforce_eager,
         "trust_remote_code": True,
@@ -118,6 +156,7 @@ def main() -> None:
     initialization_start = time.perf_counter()
     llm = LLM(**engine_options)
     initialization_seconds = time.perf_counter() - initialization_start
+    torch.cuda.reset_peak_memory_stats(cuda_device)
     prompts = [{"prompt_token_ids": row.tolist()} for row in input_ids]
     sampling = SamplingParams(
         temperature=0,
@@ -126,6 +165,12 @@ def main() -> None:
         output_kind=RequestOutputKind.CUMULATIVE,
     )
     run = run_decode_only(llm, prompts, sampling)
+    torch.cuda.synchronize(cuda_device)
+    peak_gpu_allocated_gib = torch.cuda.max_memory_allocated(cuda_device) / 2**30
+    peak_gpu_reserved_gib = torch.cuda.max_memory_reserved(cuda_device) / 2**30
+    memory_limit_satisfied = (
+        args.gpu_memory_limit_gib is None or peak_gpu_reserved_gib <= args.gpu_memory_limit_gib
+    )
     outputs = run.outputs
     generated = [list(item.outputs[0].token_ids) for item in outputs]
     lengths = [len(tokens) for tokens in generated]
@@ -149,12 +194,25 @@ def main() -> None:
             "mean_tpot_ms": run.decode_wall_seconds / decode_tokens_per_request * 1000,
             "decode_throughput_tokens_per_second": decode_tokens / run.decode_wall_seconds,
         },
+        "gpu_memory": {
+            "measurement_protocol": "post_initialization_peak_reserved_v1",
+            "limit_gib": args.gpu_memory_limit_gib,
+            "total_device_gib": total_gpu_gib,
+            "peak_allocated_gib": peak_gpu_allocated_gib,
+            "peak_reserved_gib": peak_gpu_reserved_gib,
+            "limit_satisfied": memory_limit_satisfied,
+        },
         "generated_token_ids": generated,
         "generated_text": [tokenizer.decode(tokens) for tokens in generated],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True, default=str) + "\n")
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    if not memory_limit_satisfied:
+        raise RuntimeError(
+            f"peak reserved GPU memory {peak_gpu_reserved_gib:.3f} GiB exceeds "
+            f"the {args.gpu_memory_limit_gib:.3f} GiB limit"
+        )
 
 
 if __name__ == "__main__":
