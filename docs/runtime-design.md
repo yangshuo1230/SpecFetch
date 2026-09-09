@@ -70,6 +70,9 @@ values, avoiding a sum/min scan of unchanged consumer leases twice per expert an
 Immutable resource identities cache their composite hash at construction. Queue,
 residency, lease, and transfer dictionaries reuse that integer instead of repeatedly
 hashing kind/layer/object/request fields on every decode lookup.
+Logical time still recomputes urgency exactly at every Target layer, but rebuilds the
+queue by constructing one dense heap array and applying linear-time `heapify`. It no
+longer performs one logarithmic `heappush` and version update per queued resource.
 All experts consumed by one MoE invocation are released with one residency critical
 section. CUDA packed slots share one compute-stream completion event for that invocation,
 rather than allocating and recording an equivalent event for every expert.

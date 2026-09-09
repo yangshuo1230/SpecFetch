@@ -382,6 +382,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     构造时缓存，queue/residency/transfer 的所有 dict/set lookup 复用该值，并保留完整相等性。
     相同 32-expert hit 微基准进一步由 77.7 降至 46.9 us/layer（48 层 3.73→2.25 ms），
     再减少约 39.6%。
+27. 每层 `queue.set_step` 的动态 urgency 重排从清空后逐资源 `heappush`（O(N log N)）改为
+    一次构造 heap array 后 `heapify`（O(N)）；priority/deadline/sequence 排序语义保持，且测试
+    禁止 step rebuild 调用 incremental `_push`。1,000 个 queued resources 的 200 轮 CPU
+    微基准为 1.001→0.816 ms/rebuild，约 1.23x，并避免随 N 增长的 logarithmic factor。
 
 ## Next actions
 

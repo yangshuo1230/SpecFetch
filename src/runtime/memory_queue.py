@@ -215,9 +215,20 @@ class MemoryRequestQueue:
             if step < self._step:
                 raise ValueError("queue step cannot move backwards")
             self._step = step
-            self._heap.clear()
+            rebuilt = []
             for request in self._requests.values():
-                self._push(request)
+                self._sequence += 1
+                rebuilt.append(
+                    (
+                        -request.priority(self._step),
+                        request.deadline,
+                        self._sequence,
+                        request.version,
+                        request.key,
+                    )
+                )
+            heapq.heapify(rebuilt)
+            self._heap = rebuilt
             self._condition.notify_all()
 
     def cancel(self, key: ResourceKey, consumer: str | None = None) -> bool:
