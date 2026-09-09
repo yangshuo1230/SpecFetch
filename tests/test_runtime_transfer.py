@@ -159,6 +159,25 @@ def test_packed_expert_slots_reuse_released_storage():
     assert torch.equal(replaced.gate, second.gate)
 
 
+def test_packed_gate_up_source_uses_two_copies_per_expert():
+    from src.runtime.expert import pack_expert_weights
+
+    slots = PackedExpertSlots(1, "cpu")
+    gate = torch.arange(6.0).reshape(2, 3)
+    up = gate + 10
+    down = torch.arange(6.0).reshape(3, 2)
+    packed = pack_expert_weights(gate, up, down, pin_memory=False)
+
+    resident = slots.acquire(resource(20), packed)
+
+    assert packed.gate.untyped_storage().data_ptr() == packed.up.untyped_storage().data_ptr()
+    assert packed.gate.storage_offset() + packed.gate.numel() == packed.up.storage_offset()
+    assert slots.copy_operations == 2
+    assert torch.equal(resident.gate, gate)
+    assert torch.equal(resident.up, up)
+    assert torch.equal(resident.down, down)
+
+
 def test_persistent_expert_slot_map_tracks_late_updates_and_removal():
     slot_map = ExpertSlotMap("cpu")
     first = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=3)

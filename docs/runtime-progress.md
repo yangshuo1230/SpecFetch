@@ -348,6 +348,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 16. 同一次 MoE 调用使用的全部 experts 现在通过一个共享 compute-stream CUDA event 保护 slot
     复用，并用一次 `release_many` 清除 demand scope；此前每个 expert 都分别创建/record event
     并获取 residency 锁。分容量执行时仍按实际 fused kernel batch 各记录一个 event。
+17. CPU expert store 将同形状 gate/up 预打包成共享 storage 的相邻 views，与 GPU fused
+    `gate_up` slot 布局一致；每个 expert 的 H2D copy 提交由 gate/up/down 三次降为 gate_up/down
+    两次，且最终 CPU payload 字节数不增加。独立 tensor 的兼容路径仍保留三次 copy。
 
 ## Next actions
 

@@ -16,6 +16,7 @@ from src.runtime.expert import (
     expert_prediction_requests,
     optional_vllm_fused_moe,
     optional_vllm_fused_topk,
+    pack_expert_weights,
 )
 from src.runtime.kv_cache import RequestLayerKV, SparseAttentionResult
 from src.runtime.memory_queue import ResourceKey, ResourceKind
@@ -39,13 +40,15 @@ class ModuleExpertSource:
         identity = (layer, expert)
         if identity not in self._cache:
             module = self.layers[layer][expert]
-            values = [
+            gate, up, down = [
                 parameter.weight.detach().contiguous()
                 for parameter in (module.gate_proj, module.up_proj, module.down_proj)
             ]
-            if self.pin_memory and torch.cuda.is_available():
-                values = [value.pin_memory() for value in values]
-            self._cache[identity] = ExpertWeights(*values)
+            self._cache[identity] = (
+                pack_expert_weights(gate, up, down, pin_memory=True)
+                if self.pin_memory
+                else ExpertWeights(gate, up, down)
+            )
         return self._cache[identity]
 
 

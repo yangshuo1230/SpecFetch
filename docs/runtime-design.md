@@ -60,6 +60,9 @@ priority or the single batched queue upsert.
 All experts consumed by one MoE invocation are released with one residency critical
 section. CUDA packed slots share one compute-stream completion event for that invocation,
 rather than allocating and recording an equivalent event for every expert.
+CPU expert storage packs equal-shaped gate/up matrices into adjacent views matching the
+GPU fused `gate_up` slot. H2D therefore submits one gate/up copy plus one down copy per
+expert, instead of three tensor copies, without duplicating persistent CPU weights.
 
 同一预测窗口产生的 expert 与 KV 请求会先跨层、跨请求汇总，再通过一次队列事务完成
 upsert 和唤醒；这只合并提交开销，不改变每个对象的 probability、deadline 或最终堆顺序。

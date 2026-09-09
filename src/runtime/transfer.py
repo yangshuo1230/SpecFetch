@@ -29,6 +29,26 @@ class PackedExpertSlots:
         self._expert_width = 0
         self._free = list(reversed(range(capacity)))
         self._assigned: dict[ResourceKey, int] = {}
+        self.copy_operations = 0
+
+    @staticmethod
+    def _joined_gate_up(payload: Any) -> torch.Tensor | None:
+        gate, up = payload.gate, payload.up
+        if not (gate.is_contiguous() and up.is_contiguous()):
+            return None
+        if gate.untyped_storage().data_ptr() != up.untyped_storage().data_ptr():
+            return None
+        if gate.storage_offset() + gate.numel() != up.storage_offset():
+            return None
+        return gate.as_strided(
+            (gate.shape[0] + up.shape[0], *gate.shape[1:]),
+            gate.stride(),
+            gate.storage_offset(),
+        )
+
+    def _copy_into(self, destination: torch.Tensor, source: torch.Tensor) -> None:
+        destination.copy_(source, non_blocking=self.device.type == "cuda")
+        self.copy_operations += 1
 
     @property
     def allocated(self) -> bool:
@@ -96,8 +116,13 @@ class PackedExpertSlots:
             ):
                 self._free.append(slot)
                 raise ValueError("expert tensor shape or dtype changed after slot allocation")
-            for source, destination in zip(sources, destinations):
-                destination.copy_(source, non_blocking=self.device.type == "cuda")
+            joined_gate_up = self._joined_gate_up(payload)
+            if joined_gate_up is None:
+                self._copy_into(gate, payload.gate)
+                self._copy_into(up, payload.up)
+            else:
+                self._copy_into(self._buffers["gate_up"][slot], joined_gate_up)
+            self._copy_into(down, payload.down)
             self._assigned[key] = slot
             return self._payload_type(gate=gate, up=up, down=down)
         values = {}
@@ -108,7 +133,7 @@ class PackedExpertSlots:
                 if source.shape != destination.shape or source.dtype != destination.dtype:
                     self._free.append(slot)
                     raise ValueError("expert tensor shape or dtype changed after slot allocation")
-                destination.copy_(source, non_blocking=self.device.type == "cuda")
+                self._copy_into(destination, source)
                 values[item.name] = destination
             else:
                 values[item.name] = source

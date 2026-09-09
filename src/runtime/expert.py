@@ -28,6 +28,25 @@ class ExpertWeights:
         )
 
 
+def pack_expert_weights(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    down: torch.Tensor,
+    *,
+    pin_memory: bool,
+) -> ExpertWeights:
+    """Store gate/up as adjacent views matching the fused GPU slot layout."""
+    if gate.shape != up.shape or gate.dtype != up.dtype or gate.device != up.device:
+        raise ValueError("expert gate and up weights must have matching layouts")
+    gate_up = torch.cat((gate, up), dim=0)
+    down = down.contiguous()
+    if pin_memory and torch.cuda.is_available():
+        gate_up = gate_up.pin_memory()
+        down = down.pin_memory()
+    width = gate.shape[0]
+    return ExpertWeights(gate_up[:width], gate_up[width:], down)
+
+
 class SafetensorExpertSource:
     """Lazy CPU source for original Qwen3-MoE expert checkpoint tensors."""
 
@@ -51,10 +70,7 @@ class SafetensorExpertSource:
     def _load_tensor(self, name: str) -> torch.Tensor:
         shard = self.model_path / self.weight_map[name]
         with safe_open(shard, framework="pt", device="cpu") as handle:
-            tensor = handle.get_tensor(name).contiguous()
-        if self.pin_memory and torch.cuda.is_available():
-            tensor = tensor.pin_memory()
-        return tensor
+            return handle.get_tensor(name).contiguous()
 
     def get(self, layer: int, expert: int) -> ExpertWeights:
         identity = (layer, expert)
@@ -71,12 +87,19 @@ class SafetensorExpertSource:
                     tensors = {
                         name: handle.get_tensor(key).contiguous() for name, key in names.items()
                     }
-                if self.pin_memory and torch.cuda.is_available():
-                    tensors = {name: value.pin_memory() for name, value in tensors.items()}
-                weights = ExpertWeights(**tensors)
+                weights = pack_expert_weights(
+                    tensors["gate"],
+                    tensors["up"],
+                    tensors["down"],
+                    pin_memory=self.pin_memory,
+                )
             else:
-                weights = ExpertWeights(
-                    **{name: self._load_tensor(key) for name, key in names.items()}
+                tensors = {name: self._load_tensor(key) for name, key in names.items()}
+                weights = pack_expert_weights(
+                    tensors["gate"],
+                    tensors["up"],
+                    tensors["down"],
+                    pin_memory=self.pin_memory,
                 )
             self._cache[identity] = weights
             return weights
@@ -96,11 +119,15 @@ class SafetensorExpertSource:
                         if identity in self._cache:
                             continue
                         tensor = handle.get_tensor(name).contiguous()
-                        if self.pin_memory and torch.cuda.is_available():
-                            tensor = tensor.pin_memory()
                         partial.setdefault(identity, {})[field] = tensor
-            for identity, tensors in partial.items():
-                self._cache[identity] = ExpertWeights(**tensors)
+            while partial:
+                identity, tensors = partial.popitem()
+                self._cache[identity] = pack_expert_weights(
+                    tensors["gate"],
+                    tensors["up"],
+                    tensors["down"],
+                    pin_memory=self.pin_memory,
+                )
 
 
 def expert_key(layer: int, expert: int) -> ResourceKey:
