@@ -408,13 +408,17 @@ class TransferWorker:
         residency: ResidencyManager,
         backend: TransferBackend,
         max_batch_size: int = 32,
+        max_speculative_batch_size: int | None = None,
     ) -> None:
         if max_batch_size <= 0:
             raise ValueError("transfer batch size must be positive")
+        if max_speculative_batch_size is not None and max_speculative_batch_size <= 0:
+            raise ValueError("speculative transfer batch size must be positive")
         self.queue = queue
         self.residency = residency
         self.backend = backend
         self.max_batch_size = max_batch_size
+        self.max_speculative_batch_size = max_speculative_batch_size
         release_gpu = getattr(backend, "release_gpu", None)
         if callable(release_gpu):
             residency.set_eviction_callback(release_gpu)
@@ -433,7 +437,11 @@ class TransferWorker:
 
     def _run(self) -> None:
         while True:
-            requests = self.queue.pop_many(self.max_batch_size, block=True)
+            requests = self.queue.pop_many(
+                self.max_batch_size,
+                block=True,
+                speculative_maximum=self.max_speculative_batch_size,
+            )
             if not requests:
                 return
             current_step = self.queue.current_step

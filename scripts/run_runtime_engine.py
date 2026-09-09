@@ -85,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--transfer-batch-size", type=int, default=32)
     parser.add_argument(
+        "--speculative-transfer-batch-size",
+        type=int,
+        default=8,
+        help="Bound non-preemptible speculative H2D microbatches; demand keeps transfer-batch-size",
+    )
+    parser.add_argument(
         "--speculative-expert-budget",
         type=int,
         help="Maximum unique expert candidates admitted by one prediction update",
@@ -268,7 +274,13 @@ def main() -> None:
         }
     )
     backend = CudaTransferBackend(args.device, expert_slots=config.expert_cache_slots)
-    worker = TransferWorker(queue, residency, backend, max_batch_size=args.transfer_batch_size)
+    worker = TransferWorker(
+        queue,
+        residency,
+        backend,
+        max_batch_size=args.transfer_batch_size,
+        max_speculative_batch_size=args.speculative_transfer_batch_size,
+    )
     runtime = OffloadRuntime(queue, residency, worker)
     engine = Qwen3SparseOffloadEngine(
         target,

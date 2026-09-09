@@ -187,3 +187,18 @@ def test_pop_many_batches_demands_without_delaying_them_for_speculation():
     assert {item.key for item in demands} == {key(2), key(3)}
     assert all(item.demand for item in demands)
     assert queue.pop().key == key(1)
+
+
+def test_pop_many_bounds_only_speculative_microbatch():
+    speculative = MemoryRequestQueue()
+    for index in range(10):
+        add(speculative, index, 0.5, index + 1)
+    assert len(speculative.pop_many(8, speculative_maximum=3)) == 3
+    assert len(speculative) == 7
+
+    demands = MemoryRequestQueue()
+    for index in range(10):
+        demands.promote_demand(key(index), consumer="r0", size_bytes=1024, miss_cost_ms=1)
+    batch = demands.pop_many(8, speculative_maximum=3)
+    assert len(batch) == 8
+    assert all(request.demand for request in batch)
