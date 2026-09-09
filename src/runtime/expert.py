@@ -501,3 +501,26 @@ def optional_vllm_fused_topk(mode: str, backend) -> Callable[..., tuple[torch.Te
             raise
         return None
     return fused_topk
+
+
+def optional_vllm_rms_norm(mode: str, backend) -> Callable[..., torch.Tensor] | None:
+    """Resolve vLLM's fused RMSNorm alongside its packed MoE backend."""
+    if mode not in {"auto", "torch", "vllm"}:
+        raise ValueError("MoE backend must be auto, torch, or vllm")
+    if mode == "torch":
+        return None
+    if not (
+        hasattr(backend, "packed_expert_weights")
+        and hasattr(backend, "expert_map")
+        and hasattr(backend, "expert_slot")
+    ):
+        if mode == "vllm":
+            raise RuntimeError("vLLM fused MoE requires a packed expert backend")
+        return None
+    try:
+        from vllm.model_executor.layers.layernorm import rms_norm
+    except Exception:
+        if mode == "vllm":
+            raise
+        return None
+    return rms_norm

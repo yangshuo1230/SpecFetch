@@ -35,6 +35,9 @@ Each bias-free Target attention layer packs Q/K/V weights along the output dimen
 engine construction, replaces the three original parameters with empty placeholders, and
 uses one linear projection followed by tensor splits. Persistent weight bytes do not grow,
 while decode removes two GEMM launches per layer (96 launches per 48-layer token).
+The vLLM backend also routes all input/post-attention/final normalization through vLLM's
+fused RMSNorm op. This replaces each Transformers FP32 cast, square, reduction, rsqrt,
+multiply, and cast chain with one kernel; the torch backend retains the reference module.
 
 ## Resource lifecycle
 

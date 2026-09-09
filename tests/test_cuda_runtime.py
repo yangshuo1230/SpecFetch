@@ -11,6 +11,7 @@ from src.runtime.expert import (
     OffloadedExpertExecutor,
     optional_vllm_fused_moe,
     optional_vllm_fused_topk,
+    optional_vllm_rms_norm,
 )
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager
@@ -116,3 +117,17 @@ def test_cuda_batched_packed_vllm_fused_moe_matches_torch(monkeypatch):
     assert cosine > 0.9999
     assert worker.metrics.maximum_transfer_batch == 2
     worker.close()
+
+
+def test_vllm_rms_norm_matches_reference_for_batched_decode_shape():
+    backend = CudaTransferBackend("cuda:0", expert_slots=1)
+    fused = optional_vllm_rms_norm("vllm", backend)
+    hidden = torch.randn(4, 1, 128, dtype=torch.bfloat16, device="cuda:0")
+    weight = torch.randn(128, dtype=torch.bfloat16, device="cuda:0")
+
+    actual = fused(hidden, weight, 1e-6)
+    normalized = hidden.float()
+    normalized *= torch.rsqrt(normalized.pow(2).mean(-1, keepdim=True) + 1e-6)
+    expected = weight * normalized.to(hidden.dtype)
+
+    assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)

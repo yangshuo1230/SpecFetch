@@ -16,6 +16,7 @@ from src.runtime.expert import (
     expert_prediction_requests,
     optional_vllm_fused_moe,
     optional_vllm_fused_topk,
+    optional_vllm_rms_norm,
     pack_expert_weights,
 )
 from src.runtime.kv_cache import RequestLayerKV, SparseAttentionResult
@@ -280,6 +281,7 @@ class Qwen3SparseOffloadEngine:
         self._qkv_weights = self._pack_qkv_weights()
         fused_moe = optional_vllm_fused_moe(moe_backend, runtime.worker.backend)
         fused_topk = optional_vllm_fused_topk(moe_backend, runtime.worker.backend)
+        self._rms_norm = optional_vllm_rms_norm(moe_backend, runtime.worker.backend)
         self.moe_backend = "vllm" if fused_moe is not None else "torch"
         self.experts = OffloadedExpertExecutor(
             runtime,
@@ -303,6 +305,11 @@ class Qwen3SparseOffloadEngine:
                     requires_grad=False,
                 )
         return packed
+
+    def _norm(self, module, hidden: torch.Tensor) -> torch.Tensor:
+        if self._rms_norm is None:
+            return module(hidden)
+        return self._rms_norm(hidden, module.weight, module.variance_epsilon)
 
     @classmethod
     def from_transformers_model(
@@ -446,7 +453,7 @@ class Qwen3SparseOffloadEngine:
         )
         for layer_index, layer in enumerate(self.model.model.layers):
             residual = hidden
-            normalized = layer.input_layernorm(hidden)
+            normalized = self._norm(layer.input_layernorm, hidden)
             query, key, value = self._project(layer, layer_index, normalized, position_embeddings)
             attended = _dense_causal_attention(query, key, value, layer.self_attn.scaling).reshape(
                 batch, tokens, -1
@@ -484,11 +491,11 @@ class Qwen3SparseOffloadEngine:
             residual = hidden
             hidden = residual + self._moe(
                 layer,
-                layer.post_attention_layernorm(hidden),
+                self._norm(layer.post_attention_layernorm, hidden),
                 layer_index,
                 request_ids,
             )
-        hidden = self.model.model.norm(hidden)
+        hidden = self._norm(self.model.model.norm, hidden)
         # Serving consumes only the next-token row. At the 4K release workload,
         # projecting every prefix row to a 152K vocabulary would materialize
         # roughly 4.6 GiB of logits for batch four despite being immediately
@@ -702,7 +709,7 @@ class Qwen3SparseOffloadEngine:
                         scheduled_deadlines.add(deadline)
                     self._enqueue_prediction_items(state, items)
             residual = hidden
-            normalized = layer.input_layernorm(hidden)
+            normalized = self._norm(layer.input_layernorm, hidden)
             query, key, value = self._project(layer, layer_index, normalized, position_embeddings)
             if state.resident_groups:
                 grouped_ids = [
@@ -744,7 +751,7 @@ class Qwen3SparseOffloadEngine:
                 residual = hidden
                 hidden = residual + self._moe(
                     layer,
-                    layer.post_attention_layernorm(hidden),
+                    self._norm(layer.post_attention_layernorm, hidden),
                     layer_index,
                     state.request_ids,
                 )
@@ -792,13 +799,13 @@ class Qwen3SparseOffloadEngine:
             residual = hidden
             hidden = residual + self._moe(
                 layer,
-                layer.post_attention_layernorm(hidden),
+                self._norm(layer.post_attention_layernorm, hidden),
                 layer_index,
                 state.request_ids,
             )
             if prefetch:
                 self._retire_prediction_layer(state, layer_index)
-        hidden = self.model.model.norm(hidden)
+        hidden = self._norm(self.model.model.norm, hidden)
         logits = self.model.lm_head(hidden)
         for group in state.resident_groups:
             group.length += 1

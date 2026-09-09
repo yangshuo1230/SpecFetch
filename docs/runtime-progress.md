@@ -398,6 +398,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 30. Target 的 bias-free Q/K/V weights 在 engine 初始化时沿输出维打包，原三个 parameters 替换
     为空占位并释放；decode 改为一次 linear 后 split，持久权重字节不增加，每个 48-layer token
     减少 96 次 GEMM launch。CPU full-prefill 与多步 decode reference 继续覆盖数值一致性。
+31. vLLM backend 的 Target input/post/final norms 全部接入 vLLM fused RMSNorm，替代 HF 每次
+    norm 的 cast/pow/mean/rsqrt/multiply/cast kernel chain；torch reference 保留。CPU fake
+    resolver 验证两层 prefill+decode 共 10 次均走统一入口，CUDA opt-in 覆盖 3-D decode shape。
 
 ## Next actions
 
