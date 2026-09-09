@@ -9,6 +9,7 @@ from src.runtime.expert import (
     ExpertRegistry,
     ExpertWeights,
     OffloadedExpertExecutor,
+    optional_vllm_fused_add_rms_norm,
     optional_vllm_fused_moe,
     optional_vllm_fused_topk,
     optional_vllm_rms_norm,
@@ -131,3 +132,20 @@ def test_vllm_rms_norm_matches_reference_for_batched_decode_shape():
     expected = weight * normalized.to(hidden.dtype)
 
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+def test_vllm_fused_add_rms_norm_matches_reference():
+    backend = CudaTransferBackend("cuda:0", expert_slots=1)
+    fused = optional_vllm_fused_add_rms_norm("vllm", backend)
+    hidden = torch.randn(4, 1, 128, dtype=torch.bfloat16, device="cuda:0")
+    residual = torch.randn_like(hidden)
+    weight = torch.randn(128, dtype=torch.bfloat16, device="cuda:0")
+    combined = hidden + residual
+    normalized = combined.float()
+    normalized *= torch.rsqrt(normalized.pow(2).mean(-1, keepdim=True) + 1e-6)
+    expected = weight * normalized.to(hidden.dtype)
+
+    actual, actual_residual = fused(hidden, residual, weight, 1e-6)
+
+    assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(actual_residual, combined, atol=2e-2, rtol=2e-2)

@@ -524,3 +524,28 @@ def optional_vllm_rms_norm(mode: str, backend) -> Callable[..., torch.Tensor] | 
             raise
         return None
     return rms_norm
+
+
+def optional_vllm_fused_add_rms_norm(
+    mode: str, backend
+) -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | None:
+    """Resolve vLLM's residual-add plus RMSNorm kernel."""
+    if mode not in {"auto", "torch", "vllm"}:
+        raise ValueError("MoE backend must be auto, torch, or vllm")
+    if mode == "torch":
+        return None
+    if not (
+        hasattr(backend, "packed_expert_weights")
+        and hasattr(backend, "expert_map")
+        and hasattr(backend, "expert_slot")
+    ):
+        if mode == "vllm":
+            raise RuntimeError("vLLM fused MoE requires a packed expert backend")
+        return None
+    try:
+        from vllm.model_executor.layers.layernorm import fused_add_rms_norm
+    except Exception:
+        if mode == "vllm":
+            raise
+        return None
+    return fused_add_rms_norm

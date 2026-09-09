@@ -401,6 +401,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 31. vLLM backend 的 Target input/post/final norms 全部接入 vLLM fused RMSNorm，替代 HF 每次
     norm 的 cast/pow/mean/rsqrt/multiply/cast kernel chain；torch reference 保留。CPU fake
     resolver 验证两层 prefill+decode 共 10 次均走统一入口，CUDA opt-in 覆盖 3-D decode shape。
+32. Target hidden state 重排为等价 residual stream：attention output 在 post norm 合并 residual，
+    MoE output 在下一 input norm（末层为 final norm）合并。vLLM backend 因此把每个 48-layer
+    token 的 96 次 residual add 与对应 RMSNorm 融为 96 kernels；torch 路径显式执行相同数据流。
 
 ## Next actions
 

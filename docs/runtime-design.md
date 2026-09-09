@@ -38,6 +38,10 @@ while decode removes two GEMM launches per layer (96 launches per 48-layer token
 The vLLM backend also routes all input/post-attention/final normalization through vLLM's
 fused RMSNorm op. This replaces each Transformers FP32 cast, square, reduction, rsqrt,
 multiply, and cast chain with one kernel; the torch backend retains the reference module.
+Hidden state uses the standard residual-stream form: attention output is fused with its
+residual at post-attention norm, and MoE output is fused at the next input norm (or final
+norm). Thus vLLM combines 96 residual additions with their norms per 48-layer token;
+torch executes the same deferred-add dataflow explicitly for numerical reference.
 
 ## Resource lifecycle
 

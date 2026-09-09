@@ -129,6 +129,32 @@ def test_engine_routes_every_norm_through_resolved_kernel():
     worker.close()
 
 
+def test_engine_fuses_residual_add_norm_boundaries():
+    engine, worker = build_engine(tiny_model())
+    standalone_calls = []
+    fused_calls = []
+
+    def reference_rms_norm(hidden, weight, epsilon):
+        standalone_calls.append(hidden.shape)
+        normalized = hidden.float()
+        normalized *= torch.rsqrt(normalized.pow(2).mean(-1, keepdim=True) + epsilon)
+        return weight * normalized.to(hidden.dtype)
+
+    def reference_add_rms_norm(hidden, residual, weight, epsilon):
+        fused_calls.append(hidden.shape)
+        combined = hidden + residual
+        return reference_rms_norm(combined, weight, epsilon), combined
+
+    engine._rms_norm = reference_rms_norm
+    engine._fused_add_rms_norm = reference_add_rms_norm
+    output = engine.prefill(torch.tensor([[1, 2, 3]]), ["a"])
+    engine.decode(output.logits[:, -1].argmax(-1), output.state, StepPredictions())
+
+    assert len(fused_calls) == 8  # Four residual boundaries per 2-layer pass.
+    assert len(standalone_calls) == 10  # Includes the eight fake fused norm bodies.
+    worker.close()
+
+
 def test_prediction_window_submits_expert_and_kv_requests_as_one_queue_batch():
     engine, worker = build_engine(tiny_model())
     state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
