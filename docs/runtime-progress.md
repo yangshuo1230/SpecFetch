@@ -321,6 +321,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
    的 chunk 聚合；专家 probe 所需 hidden states 独立保留。这消除了随 Draft 层数、head 数和
    context 长度增长的纯预测开销。预测 admission 也跳过逐层逐请求的 KV retain/prefetch
    调用，同时继续提交 expert 请求；真实 GPU TPOT 收益仍需空闲设备验证。
+9. Target router 的实际 Top-K 现在每层只生成一次很小的 CPU route-ID snapshot；unique expert
+   与 demand consumer 映射都在该 snapshot 上完成，避免此前每个 expert 各自执行 GPU
+   `where` 并逐标量同步回 Python。GPU selected/routing 仍原样进入 fused MoE，exact Top-K
+   语义不变。
 
 ## Next actions
 

@@ -89,6 +89,22 @@ def test_grouped_and_vectorized_executors_match():
     second_worker.close()
 
 
+def test_expert_demand_planning_requires_cpu_route_ids():
+    experts = [make_expert(0), make_expert(1), make_expert(2)]
+    runtime, registry, worker = runtime_with(experts)
+    executor = OffloadedExpertExecutor(runtime, registry, top_k=2)
+    selected_cpu = torch.tensor([[0, 1], [2, 1]])
+
+    loaded = executor._load(selected_cpu, 0, ["a", "b"])
+
+    assert set(loaded) == {0, 1, 2}
+    with pytest.raises(ValueError, match="CPU route IDs"):
+        executor._load(torch.empty(1, device="meta", dtype=torch.long), 0, ["a"])
+    for key, _ in loaded.values():
+        runtime.release(key)
+    worker.close()
+
+
 def test_grouped_prefill_streams_more_experts_than_cache_capacity():
     from src.runtime.transfer import PackedExpertSlots
 

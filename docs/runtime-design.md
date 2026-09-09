@@ -58,6 +58,10 @@ upsert 和唤醒；这只合并提交开销，不改变每个对象的 probabili
 预测窗口失效时，consumer cancellation 同样按资源批量合并，并在队列和驻留管理器中各
 只获取一次锁；共享资源仅撤销对应 consumer，其余请求的 lease 和优先级继续保留。
 
+Target router 的 GPU Top-K route IDs 每层只复制为一个很小的 CPU snapshot。unique expert
+发现和 request-consumer 构造使用该 snapshot，避免为每个实际 expert 分别执行 GPU
+`where` 和逐标量同步；原始 GPU selected/routing tensor 仍直接进入 fused MoE。
+
 ## Sparse KV stopping
 
 Old KV chunks are visited in draft-attention order. The online controller stops only

@@ -207,14 +207,16 @@ class OffloadedExpertExecutor:
 
     def _load(
         self,
-        selected: torch.Tensor,
+        selected_cpu: torch.Tensor,
         layer: int,
         request_ids: list[str],
         expert_ids: list[int] | None = None,
     ) -> dict[int, tuple[ResourceKey, ExpertWeights]]:
+        if selected_cpu.device.type != "cpu":
+            raise ValueError("expert demand planning requires CPU route IDs")
         dependencies = {}
-        for expert in expert_ids if expert_ids is not None else selected.unique().tolist():
-            token_indices, _ = torch.where(selected == expert)
+        for expert in expert_ids if expert_ids is not None else selected_cpu.unique().tolist():
+            token_indices = torch.where(selected_cpu == expert)[0].tolist()
             key = self.registry.ensure(layer, expert)
             dependencies[expert] = (
                 key,
@@ -301,13 +303,14 @@ class OffloadedExpertExecutor:
         request_ids: list[str],
         expert_ids: list[int],
         global_num_experts: int,
+        selected_cpu: torch.Tensor,
     ) -> torch.Tensor:
         """Batch H2D within the slot bound, then compute each routed expert."""
         result = torch.zeros_like(hidden_states)
         capacity = self.runtime.residency.capacities[ResourceKind.EXPERT]
         for offset in range(0, len(expert_ids), capacity):
             loaded = self._load(
-                selected,
+                selected_cpu,
                 layer,
                 request_ids,
                 expert_ids=expert_ids[offset : offset + capacity],
@@ -357,7 +360,12 @@ class OffloadedExpertExecutor:
         routing = torch.softmax(router_logits.float(), dim=-1)
         routing, selected = routing.topk(min(self.top_k, routing.shape[-1]), dim=-1)
         routing = (routing / routing.sum(dim=-1, keepdim=True)).to(hidden_states.dtype)
-        unique_experts = selected.unique().tolist()
+        # Demand planning needs route identities on the host. Snapshot the tiny
+        # Top-K matrix once per layer, then perform unique/consumer discovery on
+        # CPU instead of synchronizing once for unique() and again for every
+        # expert's torch.where indices.
+        selected_cpu = selected.detach().to(device="cpu")
+        unique_experts = selected_cpu.unique().tolist()
         capacity = self.runtime.residency.capacities[ResourceKind.EXPERT]
         backend = self.runtime.worker.backend
         fused_packed = (
@@ -370,7 +378,7 @@ class OffloadedExpertExecutor:
         if len(unique_experts) <= capacity and (
             len(hidden_states) <= self.vectorized_token_limit or fused_packed
         ):
-            loaded = self._load(selected, layer, request_ids, expert_ids=unique_experts)
+            loaded = self._load(selected_cpu, layer, request_ids, expert_ids=unique_experts)
             if fused_packed:
                 result = self._fused(
                     hidden_states,
@@ -393,6 +401,7 @@ class OffloadedExpertExecutor:
                 request_ids,
                 unique_experts,
                 router_logits.shape[-1],
+                selected_cpu,
             )
         return result
 
