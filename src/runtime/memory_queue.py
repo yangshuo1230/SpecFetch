@@ -47,10 +47,7 @@ class MemoryRequest:
     consumer_deadlines: dict[str, int] = field(default_factory=dict)
     demand: bool = False
     version: int = 0
-
-    @property
-    def expected_uses(self) -> float:
-        return sum(self.consumer_probabilities.values())
+    expected_uses: float = 0.0
 
     def priority(self, current_step: int) -> float:
         if self.demand:
@@ -186,6 +183,7 @@ class MemoryRequestQueue:
                 requests.append(request)
                 unique[request.key] = request
             for request in unique.values():
+                request.expected_uses = sum(request.consumer_probabilities.values())
                 request.deadline = min(request.consumer_deadlines.values())
                 self._push(request)
             self._condition.notify()
@@ -242,6 +240,7 @@ class MemoryRequestQueue:
                 request.consumer_probabilities.pop(consumer, None)
                 request.consumer_deadlines.pop(consumer, None)
                 if request.consumer_probabilities:
+                    request.expected_uses = sum(request.consumer_probabilities.values())
                     request.deadline = min(request.consumer_deadlines.values())
                     self._push(request)
                 else:
@@ -263,6 +262,7 @@ class MemoryRequestQueue:
                     request.consumer_probabilities.pop(consumer, None)
                     request.consumer_deadlines.pop(consumer, None)
                 if request.consumer_probabilities:
+                    request.expected_uses = sum(request.consumer_probabilities.values())
                     request.deadline = min(request.consumer_deadlines.values())
                     self._push(request)
                 else:

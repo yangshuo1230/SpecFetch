@@ -95,6 +95,7 @@ def _legacy_upsert_many(queue: MemoryRequestQueue, updates: list[QueueUpdate]) -
                 queue._requests[update.key] = request
             request.consumer_probabilities[update.consumer] = update.probability
             request.consumer_deadlines[update.consumer] = update.deadline
+            request.expected_uses = sum(request.consumer_probabilities.values())
             request.deadline = min(request.consumer_deadlines.values())
             request.miss_cost_ms = max(request.miss_cost_ms, update.miss_cost_ms)
             request.demand = request.demand or update.demand

@@ -105,6 +105,22 @@ def test_batch_upsert_merges_consumers_before_worker_observes_queue():
     assert first.deadline == 2
 
 
+def test_step_rebuild_reuses_cached_expected_uses(monkeypatch):
+    queue = MemoryRequestQueue()
+    add(queue, 1, 0.5, 8, consumer="a")
+    add(queue, 1, 0.25, 6, consumer="b")
+    request = queue.snapshot()[0]
+    assert request.expected_uses == pytest.approx(0.75)
+
+    class UnexpectedIteration(dict):
+        def values(self):
+            raise AssertionError("step rebuild must not rescan consumer probabilities")
+
+    request.consumer_probabilities = UnexpectedIteration(request.consumer_probabilities)
+    queue.set_step(4)
+    assert queue.pop() is request
+
+
 def test_batch_upsert_matches_sequential_duplicate_consumer_merges():
     updates = [
         QueueUpdate(key(1), "r0", 0.2, 8, 1024, 1.5),

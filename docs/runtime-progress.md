@@ -386,6 +386,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     一次构造 heap array 后 `heapify`（O(N)）；priority/deadline/sequence 排序语义保持，且测试
     禁止 step rebuild 调用 incremental `_push`。1,000 个 queued resources 的 200 轮 CPU
     微基准为 1.001→0.816 ms/rebuild，约 1.23x，并避免随 N 增长的 logarithmic factor。
+28. Queue request 的 `expected_uses=sum(consumer probabilities)` 也改为仅在 upsert/cancel 时
+    缓存；逐层仅 urgency 变化的 heap rebuild 不再扫描 consumer dict，并以禁止 `.values()`
+    的回归对象验证重建路径只读取缓存。相同 1,000-request 基准进一步从 0.816 降至
+    0.681 ms/rebuild，约减少 16.5%。
 
 ## Next actions
 
