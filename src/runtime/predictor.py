@@ -121,7 +121,12 @@ class DraftSignalProvider:
     def initialize(self, input_ids: torch.Tensor, request_ids: list[str]) -> None:
         if input_ids.ndim != 2 or len(input_ids) != len(request_ids):
             raise ValueError("draft input must be a uniform request batch")
-        output = self.model(input_ids=input_ids.to(self.device), use_cache=True, return_dict=True)
+        output = self.model(
+            input_ids=input_ids.to(self.device),
+            use_cache=True,
+            logits_to_keep=1,
+            return_dict=True,
+        )
         self.cache = output.past_key_values
         self.next_logits = output.logits[:, -1]
         self.request_ids = list(request_ids)
@@ -191,6 +196,7 @@ class DraftSignalProvider:
             input_ids=actual_token_ids.to(self.device),
             past_key_values=self.cache,
             use_cache=True,
+            logits_to_keep=1,
             return_dict=True,
         )
         self.cache = output.past_key_values
@@ -220,6 +226,7 @@ class DraftSignalProvider:
                 input_ids=token[:, None],
                 past_key_values=self.cache,
                 use_cache=True,
+                logits_to_keep=1,
                 output_attentions=predict_kv,
                 output_hidden_states=predict_experts,
                 return_dict=True,

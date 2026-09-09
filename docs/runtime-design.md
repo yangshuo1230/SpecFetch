@@ -13,6 +13,9 @@ Serving prefill projects only the final hidden row through the vocabulary head; 
 that need a full-sequence numerical reference opt in explicitly. For batch 4/context 4K
 and a 152K BF16 vocabulary, this avoids an otherwise discarded roughly 4.64 GiB logits
 tensor and keeps the complete request inside the matched memory budget.
+Draft initialization and multi-token cache advancement likewise request only one logits
+row through Transformers' native `logits_to_keep=1` path. Draft rollout already advances
+one token at a time, and uses the same explicit bound for consistency.
 
 Decode 计时从 Target 和 Draft prefix cache 均准备完成之后、首次 speculative rollout
 之前开始。首次 rollout、后续 Draft refresh、预测准入与撤销、H2D、demand wait 和 Target

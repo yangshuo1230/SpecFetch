@@ -368,6 +368,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 22. 新增 opt-in `--maximize-expert-cache`：在 matched cap 中扣除实测 base allocation、精确
     resident KV payload 和显式 `--gpu-workspace-reserve-gib` 后，以完整 expert slot 为单位填满
     剩余空间，并记录 resolved slots。默认仍为 64，待两项真实工作负载确定共同安全 reserve。
+23. Draft initialize、multi-token actual advance 和 rollout 均显式使用 Transformers 原生
+    `logits_to_keep=1`。其中 4K/batch4 initialize 旧路径同样会产生约 4.64 GiB 全 vocab
+    prefix logits；新路径只保留下一 token 所需末行，并有所有 Draft forward 参数回归断言。
 
 ## Next actions
 

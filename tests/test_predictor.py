@@ -88,6 +88,8 @@ def test_draft_rollout_restores_prefix_cache():
     )
     config._attn_implementation = "eager"
     model = Qwen3ForCausalLM(config).eval()
+    forward = Mock(wraps=model.forward)
+    model.forward = forward
     provider = DraftSignalProvider(model, probe_bank=None, lookahead=2)
     prefix = torch.tensor([[1, 2, 3]])
     provider.initialize(prefix, ["r0"])
@@ -101,6 +103,7 @@ def test_draft_rollout_restores_prefix_cache():
     assert provider.cache.get_seq_length() == 4
     provider.advance(torch.tensor([[5, 6]]))
     assert provider.cache.get_seq_length() == 6
+    assert all(call.kwargs["logits_to_keep"] == 1 for call in forward.call_args_list)
 
 
 def test_resident_target_skips_draft_attentions_but_keeps_expert_features():
