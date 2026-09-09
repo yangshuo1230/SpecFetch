@@ -35,6 +35,23 @@ def test_cuda_backend_copies_nested_expert_payload():
     assert torch.equal(result.gate.cpu(), source.gate)
 
 
+def test_cuda_backend_updates_persistent_expert_map_with_slot_reuse():
+    backend = CudaTransferBackend("cuda:0", expert_slots=1)
+    weights = ExpertWeights(*(torch.randn(4, 4, pin_memory=True) for _ in range(3)))
+    first = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=3)
+    second = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=5)
+
+    first_value = backend.copy_to_gpu(first, weights)
+    mapping = backend.expert_map(2, 8)
+    pointer = mapping.data_ptr()
+    assert mapping.cpu().tolist() == [-1, -1, -1, 0, -1, -1, -1, -1]
+
+    backend.release_gpu(first, first_value)
+    backend.copy_to_gpu(second, weights)
+    assert backend.expert_map(2, 8).data_ptr() == pointer
+    assert mapping.cpu().tolist() == [-1, -1, -1, -1, -1, 0, -1, -1]
+
+
 def test_cuda_batched_packed_vllm_fused_moe_matches_torch(monkeypatch):
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "0")
     monkeypatch.setenv("VLLM_MOE_USE_DEEP_GEMM", "0")

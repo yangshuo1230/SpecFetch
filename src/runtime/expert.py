@@ -256,20 +256,30 @@ class OffloadedExpertExecutor:
         selected: torch.Tensor,
         routing: torch.Tensor,
         loaded: dict[int, tuple[ResourceKey, ExpertWeights]],
+        layer: int,
         global_num_experts: int,
+        *,
+        persistent_map: bool = True,
     ) -> torch.Tensor:
         backend = self.runtime.worker.backend
         w1, w2 = backend.packed_expert_weights()
-        logical_ids = list(loaded)
-        if any(not 0 <= expert < global_num_experts for expert in logical_ids):
-            raise ValueError("逻辑 expert ID 超出全局 expert 范围")
-        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32, device="cpu")
-        if logical_ids:
-            physical_ids = [backend.expert_slot(loaded[expert][0]) for expert in logical_ids]
-            expert_map[torch.tensor(logical_ids, device="cpu")] = torch.tensor(
-                physical_ids, dtype=torch.int32, device="cpu"
-            )
-        expert_map = expert_map.to(selected.device)
+        if any(key.layer != layer for key, _ in loaded.values()):
+            raise ValueError("loaded expert belongs to a different layer")
+        if persistent_map:
+            expert_map = backend.expert_map(layer, global_num_experts)
+        else:
+            # A capacity-split call must hide resident experts belonging to a
+            # different split or their contributions would be accumulated twice.
+            expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32, device="cpu")
+            logical_ids = list(loaded)
+            if any(not 0 <= expert < global_num_experts for expert in logical_ids):
+                raise ValueError("logical expert ID exceeds global expert count")
+            if logical_ids:
+                physical_ids = [backend.expert_slot(loaded[expert][0]) for expert in logical_ids]
+                expert_map[torch.tensor(logical_ids)] = torch.tensor(
+                    physical_ids, dtype=torch.int32
+                )
+            expert_map = expert_map.to(selected.device)
         return self.fused_moe(
             hidden_states=hidden_states,
             w1=w1,
@@ -303,14 +313,20 @@ class OffloadedExpertExecutor:
                 expert_ids=expert_ids[offset : offset + capacity],
             )
             backend = self.runtime.worker.backend
-            packed = hasattr(backend, "packed_expert_weights") and hasattr(backend, "expert_slot")
+            packed = (
+                hasattr(backend, "packed_expert_weights")
+                and hasattr(backend, "expert_map")
+                and hasattr(backend, "expert_slot")
+            )
             if self.fused_moe is not None and packed and hidden_states.is_cuda:
                 result += self._fused(
                     hidden_states,
                     selected,
                     routing,
                     loaded,
+                    layer,
                     global_num_experts,
+                    persistent_map=False,
                 )
             else:
                 for expert, (_, weights) in loaded.items():
@@ -343,16 +359,25 @@ class OffloadedExpertExecutor:
         routing = (routing / routing.sum(dim=-1, keepdim=True)).to(hidden_states.dtype)
         unique_experts = selected.unique().tolist()
         capacity = self.runtime.residency.capacities[ResourceKind.EXPERT]
-        if len(hidden_states) <= self.vectorized_token_limit and len(unique_experts) <= capacity:
+        backend = self.runtime.worker.backend
+        fused_packed = (
+            self.fused_moe is not None
+            and hidden_states.is_cuda
+            and hasattr(backend, "packed_expert_weights")
+            and hasattr(backend, "expert_map")
+            and hasattr(backend, "expert_slot")
+        )
+        if len(unique_experts) <= capacity and (
+            len(hidden_states) <= self.vectorized_token_limit or fused_packed
+        ):
             loaded = self._load(selected, layer, request_ids, expert_ids=unique_experts)
-            backend = self.runtime.worker.backend
-            packed = hasattr(backend, "packed_expert_weights") and hasattr(backend, "expert_slot")
-            if self.fused_moe is not None and packed and hidden_states.is_cuda:
+            if fused_packed:
                 result = self._fused(
                     hidden_states,
                     selected,
                     routing,
                     loaded,
+                    layer,
                     router_logits.shape[-1],
                 )
             else:
@@ -378,7 +403,11 @@ def optional_vllm_fused_moe(mode: str, backend) -> Callable[..., torch.Tensor] |
         raise ValueError("MoE backend must be auto, torch, or vllm")
     if mode == "torch":
         return None
-    if not hasattr(backend, "packed_expert_weights"):
+    if not (
+        hasattr(backend, "packed_expert_weights")
+        and hasattr(backend, "expert_map")
+        and hasattr(backend, "expert_slot")
+    ):
         if mode == "vllm":
             raise RuntimeError("vLLM fused MoE requires a packed expert backend")
         return None

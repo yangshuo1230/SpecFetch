@@ -6,6 +6,7 @@ from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKi
 from src.runtime.residency import ResidencyManager, ResourceState
 from src.runtime.transfer import (
     DemandRequest,
+    ExpertSlotMap,
     OffloadRuntime,
     PackedExpertSlots,
     PrefetchRequest,
@@ -125,6 +126,24 @@ def test_packed_expert_slots_reuse_released_storage():
     replaced = slots.acquire(second_key, second)
     assert replaced.gate.data_ptr() == gate_pointer
     assert torch.equal(replaced.gate, second.gate)
+
+
+def test_persistent_expert_slot_map_tracks_late_updates_and_removal():
+    slot_map = ExpertSlotMap("cpu")
+    first = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=3)
+    second = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=5)
+    other_layer = ResourceKey(ResourceKind.EXPERT, layer=4, object_id=3)
+
+    slot_map.update([(first, 7), (other_layer, 1)])
+    layer_two = slot_map.get(2, 8)
+    assert layer_two.tolist() == [-1, -1, -1, 7, -1, -1, -1, -1]
+    assert slot_map.get(2, 8).data_ptr() == layer_two.data_ptr()
+
+    slot_map.update([(second, 9)])
+    assert layer_two.tolist() == [-1, -1, -1, 7, -1, 9, -1, -1]
+    slot_map.remove(first)
+    assert layer_two.tolist() == [-1, -1, -1, -1, -1, 9, -1, -1]
+    assert slot_map.get(4, 8).tolist()[3] == 1
 
 
 def test_residency_eviction_returns_packed_expert_slot():

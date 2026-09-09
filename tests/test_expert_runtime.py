@@ -126,21 +126,28 @@ def test_grouped_prefill_streams_more_experts_than_cache_capacity():
 
 
 def test_fused_adapter_maps_logical_experts_to_packed_slots():
-    from src.runtime.transfer import PackedExpertSlots
+    from src.runtime.transfer import ExpertSlotMap, PackedExpertSlots
 
     class PackedBackend:
         def __init__(self):
             self.slots = PackedExpertSlots(3, "cpu")
+            self.slot_maps = ExpertSlotMap("cpu")
 
         def copy_to_gpu(self, key, value):
-            return self.slots.acquire(key, value)
+            result = self.slots.acquire(key, value)
+            self.slot_maps.update([(key, self.slots.slot_for(key))])
+            return result
 
         def release_gpu(self, key, value):
             del value
+            self.slot_maps.remove(key)
             self.slots.release(key)
 
         def packed_expert_weights(self):
             return self.slots.fused_weights()
+
+        def expert_map(self, layer, num_experts):
+            return self.slot_maps.get(layer, num_experts)
 
         def expert_slot(self, key):
             return self.slots.slot_for(key)
@@ -172,11 +179,11 @@ def test_fused_adapter_maps_logical_experts_to_packed_slots():
     routing, selected = routing.topk(2, dim=-1)
     routing /= routing.sum(dim=-1, keepdim=True)
     loaded = executor._load(selected, 0, ["a", "b"])
-    actual = executor._fused(hidden, selected, routing, loaded, global_num_experts=3)
+    actual = executor._fused(hidden, selected, routing, loaded, 0, global_num_experts=3)
     expected = executor._vectorized(hidden, selected, routing, loaded)
     assert torch.allclose(actual, expected, atol=1e-5)
-    with pytest.raises(ValueError, match="超出全局 expert 范围"):
-        executor._fused(hidden, selected, routing, loaded, global_num_experts=2)
+    with pytest.raises(ValueError, match="expert count changed"):
+        executor._fused(hidden, selected, routing, loaded, 0, global_num_experts=2)
     for key, _ in loaded.values():
         runtime.release(key)
     worker.close()

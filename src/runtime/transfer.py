@@ -131,6 +131,79 @@ class PackedExpertSlots:
         return self._buffers["gate_up"], self._buffers["down"]
 
 
+class ExpertSlotMap:
+    """Persistent logical-to-physical expert maps, updated only on slot changes."""
+
+    def __init__(self, device: str | torch.device) -> None:
+        self.device = torch.device(device)
+        self._assignments: dict[int, dict[int, int]] = {}
+        self._maps: dict[int, torch.Tensor] = {}
+        self._sizes: dict[int, int] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _validate_key(key: ResourceKey) -> None:
+        if key.kind != ResourceKind.EXPERT or key.request_id:
+            raise ValueError("expert slot maps require shared expert resource keys")
+
+    def update(self, assignments: list[tuple[ResourceKey, int]]) -> None:
+        grouped: dict[int, list[tuple[int, int]]] = {}
+        for key, slot in assignments:
+            self._validate_key(key)
+            if key.layer < 0 or key.object_id < 0 or slot < 0:
+                raise ValueError("expert layer, ID, and slot must be non-negative")
+            grouped.setdefault(key.layer, []).append((key.object_id, slot))
+        with self._lock:
+            for layer, updates in grouped.items():
+                mapping = self._maps.get(layer)
+                if mapping is not None and any(expert >= len(mapping) for expert, _ in updates):
+                    raise ValueError("logical expert ID exceeds persistent map size")
+            for layer, updates in grouped.items():
+                logical = self._assignments.setdefault(layer, {})
+                logical.update(updates)
+                mapping = self._maps.get(layer)
+                if mapping is None:
+                    continue
+                indices = torch.tensor(
+                    [expert for expert, _ in updates], dtype=torch.long, device=self.device
+                )
+                slots = torch.tensor(
+                    [slot for _, slot in updates], dtype=torch.int32, device=self.device
+                )
+                mapping.index_copy_(0, indices, slots)
+
+    def remove(self, key: ResourceKey) -> None:
+        self._validate_key(key)
+        with self._lock:
+            self._assignments.get(key.layer, {}).pop(key.object_id, None)
+            mapping = self._maps.get(key.layer)
+            if mapping is not None and key.object_id < len(mapping):
+                mapping[key.object_id] = -1
+
+    def get(self, layer: int, num_experts: int) -> torch.Tensor:
+        if layer < 0 or num_experts <= 0:
+            raise ValueError("layer must be non-negative and num_experts must be positive")
+        with self._lock:
+            existing = self._maps.get(layer)
+            if existing is not None:
+                if self._sizes[layer] != num_experts:
+                    raise ValueError("global expert count changed for an initialized layer")
+                return existing
+            mapping = torch.full((num_experts,), -1, dtype=torch.int32, device=self.device)
+            assignments = self._assignments.get(layer, {})
+            if any(expert >= num_experts for expert in assignments):
+                raise ValueError("logical expert ID exceeds persistent map size")
+            if assignments:
+                indices = torch.tensor(list(assignments), dtype=torch.long, device=self.device)
+                slots = torch.tensor(
+                    list(assignments.values()), dtype=torch.int32, device=self.device
+                )
+                mapping.index_copy_(0, indices, slots)
+            self._maps[layer] = mapping
+            self._sizes[layer] = num_experts
+            return mapping
+
+
 class CudaTransferBackend:
     """Copy nested tensor payloads on one dedicated CUDA stream."""
 
@@ -145,6 +218,7 @@ class CudaTransferBackend:
         self.expert_slots = (
             PackedExpertSlots(expert_slots, self.device) if expert_slots is not None else None
         )
+        self.expert_slot_maps = ExpertSlotMap(self.device) if expert_slots is not None else None
         self._use_events: dict[ResourceKey, torch.cuda.Event] = {}
 
     def _copy(self, value: Any) -> Any:
@@ -175,6 +249,11 @@ class CudaTransferBackend:
                     else:
                         gpu_value = self._copy(cpu_value)
                     values.append(gpu_value)
+                if acquired:
+                    assert self.expert_slots is not None and self.expert_slot_maps is not None
+                    self.expert_slot_maps.update(
+                        [(key, self.expert_slots.slot_for(key)) for key in acquired]
+                    )
                 self.stream.synchronize()
             except Exception:
                 if self.expert_slots is not None:
@@ -189,6 +268,9 @@ class CudaTransferBackend:
             event = self._use_events.pop(key, None)
             if event is not None:
                 self.stream.wait_event(event)
+            assert self.expert_slot_maps is not None
+            with torch.cuda.stream(self.stream):
+                self.expert_slot_maps.remove(key)
             self.expert_slots.release(key)
 
     def record_use(self, key: ResourceKey) -> None:
@@ -208,6 +290,11 @@ class CudaTransferBackend:
         if self.expert_slots is None:
             raise RuntimeError("fixed expert slots are disabled")
         return self.expert_slots.fused_weights()
+
+    def expert_map(self, layer: int, num_experts: int) -> torch.Tensor:
+        if self.expert_slot_maps is None:
+            raise RuntimeError("fixed expert slots are disabled")
+        return self.expert_slot_maps.get(layer, num_experts)
 
 
 @dataclass
