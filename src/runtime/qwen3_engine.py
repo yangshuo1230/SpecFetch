@@ -18,6 +18,7 @@ from src.runtime.expert import (
     optional_vllm_fused_moe,
     optional_vllm_fused_topk,
     optional_vllm_rms_norm,
+    optional_vllm_rotary_embedding,
     pack_expert_weights,
 )
 from src.runtime.kv_cache import RequestLayerKV, SparseAttentionResult
@@ -286,6 +287,9 @@ class Qwen3SparseOffloadEngine:
         self._fused_add_rms_norm = optional_vllm_fused_add_rms_norm(
             moe_backend, runtime.worker.backend
         )
+        self._rotary_embedding = optional_vllm_rotary_embedding(
+            moe_backend, runtime.worker.backend, model
+        )
         self.moe_backend = "vllm" if fused_moe is not None else "torch"
         self.experts = OffloadedExpertExecutor(
             runtime,
@@ -390,7 +394,14 @@ class Qwen3SparseOffloadEngine:
         """Return the exact packed payload reserved by fixed expert slots."""
         return self.config.expert_cache_slots * self.expert_slot_bytes(self.model)
 
-    def _project(self, layer, layer_index: int, hidden: torch.Tensor, position_embeddings):
+    def _project(
+        self,
+        layer,
+        layer_index: int,
+        hidden: torch.Tensor,
+        positions: torch.Tensor,
+        position_embeddings,
+    ):
         attention = layer.self_attn
         projected = torch.nn.functional.linear(hidden, self._qkv_weights[layer_index])
         query_states, key_states, value = projected.split(
@@ -402,9 +413,15 @@ class Qwen3SparseOffloadEngine:
             dim=-1,
         )
         shape = (*hidden.shape[:-1], -1, attention.head_dim)
-        query = attention.q_norm(query_states.view(shape)).transpose(1, 2)
-        key = attention.k_norm(key_states.view(shape)).transpose(1, 2)
+        query = attention.q_norm(query_states.view(shape))
+        key = attention.k_norm(key_states.view(shape))
         value = value.view(shape).transpose(1, 2)
+        if self._rotary_embedding is not None:
+            query, key = self._rotary_embedding(positions, query, key)
+            return query.transpose(1, 2), key.transpose(1, 2), value
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        assert position_embeddings is not None
         return apply_rotary_pos_emb(query, key, *position_embeddings) + (value,)
 
     def _moe(self, layer, hidden: torch.Tensor, layer_index: int, request_ids: list[str]):
@@ -467,7 +484,11 @@ class Qwen3SparseOffloadEngine:
         hidden = self.model.model.embed_tokens(input_ids)
         residual = None
         positions = torch.arange(tokens, device=self.device).expand(batch, -1)
-        position_embeddings = self.model.model.rotary_emb(hidden, positions)
+        position_embeddings = (
+            None
+            if self._rotary_embedding is not None
+            else self.model.model.rotary_emb(hidden, positions)
+        )
         caches = {}
         resident_group = (
             ResidentKVGroup(list(request_ids), tokens)
@@ -476,7 +497,13 @@ class Qwen3SparseOffloadEngine:
         )
         for layer_index, layer in enumerate(self.model.model.layers):
             normalized, residual = self._add_norm(layer.input_layernorm, hidden, residual)
-            query, key, value = self._project(layer, layer_index, normalized, position_embeddings)
+            query, key, value = self._project(
+                layer,
+                layer_index,
+                normalized,
+                positions,
+                position_embeddings,
+            )
             attended = _dense_causal_attention(query, key, value, layer.self_attn.scaling).reshape(
                 batch, tokens, -1
             )
@@ -705,7 +732,11 @@ class Qwen3SparseOffloadEngine:
         hidden = self.model.model.embed_tokens(token_ids[:, None].to(self.device))
         residual = None
         positions = torch.tensor(state.lengths, device=self.device)[:, None]
-        position_embeddings = self.model.model.rotary_emb(hidden, positions)
+        position_embeddings = (
+            None
+            if self._rotary_embedding is not None
+            else self.model.model.rotary_emb(hidden, positions)
+        )
         traces = {}
         layers = len(self.model.model.layers)
         scheduled_deadlines: set[int] = set()
@@ -736,7 +767,13 @@ class Qwen3SparseOffloadEngine:
                         scheduled_deadlines.add(deadline)
                     self._enqueue_prediction_items(state, items)
             normalized, residual = self._add_norm(layer.input_layernorm, hidden, residual)
-            query, key, value = self._project(layer, layer_index, normalized, position_embeddings)
+            query, key, value = self._project(
+                layer,
+                layer_index,
+                normalized,
+                positions,
+                position_embeddings,
+            )
             if state.resident_groups:
                 grouped_ids = [
                     request_id

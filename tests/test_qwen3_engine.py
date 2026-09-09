@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers.models.qwen3_moe.modeling_qwen3_moe import apply_rotary_pos_emb
 
 from src.runtime.config import RuntimeConfig
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKind
@@ -152,6 +153,30 @@ def test_engine_fuses_residual_add_norm_boundaries():
 
     assert len(fused_calls) == 8  # Four residual boundaries per 2-layer pass.
     assert len(standalone_calls) == 10  # Includes the eight fake fused norm bodies.
+    worker.close()
+
+
+def test_engine_routes_every_layer_through_resolved_rotary_kernel():
+    engine, worker = build_engine(tiny_model())
+    calls = []
+
+    def reference_rotary(positions, query, key):
+        calls.append((positions.shape, query.shape, key.shape))
+        cos, sin = engine.model.model.rotary_emb(query, positions)
+        rotated_query, rotated_key = apply_rotary_pos_emb(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            cos,
+            sin,
+        )
+        return rotated_query.transpose(1, 2), rotated_key.transpose(1, 2)
+
+    engine._rotary_embedding = reference_rotary
+    output = engine.prefill(torch.tensor([[1, 2, 3]]), ["a"])
+    engine.decode(output.logits[:, -1].argmax(-1), output.state, StepPredictions())
+
+    assert len(calls) == 4
+    assert calls[-1] == (torch.Size([1, 1]), torch.Size([1, 1, 4, 4]), torch.Size([1, 1, 2, 4]))
     worker.close()
 
 

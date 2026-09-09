@@ -404,6 +404,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 32. Target hidden state 重排为等价 residual stream：attention output 在 post norm 合并 residual，
     MoE output 在下一 input norm（末层为 final norm）合并。vLLM backend 因此把每个 48-layer
     token 的 96 次 residual add 与对应 RMSNorm 融为 96 kernels；torch 路径显式执行相同数据流。
+33. vLLM backend 的 Q/K 改为 token-major 下每层一次原位 fused RoPE，再 transpose 到 attention
+    layout；参数严格沿用 Qwen full head dim、NeoX rotate、theta/scaling/max position，cache 在
+    engine 初始化时上设备。torch 保留 HF 路径，CUDA opt-in 对 511/1023/4095/4096 位置与
+    vLLM native reference 对照。
 
 ## Next actions
 

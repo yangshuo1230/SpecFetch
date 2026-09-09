@@ -13,6 +13,7 @@ from src.runtime.expert import (
     optional_vllm_fused_moe,
     optional_vllm_fused_topk,
     optional_vllm_rms_norm,
+    optional_vllm_rotary_embedding,
 )
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager
@@ -149,3 +150,29 @@ def test_vllm_fused_add_rms_norm_matches_reference():
 
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
     assert torch.allclose(actual_residual, combined, atol=2e-2, rtol=2e-2)
+
+
+def test_vllm_rotary_embedding_matches_native_qwen_layout():
+    from types import SimpleNamespace
+
+    backend = CudaTransferBackend("cuda:0", expert_slots=1)
+    embedding = torch.nn.Embedding(1, 128, dtype=torch.bfloat16, device="cuda:0")
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            head_dim=128,
+            max_position_embeddings=8192,
+            rope_theta=1_000_000.0,
+            rope_scaling=None,
+        ),
+        model=SimpleNamespace(embed_tokens=embedding),
+    )
+    rotary = optional_vllm_rotary_embedding("vllm", backend, model)
+    positions = torch.tensor([[511], [1023], [4095], [4096]], device="cuda:0")
+    query = torch.randn(4, 1, 4, 128, dtype=torch.bfloat16, device="cuda:0")
+    key = torch.randn(4, 1, 2, 128, dtype=torch.bfloat16, device="cuda:0")
+    expected_query, expected_key = rotary.forward_native(positions, query.clone(), key.clone())
+
+    actual_query, actual_key = rotary(positions, query, key)
+
+    assert torch.allclose(actual_query, expected_query, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(actual_key, expected_key, atol=2e-2, rtol=2e-2)

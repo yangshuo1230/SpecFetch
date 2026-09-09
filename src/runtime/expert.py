@@ -549,3 +549,36 @@ def optional_vllm_fused_add_rms_norm(
             raise
         return None
     return fused_add_rms_norm
+
+
+def optional_vllm_rotary_embedding(mode: str, backend, model):
+    """Resolve Qwen-compatible vLLM fused rotary embedding."""
+    if mode not in {"auto", "torch", "vllm"}:
+        raise ValueError("MoE backend must be auto, torch, or vllm")
+    if mode == "torch":
+        return None
+    if not (
+        hasattr(backend, "packed_expert_weights")
+        and hasattr(backend, "expert_map")
+        and hasattr(backend, "expert_slot")
+    ):
+        if mode == "vllm":
+            raise RuntimeError("vLLM fused MoE requires a packed expert backend")
+        return None
+    try:
+        from vllm.model_executor.layers.rotary_embedding import get_rope
+    except Exception:
+        if mode == "vllm":
+            raise
+        return None
+    config = model.config
+    rotary = get_rope(
+        config.head_dim,
+        rotary_dim=config.head_dim,
+        max_position=config.max_position_embeddings,
+        base=config.rope_theta,
+        is_neox_style=True,
+        rope_scaling=config.rope_scaling,
+        dtype=model.model.embed_tokens.weight.dtype,
+    )
+    return rotary.to(model.model.embed_tokens.weight.device)

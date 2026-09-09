@@ -42,6 +42,10 @@ Hidden state uses the standard residual-stream form: attention output is fused w
 residual at post-attention norm, and MoE output is fused at the next input norm (or final
 norm). Thus vLLM combines 96 residual additions with their norms per 48-layer token;
 torch executes the same deferred-add dataflow explicitly for numerical reference.
+For the vLLM backend, token-major normalized Q/K tensors use one in-place fused rotary
+kernel per layer before transposing to attention layout. Its cache is initialized on the
+target device with Qwen's full head dimension, NeoX half rotation, theta, scaling, and
+maximum position; the torch backend retains HF rotary embeddings.
 
 ## Resource lifecycle
 
