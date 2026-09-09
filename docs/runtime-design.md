@@ -31,6 +31,11 @@ vLLM CPU-weight-offload decode 的 1.5 倍；对固定生成 token 数，这等�
 wall time 和 TPOT 不高于 vLLM 的 2/3。vLLM full-resident 仅作硬件上界，不是本阶段
 主门禁。
 
+Each bias-free Target attention layer packs Q/K/V weights along the output dimension at
+engine construction, replaces the three original parameters with empty placeholders, and
+uses one linear projection followed by tensor splits. Persistent weight bytes do not grow,
+while decode removes two GEMM launches per layer (96 launches per 48-layer token).
+
 ## Resource lifecycle
 
 ~~~text

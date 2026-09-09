@@ -277,6 +277,7 @@ class Qwen3SparseOffloadEngine:
         self.residency = residency
         self.config = config
         self.expert_registry = ExpertRegistry(expert_source, residency)
+        self._qkv_weights = self._pack_qkv_weights()
         fused_moe = optional_vllm_fused_moe(moe_backend, runtime.worker.backend)
         fused_topk = optional_vllm_fused_topk(moe_backend, runtime.worker.backend)
         self.moe_backend = "vllm" if fused_moe is not None else "torch"
@@ -287,6 +288,21 @@ class Qwen3SparseOffloadEngine:
             fused_moe=fused_moe,
             fused_topk=fused_topk,
         )
+
+    def _pack_qkv_weights(self) -> list[torch.Tensor]:
+        """Fuse bias-free Q/K/V projections without retaining duplicate parameters."""
+        packed = []
+        for layer in self.model.model.layers:
+            projections = (layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj)
+            if any(projection.bias is not None for projection in projections):
+                raise ValueError("packed QKV projection requires bias-free attention")
+            packed.append(torch.cat([projection.weight.detach() for projection in projections]))
+            for projection in projections:
+                projection.weight = nn.Parameter(
+                    projection.weight.detach().new_empty(0),
+                    requires_grad=False,
+                )
+        return packed
 
     @classmethod
     def from_transformers_model(
@@ -345,12 +361,21 @@ class Qwen3SparseOffloadEngine:
         """Return the exact packed payload reserved by fixed expert slots."""
         return self.config.expert_cache_slots * self.expert_slot_bytes(self.model)
 
-    def _project(self, layer, hidden: torch.Tensor, position_embeddings):
+    def _project(self, layer, layer_index: int, hidden: torch.Tensor, position_embeddings):
         attention = layer.self_attn
+        projected = torch.nn.functional.linear(hidden, self._qkv_weights[layer_index])
+        query_states, key_states, value = projected.split(
+            (
+                attention.q_proj.out_features,
+                attention.k_proj.out_features,
+                attention.v_proj.out_features,
+            ),
+            dim=-1,
+        )
         shape = (*hidden.shape[:-1], -1, attention.head_dim)
-        query = attention.q_norm(attention.q_proj(hidden).view(shape)).transpose(1, 2)
-        key = attention.k_norm(attention.k_proj(hidden).view(shape)).transpose(1, 2)
-        value = attention.v_proj(hidden).view(shape).transpose(1, 2)
+        query = attention.q_norm(query_states.view(shape)).transpose(1, 2)
+        key = attention.k_norm(key_states.view(shape)).transpose(1, 2)
+        value = value.view(shape).transpose(1, 2)
         return apply_rotary_pos_emb(query, key, *position_embeddings) + (value,)
 
     def _moe(self, layer, hidden: torch.Tensor, layer_index: int, request_ids: list[str]):
@@ -422,7 +447,7 @@ class Qwen3SparseOffloadEngine:
         for layer_index, layer in enumerate(self.model.model.layers):
             residual = hidden
             normalized = layer.input_layernorm(hidden)
-            query, key, value = self._project(layer, normalized, position_embeddings)
+            query, key, value = self._project(layer, layer_index, normalized, position_embeddings)
             attended = _dense_causal_attention(query, key, value, layer.self_attn.scaling).reshape(
                 batch, tokens, -1
             )
@@ -678,7 +703,7 @@ class Qwen3SparseOffloadEngine:
                     self._enqueue_prediction_items(state, items)
             residual = hidden
             normalized = layer.input_layernorm(hidden)
-            query, key, value = self._project(layer, normalized, position_embeddings)
+            query, key, value = self._project(layer, layer_index, normalized, position_embeddings)
             if state.resident_groups:
                 grouped_ids = [
                     request_id

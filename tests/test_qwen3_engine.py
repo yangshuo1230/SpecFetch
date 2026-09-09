@@ -92,6 +92,12 @@ def test_prefill_matches_transformers_dense_reference():
     expected = reference(tokens, use_cache=False).logits
     actual = engine.prefill(tokens, ["a", "b"], full_logits=True)
     assert torch.allclose(actual.logits, expected, atol=2e-5, rtol=2e-5)
+    assert all(
+        projection.weight.numel() == 0
+        for layer in engine.model.model.layers
+        for projection in (layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj)
+    )
+    assert [weight.shape for weight in engine._qkv_weights] == [(32, 16), (32, 16)]
     serving = engine.prefill(tokens, ["c", "d"])
     assert serving.logits.shape == expected[:, -1:].shape
     assert torch.allclose(serving.logits, expected[:, -1:], atol=2e-5, rtol=2e-5)

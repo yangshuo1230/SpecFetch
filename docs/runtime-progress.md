@@ -395,6 +395,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     layers/horizons，消除 48 层下的二次扫描。请求完成也按 owner bucket 汇总后一次 cancel。
     48 layers、2 horizons、batch 4、Top-8 的完整 enqueue/retire/reset CPU 微基准为
     10.314→0.831 ms/window，约 12.4x。
+30. Target 的 bias-free Q/K/V weights 在 engine 初始化时沿输出维打包，原三个 parameters 替换
+    为空占位并释放；decode 改为一次 linear 后 split，持久权重字节不增加，每个 48-layer token
+    减少 96 次 GEMM launch。CPU full-prefill 与多步 decode reference 继续覆盖数值一致性。
 
 ## Next actions
 
