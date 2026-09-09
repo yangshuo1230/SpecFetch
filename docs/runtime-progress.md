@@ -435,6 +435,8 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     QUEUED→CPU_ONLY、lease aggregate 清零与单次 notify；旧路径对约 1,384 resources 分别
     获取 residency 锁并重算空 lease。Worker discard-close 同样复用批量转换。固定预构造
     requests、仅切换 scalar/batch unqueue 的受控微基准为 14.744→13.850 ms/window，约降 6.1%。
+41. `prefetch_many` 不再把已有 PrefetchRequest window 复制成同规模五元 tuple list；residency
+    通过只读 Protocol 直接消费原 intents，再仅为确需 queue 的资源构造 QueueUpdate。
 
 ## Next actions
 

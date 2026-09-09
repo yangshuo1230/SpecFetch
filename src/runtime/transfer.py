@@ -620,16 +620,7 @@ class OffloadRuntime:
                 raise ValueError("miss_cost_ms must be non-negative")
         current_step = self.queue.current_step
         queued = self.residency.prepare_prefetches(
-            [
-                (
-                    request.key,
-                    request.consumer,
-                    request.probability,
-                    request.deadline,
-                    request.miss_cost_ms,
-                )
-                for request in requests
-            ],
+            requests,
             current_step=current_step,
         )
         self.queue.upsert_many(queued)

@@ -5,7 +5,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 
 from src.runtime.memory_queue import QueueUpdate, ResourceKey, ResourceKind
 
@@ -19,6 +19,14 @@ class ResourceState(str, Enum):
 
 class CacheFullError(RuntimeError):
     pass
+
+
+class PrefetchIntent(Protocol):
+    key: ResourceKey
+    consumer: str
+    probability: float
+    deadline: int
+    miss_cost_ms: float
 
 
 @dataclass
@@ -142,7 +150,7 @@ class ResidencyManager:
 
     def prepare_prefetches(
         self,
-        requests: list[tuple[ResourceKey, str, float, int, float]],
+        requests: list[PrefetchIntent],
         *,
         current_step: int,
     ) -> list[QueueUpdate]:
@@ -155,20 +163,21 @@ class ResidencyManager:
         queued: list[QueueUpdate] = []
         transitioned = False
         with self._condition:
-            for key, consumer, probability, deadline, miss_cost_ms in requests:
+            for request in requests:
+                key = request.key
                 try:
                     record = self._records[key]
                 except KeyError as error:
                     raise KeyError(f"unregistered resource {key}") from error
-                urgency = 1 / max(1, deadline - current_step)
+                urgency = 1 / max(1, request.deadline - current_step)
                 mib = max(record.size_bytes / 2**20, 1e-6)
-                priority = miss_cost_ms * probability * urgency / mib
+                priority = request.miss_cost_ms * request.probability * urgency / mib
                 if record.state in (
                     ResourceState.QUEUED,
                     ResourceState.GPU_RESIDENT,
                     ResourceState.IN_FLIGHT,
                 ):
-                    self._set_lease(record, consumer, priority, deadline)
+                    self._set_lease(record, request.consumer, priority, request.deadline)
                     record.speculative = True
                     record.used = False
                     if record.state in (
@@ -179,17 +188,17 @@ class ResidencyManager:
                 if record.state == ResourceState.CPU_ONLY:
                     record.state = ResourceState.QUEUED
                     transitioned = True
-                    self._set_lease(record, consumer, priority, deadline)
+                    self._set_lease(record, request.consumer, priority, request.deadline)
                     record.speculative = True
                     record.used = False
                 queued.append(
                     QueueUpdate(
                         key,
-                        consumer,
-                        probability,
-                        deadline,
+                        request.consumer,
+                        request.probability,
+                        request.deadline,
                         record.size_bytes,
-                        miss_cost_ms,
+                        request.miss_cost_ms,
                     )
                 )
             if transitioned:

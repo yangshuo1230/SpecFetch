@@ -90,6 +90,9 @@ priority or the single batched queue upsert.
 Each record caches aggregate speculative lease priority/deadline whenever leases change.
 Entering actual demand switches priority to infinity; batched release restores the cached
 values, avoiding a sum/min scan of unchanged consumer leases twice per expert and layer.
+Speculative residency preparation consumes the existing immutable prefetch intents
+directly; it no longer duplicates every window into an intermediate five-field tuple list
+before producing queue updates.
 Lease additions and overwrites update the cached probability sum by delta; cancellation
 subtracts the removed contribution. The deadline is rescanned only when an overwritten or
 removed lease owned the current minimum, rather than rescanning every touched resource.
