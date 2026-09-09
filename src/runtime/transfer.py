@@ -593,46 +593,39 @@ class OffloadRuntime:
         """Promote all dependencies before waiting so H2D can form a batch."""
         if not requests:
             return {}
+        if any(request.miss_cost_ms < 0 for request in requests):
+            raise ValueError("miss_cost_ms must be non-negative")
         self.worker.metrics.demand_requests += len(requests)
-        values = {}
-        pending: list[ResourceKey] = []
+        values, pending, queue_sizes = self.residency.prepare_demands(
+            [request.key for request in requests]
+        )
+        self.worker.metrics.demand_hits += sum(request.key in values for request in requests)
+        self.worker.metrics.demand_misses += sum(request.key not in values for request in requests)
         updates = []
         current_step = self.queue.current_step
         for request in requests:
-            if request.miss_cost_ms < 0:
-                raise ValueError("miss_cost_ms must be non-negative")
-            state = self.residency.state(request.key)
-            if state == ResourceState.GPU_RESIDENT:
-                self.worker.metrics.demand_hits += 1
-                self.residency.mark_demand(request.key)
-                values[request.key] = self.residency.get_gpu(request.key)
+            size_bytes = queue_sizes.get(request.key)
+            if size_bytes is None:
                 continue
-            self.worker.metrics.demand_misses += 1
-            record = self.residency.record(request.key)
-            pending.append(request.key)
-            if state == ResourceState.IN_FLIGHT:
-                self.residency.mark_demand(request.key)
-                continue
-            self.residency.mark_queued(request.key)
             updates.append(
                 QueueUpdate(
                     request.key,
                     request.consumer,
                     1.0,
                     current_step,
-                    record.size_bytes,
+                    size_bytes,
                     request.miss_cost_ms,
                     demand=True,
                 )
             )
         self.queue.upsert_many(updates)
         start = time.perf_counter()
-        for key in pending:
-            ready = self.residency.wait_resident(key, timeout)
-            self.worker.check()
-            if not ready:
-                raise TimeoutError(f"resource did not become resident: {key}")
-            values[key] = self.residency.get_gpu(key)
+        completed = self.residency.wait_resident_many(pending, timeout)
+        self.worker.check()
+        if completed is None:
+            missing = next((key for key in pending if key not in values), pending[0])
+            raise TimeoutError(f"resource did not become resident: {missing}")
+        values.update(completed)
         self.worker.metrics.demand_wait_ms += (time.perf_counter() - start) * 1000
         return values
 

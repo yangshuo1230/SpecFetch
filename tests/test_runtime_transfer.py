@@ -385,6 +385,30 @@ def test_demand_many_uses_one_backend_transfer_batch():
     worker.close()
 
 
+def test_demand_many_batches_resident_hit_and_miss_state_transitions(monkeypatch):
+    runtime, residency, worker, _ = build_runtime(capacity=2)
+    assert runtime.demand(resource(0), consumer="warm", miss_cost_ms=1) == "gpu:cpu:0"
+
+    def scalar_path(*_args, **_kwargs):
+        raise AssertionError("demand_many must use batched residency operations")
+
+    monkeypatch.setattr(residency, "state", scalar_path)
+    monkeypatch.setattr(residency, "mark_demand", scalar_path)
+    monkeypatch.setattr(residency, "get_gpu", scalar_path)
+    monkeypatch.setattr(residency, "wait_resident", scalar_path)
+    values = runtime.demand_many(
+        [
+            DemandRequest(resource(0), "a", 1.0),
+            DemandRequest(resource(1), "b", 1.0),
+        ]
+    )
+
+    assert values == {resource(0): "gpu:cpu:0", resource(1): "gpu:cpu:1"}
+    assert worker.metrics.demand_hits == 1
+    assert worker.metrics.demand_misses == 2  # Includes the initial warm miss.
+    worker.close()
+
+
 def test_discarding_worker_close_unqueues_pending_resources():
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})

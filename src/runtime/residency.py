@@ -104,6 +104,38 @@ class ResidencyManager:
                 return True
             return record.state == ResourceState.QUEUED
 
+    def prepare_demands(
+        self, keys: list[ResourceKey]
+    ) -> tuple[dict[ResourceKey, Any], list[ResourceKey], dict[ResourceKey, int]]:
+        """Acquire resident hits and promote misses under one residency lock."""
+        values: dict[ResourceKey, Any] = {}
+        pending: list[ResourceKey] = []
+        queue_sizes: dict[ResourceKey, int] = {}
+        transitioned = False
+        with self._condition:
+            for key in dict.fromkeys(keys):
+                record = self._records[key]
+                if record.state == ResourceState.GPU_RESIDENT:
+                    record.demand_active = True
+                    record.used = True
+                    self._refresh_priority(record)
+                    self._resident[key.kind].move_to_end(key)
+                    values[key] = record.gpu_value
+                    continue
+                pending.append(key)
+                if record.state == ResourceState.IN_FLIGHT:
+                    record.demand_active = True
+                    record.used = True
+                    self._refresh_priority(record)
+                    continue
+                if record.state == ResourceState.CPU_ONLY:
+                    record.state = ResourceState.QUEUED
+                    transitioned = True
+                queue_sizes[key] = record.size_bytes
+            if transitioned:
+                self._condition.notify_all()
+        return values, pending, queue_sizes
+
     def prepare_prefetches(
         self,
         requests: list[tuple[ResourceKey, str, float, int, float]],
@@ -400,6 +432,33 @@ class ResidencyManager:
                 )
                 and self._records[key].state == ResourceState.GPU_RESIDENT
             )
+
+    def wait_resident_many(
+        self, keys: list[ResourceKey], timeout: float | None = None
+    ) -> dict[ResourceKey, Any] | None:
+        """Wait once for a demand batch and acquire all completed GPU values."""
+        unique = list(dict.fromkeys(keys))
+        if not unique:
+            return {}
+        with self._condition:
+            ready = self._condition.wait_for(
+                lambda: (
+                    any(self._records[key].state == ResourceState.CPU_ONLY for key in unique)
+                    or all(self._records[key].state == ResourceState.GPU_RESIDENT for key in unique)
+                ),
+                timeout=timeout,
+            )
+            if not ready or any(
+                self._records[key].state != ResourceState.GPU_RESIDENT for key in unique
+            ):
+                return None
+            values = {}
+            for key in unique:
+                record = self._records[key]
+                record.used = True
+                self._resident[key.kind].move_to_end(key)
+                values[key] = record.gpu_value
+            return values
 
     def wait_not_queued(self, key: ResourceKey, timeout: float | None = None) -> bool:
         with self._condition:

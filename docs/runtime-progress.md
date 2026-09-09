@@ -342,6 +342,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 14. Expert eviction 在相同 priority/deadline 下改为 layer-balanced LRU：先从驻留数最多的层
     选择 victim，再按 LRU。确定性两层循环 trace 在 capacity 3 / working-set 4 下，普通全局
     LRU 第二轮 0 hit，而新策略保留每层代表并得到 2 hit；KV eviction 不受影响。
+15. `demand_many` 的 residency hit/state/promotion/get 和完成等待改成两个批量临界区（等待前、
+    等待后），替代每个 expert/KV 各自执行 state/record/mark/get/wait。每层最多约 32 个实际
+    expert 的 queue upsert 与传输批次语义保持不变，但 Python 锁往返不再随资源数线性增加。
 
 ## Next actions
 

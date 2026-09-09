@@ -53,6 +53,11 @@ An upsert on an existing resource merges consumers and refreshes its probability
 deadline. Heap entries carry versions, so old priorities are discarded after an update.
 An in-flight DMA is not preempted.
 
+Actual demand batches inspect hits, promote misses, mark active dependencies, and acquire
+completed GPU payloads with one residency critical section before and after the wait.
+This replaces per-resource state/mark/get/wait lock round trips without changing demand
+priority or the single batched queue upsert.
+
 同一预测窗口产生的 expert 与 KV 请求会先跨层、跨请求汇总，再通过一次队列事务完成
 upsert 和唤醒；这只合并提交开销，不改变每个对象的 probability、deadline 或最终堆顺序。
 预测窗口失效时，consumer cancellation 同样按资源批量合并，并在队列和驻留管理器中各
