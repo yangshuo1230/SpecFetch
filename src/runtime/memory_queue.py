@@ -78,6 +78,7 @@ class MemoryRequestQueue:
         self._heap: list[tuple[float, int, int, int, ResourceKey]] = []
         self._sequence = 0
         self._step = 0
+        self._heap_dirty = False
         self._closed = False
         self._condition = threading.Condition()
 
@@ -107,6 +108,23 @@ class MemoryRequestQueue:
                 request.key,
             ),
         )
+
+    def _rebuild_heap_locked(self) -> None:
+        rebuilt = []
+        for request in self._requests.values():
+            self._sequence += 1
+            rebuilt.append(
+                (
+                    -request.priority(self._step),
+                    request.deadline,
+                    self._sequence,
+                    request.version,
+                    request.key,
+                )
+            )
+        heapq.heapify(rebuilt)
+        self._heap = rebuilt
+        self._heap_dirty = False
 
     def upsert(
         self,
@@ -208,26 +226,14 @@ class MemoryRequestQueue:
         )
 
     def set_step(self, step: int) -> None:
-        """Advance logical time and rebuild priorities because urgency changed."""
+        """Advance logical time; the transfer worker rebuilds urgency lazily."""
         with self._condition:
             if step < self._step:
                 raise ValueError("queue step cannot move backwards")
-            self._step = step
-            rebuilt = []
-            for request in self._requests.values():
-                self._sequence += 1
-                rebuilt.append(
-                    (
-                        -request.priority(self._step),
-                        request.deadline,
-                        self._sequence,
-                        request.version,
-                        request.key,
-                    )
-                )
-            heapq.heapify(rebuilt)
-            self._heap = rebuilt
-            self._condition.notify_all()
+            if step != self._step:
+                self._step = step
+                self._heap_dirty = True
+                self._condition.notify_all()
 
     def cancel(self, key: ResourceKey, consumer: str | None = None) -> bool:
         with self._condition:
@@ -275,6 +281,8 @@ class MemoryRequestQueue:
         return batch[0] if batch else None
 
     def _peek_valid_locked(self) -> MemoryRequest | None:
+        if self._heap_dirty:
+            self._rebuild_heap_locked()
         while self._heap:
             _, _, _, version, key = self._heap[0]
             request = self._requests.get(key)
@@ -347,4 +355,5 @@ class MemoryRequestQueue:
             if discard:
                 self._requests.clear()
                 self._heap.clear()
+                self._heap_dirty = False
             self._condition.notify_all()

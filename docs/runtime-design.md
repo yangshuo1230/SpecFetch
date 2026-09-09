@@ -96,6 +96,10 @@ hashing kind/layer/object/request fields on every decode lookup.
 Logical time still recomputes urgency exactly at every Target layer, but rebuilds the
 queue by constructing one dense heap array and applying linear-time `heapify`. It no
 longer performs one logarithmic `heappush` and version update per queued resource.
+`set_step` itself only publishes the new logical time and marks the heap dirty. The
+transfer worker performs the linear heapify immediately before its next pop, so Target
+compute does O(1) work and multiple layer advances while DMA is busy coalesce into one
+latest-step rebuild.
 Each queued request caches the aggregate predicted-use probability when consumers are
 upserted or cancelled, so urgency-only step rebuilds do not rescan consumer dictionaries.
 All experts consumed by one MoE invocation are released with one residency critical

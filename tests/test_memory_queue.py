@@ -90,6 +90,28 @@ def test_step_rebuild_uses_linear_heapify_without_incremental_push(monkeypatch):
     assert [queue.pop().key for _ in range(3)] == [key(2), key(3), key(1)]
 
 
+def test_multiple_step_updates_coalesce_before_worker_pop(monkeypatch):
+    queue = MemoryRequestQueue()
+    add(queue, 1, probability=0.4, deadline=8)
+    add(queue, 2, probability=0.6, deadline=5)
+    rebuilds = 0
+    rebuild = queue._rebuild_heap_locked
+
+    def counted_rebuild():
+        nonlocal rebuilds
+        rebuilds += 1
+        rebuild()
+
+    monkeypatch.setattr(queue, "_rebuild_heap_locked", counted_rebuild)
+    queue.set_step(1)
+    queue.set_step(2)
+    queue.set_step(4)
+
+    assert rebuilds == 0
+    assert queue.pop().key == key(2)
+    assert rebuilds == 1
+
+
 def test_batch_upsert_merges_consumers_before_worker_observes_queue():
     queue = MemoryRequestQueue()
     queue.upsert_many(

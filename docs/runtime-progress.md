@@ -418,6 +418,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     objects 的批量 H2D，speculative 使用独立 72 MiB byte cap。Qwen expert 为 9 MiB，因此单个
     不可抢占预测批约 8 experts；128 KiB KV chunks 仍可填满 32 objects，不再被统一 8-object
     限制压低吞吐。减少 head-of-line wait 的同时保留小对象批量效率。
+37. `queue.set_step` 从 Target 线程同步 heapify 改为 O(1) 发布 step/dirty flag；transfer worker
+    下一次 pop 前才按最新 step 线性重建。DMA 期间跨过多个 layers 时只重建一次，priority
+    仍以实际 pop 时的 current step 精确计算，heap 工作移出 Target compute 关键路径。
+    1,000 queued resources 下 100,000 次连续 step 发布为 0.648 us/call；旧同步 heapify 基准
+    为 0.681 ms/call，Target 侧约三个数量级下降，惰性 rebuild 由 worker 承担并可合并。
 
 ## Next actions
 
