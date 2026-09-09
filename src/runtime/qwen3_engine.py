@@ -337,7 +337,13 @@ class Qwen3SparseOffloadEngine:
         return True
 
     @torch.inference_mode()
-    def prefill(self, input_ids: torch.Tensor, request_ids: list[str]) -> EngineOutput:
+    def prefill(
+        self,
+        input_ids: torch.Tensor,
+        request_ids: list[str],
+        *,
+        full_logits: bool = False,
+    ) -> EngineOutput:
         if input_ids.ndim != 2 or input_ids.shape[0] != len(request_ids):
             raise ValueError("input IDs must be a uniform batch aligned with request IDs")
         input_ids = input_ids.to(self.device)
@@ -396,7 +402,11 @@ class Qwen3SparseOffloadEngine:
                 request_ids,
             )
         hidden = self.model.model.norm(hidden)
-        logits = self.model.lm_head(hidden)
+        # Serving consumes only the next-token row. At the 4K release workload,
+        # projecting every prefix row to a 152K vocabulary would materialize
+        # roughly 4.6 GiB of logits for batch four despite being immediately
+        # discarded. Full logits remain opt-in for numerical reference tests.
+        logits = self.model.lm_head(hidden if full_logits else hidden[:, -1:])
         resident_groups = [resident_group] if resident_group is not None else []
         return EngineOutput(
             logits,

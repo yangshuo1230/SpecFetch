@@ -9,6 +9,10 @@ intent and waits only on a missing dependency; one transfer worker owns the H2D 
 prefix KV cache 构造不进入主性能门禁；prefill 可以使用独立、直接且高效的实现，不要求
 经过本项目的 speculative queue、稀疏 KV 选择或专家 offload 调度路径。prefill 的职责是
 为两种策略提供数值一致的起始 token 和 cache state，而不是验证本项目的核心假设。
+Serving prefill projects only the final hidden row through the vocabulary head; callers
+that need a full-sequence numerical reference opt in explicitly. For batch 4/context 4K
+and a 152K BF16 vocabulary, this avoids an otherwise discarded roughly 4.64 GiB logits
+tensor and keeps the complete request inside the matched memory budget.
 
 Decode 计时从 Target 和 Draft prefix cache 均准备完成之后、首次 speculative rollout
 之前开始。首次 rollout、后续 Draft refresh、预测准入与撤销、H2D、demand wait 和 Target

@@ -362,6 +362,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 20. Release runner 新增 packed expert-slot 精确 payload 与 model+expert+resident-KV 持久下界；
     allocator cap 提前到模型加载前生效，lazy slots 在 post-init 下界中也不会漏算。输出记录
     base model、expert slots、resident KV 及两阶段 lower bound，为安全扩大 expert cache 提供依据。
+21. Target serving prefill 的 lm_head 只投影最后一个 prefix hidden row；full-sequence logits 改为
+    显式 reference 选项。batch 4/context 4096/151,936 vocab 的 BF16 全 logits 约 4.64 GiB，
+    旧路径生成后只读取末行；新路径消除该临时分配，同时末 token 与 full reference 对齐。
 
 ## Next actions
 

@@ -90,8 +90,11 @@ def test_prefill_matches_transformers_dense_reference():
     assert engine.moe_backend == "torch"
     tokens = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1]])
     expected = reference(tokens, use_cache=False).logits
-    actual = engine.prefill(tokens, ["a", "b"])
+    actual = engine.prefill(tokens, ["a", "b"], full_logits=True)
     assert torch.allclose(actual.logits, expected, atol=2e-5, rtol=2e-5)
+    serving = engine.prefill(tokens, ["c", "d"])
+    assert serving.logits.shape == expected[:, -1:].shape
+    assert torch.allclose(serving.logits, expected[:, -1:], atol=2e-5, rtol=2e-5)
     worker.close()
 
 
