@@ -427,6 +427,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     命中仍每窗口构造约 1,384 个等值 `ResourceKey`。ExpertRegistry 现缓存并返回每个
     `(layer, expert)` 的 canonical key，消除刷新期身份对象构造和初始组合 hash。相同完整
     admission/cancel 微基准降至 19.45 ms/refresh，约减少 15.8%。
+39. Residency speculative lease aggregate 改为增量维护：add/overwrite 对 priority sum 应用
+    delta，cancel 直接减去贡献；仅覆盖/删除当前最早 lease 时重算 min deadline。常见单-consumer
+    expert 不再在 admission 与 cancellation 两侧各扫描一次 lease dict。相同 release-shape
+    admission/cancel 微基准由 19.45 降至 17.25 ms/refresh，再减少约 11.3%。
 
 ## Next actions
 

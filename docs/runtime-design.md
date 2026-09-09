@@ -90,6 +90,9 @@ priority or the single batched queue upsert.
 Each record caches aggregate speculative lease priority/deadline whenever leases change.
 Entering actual demand switches priority to infinity; batched release restores the cached
 values, avoiding a sum/min scan of unchanged consumer leases twice per expert and layer.
+Lease additions and overwrites update the cached probability sum by delta; cancellation
+subtracts the removed contribution. The deadline is rescanned only when an overwritten or
+removed lease owned the current minimum, rather than rescanning every touched resource.
 Immutable resource identities cache their composite hash at construction. Queue,
 residency, lease, and transfer dictionaries reuse that integer instead of repeatedly
 hashing kind/layer/object/request fields on every decode lookup.

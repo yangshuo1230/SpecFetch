@@ -310,6 +310,23 @@ def test_consumer_lease_cancellation_and_demand_scope_recompute_priority():
     assert residency.record(key).deadline == 0
 
 
+def test_incremental_lease_aggregate_handles_overwritten_earliest_deadline():
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    key = resource(0)
+    residency.register_cpu(key, "cpu", 1)
+
+    residency.update_lease(key, 2.0, 2, "a")
+    residency.update_lease(key, 3.0, 5, "b")
+    residency.update_lease(key, 4.0, 7, "a")
+
+    record = residency.record(key)
+    assert record.priority == 7.0
+    assert record.deadline == 5
+    residency.cancel_lease(key, "b")
+    assert record.priority == 4.0
+    assert record.deadline == 7
+
+
 def test_release_many_records_one_backend_use_batch_and_clears_demands():
     class UseTrackingBackend(FakeBackend):
         def __init__(self):

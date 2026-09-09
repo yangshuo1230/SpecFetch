@@ -153,7 +153,6 @@ class ResidencyManager:
         cancellation stays linearizable while a worker claims a popped request.
         """
         queued: list[QueueUpdate] = []
-        refresh: dict[ResourceKey, ResourceRecord] = {}
         transitioned = False
         with self._condition:
             for key, consumer, probability, deadline, miss_cost_ms in requests:
@@ -169,10 +168,9 @@ class ResidencyManager:
                     ResourceState.GPU_RESIDENT,
                     ResourceState.IN_FLIGHT,
                 ):
-                    record.consumer_leases[consumer] = (priority, deadline)
+                    self._set_lease(record, consumer, priority, deadline)
                     record.speculative = True
                     record.used = False
-                    refresh[key] = record
                     if record.state in (
                         ResourceState.GPU_RESIDENT,
                         ResourceState.IN_FLIGHT,
@@ -181,10 +179,9 @@ class ResidencyManager:
                 if record.state == ResourceState.CPU_ONLY:
                     record.state = ResourceState.QUEUED
                     transitioned = True
-                    record.consumer_leases[consumer] = (priority, deadline)
+                    self._set_lease(record, consumer, priority, deadline)
                     record.speculative = True
                     record.used = False
-                    refresh[key] = record
                 queued.append(
                     QueueUpdate(
                         key,
@@ -195,8 +192,6 @@ class ResidencyManager:
                         miss_cost_ms,
                     )
                 )
-            for record in refresh.values():
-                self._refresh_priority(record)
             if transitioned:
                 self._condition.notify_all()
         return queued
@@ -249,6 +244,44 @@ class ResidencyManager:
             (deadline for _, deadline in record.consumer_leases.values()),
             default=0,
         )
+        record.priority = float("inf") if record.demand_active else record.lease_priority
+        record.deadline = record.lease_deadline
+
+    @staticmethod
+    def _set_lease(
+        record: ResourceRecord,
+        consumer: str,
+        priority: float,
+        deadline: int,
+    ) -> None:
+        previous = record.consumer_leases.get(consumer)
+        record.consumer_leases[consumer] = (priority, deadline)
+        record.lease_priority += priority - (previous[0] if previous is not None else 0.0)
+        if previous is None:
+            record.lease_deadline = (
+                deadline
+                if len(record.consumer_leases) == 1
+                else min(record.lease_deadline, deadline)
+            )
+        elif deadline <= record.lease_deadline:
+            record.lease_deadline = deadline
+        elif previous[1] == record.lease_deadline:
+            record.lease_deadline = min(value[1] for value in record.consumer_leases.values())
+        record.priority = float("inf") if record.demand_active else record.lease_priority
+        record.deadline = record.lease_deadline
+
+    @staticmethod
+    def _remove_lease(record: ResourceRecord, consumer: str) -> None:
+        previous = record.consumer_leases.pop(consumer, None)
+        if previous is None:
+            return
+        if not record.consumer_leases:
+            record.lease_priority = 0.0
+            record.lease_deadline = 0
+        else:
+            record.lease_priority -= previous[0]
+            if previous[1] == record.lease_deadline:
+                record.lease_deadline = min(value[1] for value in record.consumer_leases.values())
         record.priority = float("inf") if record.demand_active else record.lease_priority
         record.deadline = record.lease_deadline
 
@@ -374,19 +407,21 @@ class ResidencyManager:
     ) -> None:
         with self._condition:
             record = self._records[key]
-            record.consumer_leases[consumer] = (priority, deadline)
+            self._set_lease(record, consumer, priority, deadline)
             record.speculative = True
             record.used = False
-            self._refresh_priority(record)
 
     def cancel_lease(self, key: ResourceKey, consumer: str | None = None) -> None:
         with self._condition:
             record = self._records[key]
             if consumer is None:
                 record.consumer_leases.clear()
+                record.lease_priority = 0.0
+                record.lease_deadline = 0
+                record.priority = float("inf") if record.demand_active else 0.0
+                record.deadline = 0
             else:
-                record.consumer_leases.pop(consumer, None)
-            self._refresh_priority(record)
+                self._remove_lease(record, consumer)
 
     def cancel_leases(self, cancellations: list[tuple[ResourceKey, str]]) -> None:
         """在一次驻留锁内批量撤销 consumer lease。"""
@@ -397,8 +432,7 @@ class ResidencyManager:
             for key, consumers in grouped.items():
                 record = self._records[key]
                 for consumer in consumers:
-                    record.consumer_leases.pop(consumer, None)
-                self._refresh_priority(record)
+                    self._remove_lease(record, consumer)
 
     def mark_demand(self, key: ResourceKey) -> None:
         with self._condition:
