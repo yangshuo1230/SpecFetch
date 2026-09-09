@@ -89,9 +89,10 @@ residency/cache 起点，避免把资源预取伪装成免费 prefill。
   overwritten in place rather than allocated again. Prefill batches experts within the
   physical-slot bound; compute-stream CUDA events prevent H2D from overwriting a slot
   while a kernel still reads it.
-- 融合 MoE 的 logical-to-physical `expert_map` 先在 CPU 完整构造，再一次性复制到计算
-  设备，取代最多 64 次逐 expert 的 GPU 标量写入；越界逻辑 expert 会在进入 kernel 前
-  明确报错。实际性能收益与 CUDA 数值仍按空闲后的门禁实验确认。
+- 融合 decode 的 logical-to-physical `expert_map` 现在按层持久保存在设备上，由 transfer
+  stream 仅在 packed slot 分配或释放时批量更新；decode 主线程不再为 48 个 MoE 层逐层
+  创建 CPU map 并 H2D。超过 slot 容量的分组 prefill 仍使用精确的单组 map，避免把其他
+  驻留 expert 重复累加。实际性能收益与 CUDA 数值仍按空闲后的门禁实验确认。
 - 可选 vLLM MoE 在正式请求计时前按实际预填充/解码 token 数执行纯 MoE 形状预热；预热
   后驱逐全部专家驻留，并在快照边界清除预热产生的 transfer/residency 计数，使正式请求
   仍从冷专家驻留开始。预热耗时单独报告，可用 `--disable-moe-warmup` 关闭；lazy expert
@@ -136,7 +137,8 @@ residency/cache 起点，避免把资源预取伪装成免费 prefill。
 
 ## Correctness evidence
 
-- 当前 87 项 CPU 测试全部通过；两项 opt-in CUDA 测试已在此前检查点于物理 GPU 2 通过，
+- 当前 90 项 CPU 测试全部通过；三项 opt-in CUDA 测试中，前两项曾在此前检查点于物理
+  GPU 2 通过；新增 persistent expert-map CUDA 集成测试尚待 GPU 空闲后执行。既有测试
   包括 multi-chunk slot-mapped fused MoE、容量 2/3、稀疏/全局 expert map 与事件槽复用。
   最新滚动准入/GQA 改动已通过完整 CPU 测试、Ruff lint/format 与 `git diff --check`；
   CUDA 和实模门禁因四张 GPU 均被外部任务占用而待跑，不能沿用上一提交替代。
