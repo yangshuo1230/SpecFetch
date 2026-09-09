@@ -202,3 +202,17 @@ def test_pop_many_bounds_only_speculative_microbatch():
     batch = demands.pop_many(8, speculative_maximum=3)
     assert len(batch) == 8
     assert all(request.demand for request in batch)
+
+
+def test_pop_many_bounds_speculation_by_bytes_without_throttling_small_objects():
+    large = MemoryRequestQueue()
+    large.upsert_many(
+        [QueueUpdate(key(index), "r0", 0.5, index + 1, 9 * 2**20, 1.0) for index in range(10)]
+    )
+    assert len(large.pop_many(32, speculative_maximum_bytes=72 * 2**20)) == 8
+
+    small = MemoryRequestQueue()
+    small.upsert_many(
+        [QueueUpdate(key(index), "r0", 0.5, index + 1, 128 * 2**10, 1.0) for index in range(32)]
+    )
+    assert len(small.pop_many(32, speculative_maximum_bytes=72 * 2**20)) == 32

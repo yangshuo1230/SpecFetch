@@ -87,8 +87,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speculative-transfer-batch-size",
         type=int,
-        default=8,
-        help="Bound non-preemptible speculative H2D microbatches; demand keeps transfer-batch-size",
+        default=32,
+        help="Object-count cap for speculative H2D; demand keeps transfer-batch-size",
+    )
+    parser.add_argument(
+        "--speculative-transfer-batch-mib",
+        type=float,
+        default=72.0,
+        help="Byte cap for one non-preemptible speculative H2D microbatch",
     )
     parser.add_argument(
         "--speculative-expert-budget",
@@ -175,6 +181,11 @@ def main() -> None:
         raise ValueError("gpu-workspace-reserve-gib must be non-negative")
     if args.maximize_expert_cache and args.gpu_memory_limit_gib is None:
         raise ValueError("maximize-expert-cache requires gpu-memory-limit-gib")
+    if (
+        not math.isfinite(args.speculative_transfer_batch_mib)
+        or args.speculative_transfer_batch_mib <= 0
+    ):
+        raise ValueError("speculative-transfer-batch-mib must be positive")
     require_idle_gpus(1000, 10, {args.physical_gpu_index})
     cuda_device = torch.device(args.device)
     total_gpu_gib = torch.cuda.get_device_properties(cuda_device).total_memory / 2**30
@@ -280,6 +291,7 @@ def main() -> None:
         backend,
         max_batch_size=args.transfer_batch_size,
         max_speculative_batch_size=args.speculative_transfer_batch_size,
+        max_speculative_batch_bytes=int(args.speculative_transfer_batch_mib * 2**20),
     )
     runtime = OffloadRuntime(queue, residency, worker)
     engine = Qwen3SparseOffloadEngine(

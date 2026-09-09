@@ -79,8 +79,9 @@ deadline. Heap entries carry versions, so old priorities are discarded after an 
 An in-flight DMA is not preempted.
 Demand and speculative transfer batching therefore use separate limits. Actual missing
 experts retain the full transfer batch (32 by default), while speculative work uses an
-8-object microbatch by default, bounding one non-preemptible expert batch to about 72 MiB
-for Qwen3-30B-A3B instead of 288 MiB. Both limits remain configurable.
+independent 72 MiB byte cap plus the 32-object ceiling. This yields about eight 9 MiB
+Qwen3 experts per non-preemptible batch while still allowing 32 small KV chunks; both
+limits remain configurable.
 
 Actual demand batches inspect hits, promote misses, mark active dependencies, and acquire
 completed GPU payloads with one residency critical section before and after the wait.

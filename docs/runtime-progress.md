@@ -415,8 +415,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     原位 append 当前 K/V 并完成 native GQA decode attention，替代两个 `copy_` kernels + SDPA；
     torch fallback 保持原路径，JSON 记录 resolved `flash_kvcache`/`sdpa`，CUDA opt-in 对照 SDPA。
 36. Transfer worker 将 demand batch 与 speculative microbatch 分离：真实 miss 继续使用最多 32
-    objects 的批量 H2D，speculative 默认最多 8。Qwen expert 为 9 MiB，因此单个不可抢占预测批
-    从最多约 288 MiB 限制到 72 MiB，减少新 demand 落在长预测 DMA 后方的 head-of-line wait。
+    objects 的批量 H2D，speculative 使用独立 72 MiB byte cap。Qwen expert 为 9 MiB，因此单个
+    不可抢占预测批约 8 experts；128 KiB KV chunks 仍可填满 32 objects，不再被统一 8-object
+    限制压低吞吐。减少 head-of-line wait 的同时保留小对象批量效率。
 
 ## Next actions
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import time
 from pathlib import Path
@@ -51,7 +52,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expert-cache-slots", type=int, default=64)
     parser.add_argument("--kv-cache-slots", type=int, default=512)
     parser.add_argument("--transfer-batch-size", type=int, default=32)
-    parser.add_argument("--speculative-transfer-batch-size", type=int, default=8)
+    parser.add_argument("--speculative-transfer-batch-size", type=int, default=32)
+    parser.add_argument("--speculative-transfer-batch-mib", type=float, default=72.0)
     parser.add_argument(
         "--speculative-expert-budget",
         type=int,
@@ -87,6 +89,11 @@ def main() -> None:
     require_idle_gpus(1000, 10, {args.physical_gpu_index})
     if args.request_count <= 0:
         raise ValueError("request-count must be positive")
+    if (
+        not math.isfinite(args.speculative_transfer_batch_mib)
+        or args.speculative_transfer_batch_mib <= 0
+    ):
+        raise ValueError("speculative-transfer-batch-mib must be positive")
     if args.prefetch_horizons > args.lookahead:
         raise ValueError("prefetch-horizons cannot exceed lookahead")
     config = RuntimeConfig(
@@ -141,6 +148,7 @@ def main() -> None:
         backend,
         max_batch_size=args.transfer_batch_size,
         max_speculative_batch_size=args.speculative_transfer_batch_size,
+        max_speculative_batch_bytes=int(args.speculative_transfer_batch_mib * 2**20),
     )
     runtime = OffloadRuntime(queue, residency, worker)
     engine = Qwen3SparseOffloadEngine(

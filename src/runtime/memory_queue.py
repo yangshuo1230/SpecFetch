@@ -297,12 +297,15 @@ class MemoryRequestQueue:
         block: bool = False,
         *,
         speculative_maximum: int | None = None,
+        speculative_maximum_bytes: int | None = None,
     ) -> list[MemoryRequest]:
         """Pop one same-class transfer batch without mixing demand and speculation."""
         if maximum <= 0:
             raise ValueError("maximum batch size must be positive")
         if speculative_maximum is not None and speculative_maximum <= 0:
             raise ValueError("speculative maximum batch size must be positive")
+        if speculative_maximum_bytes is not None and speculative_maximum_bytes <= 0:
+            raise ValueError("speculative maximum batch bytes must be positive")
         with self._condition:
             while True:
                 first = self._pop_valid_locked()
@@ -313,11 +316,19 @@ class MemoryRequestQueue:
                         if first.demand or speculative_maximum is None
                         else min(maximum, speculative_maximum)
                     )
+                    batch_bytes = first.size_bytes
                     while len(requests) < limit:
                         next_request = self._peek_valid_locked()
                         if next_request is None or next_request.demand != first.demand:
                             break
+                        if (
+                            not first.demand
+                            and speculative_maximum_bytes is not None
+                            and batch_bytes + next_request.size_bytes > speculative_maximum_bytes
+                        ):
+                            break
                         requests.append(self._pop_valid_locked())
+                        batch_bytes += next_request.size_bytes
                     return requests
                 if not block or self._closed:
                     return []
