@@ -10,6 +10,7 @@ from src.runtime.expert import (
     ExpertWeights,
     OffloadedExpertExecutor,
     optional_vllm_fused_moe,
+    optional_vllm_fused_topk,
 )
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager
@@ -78,12 +79,14 @@ def test_cuda_batched_packed_vllm_fused_moe_matches_torch(monkeypatch):
     runtime = OffloadRuntime(queue, residency, worker)
     registry = ExpertRegistry(Source(), residency)
     fused = optional_vllm_fused_moe("vllm", backend)
+    fused_topk = optional_vllm_fused_topk("vllm", backend)
     executor = OffloadedExpertExecutor(
         runtime,
         registry,
         top_k=2,
         vectorized_token_limit=0,
         fused_moe=fused,
+        fused_topk=fused_topk,
     )
     worker.start()
     hidden = torch.randn(3, 128, dtype=torch.bfloat16, device="cuda:0")

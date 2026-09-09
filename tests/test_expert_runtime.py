@@ -91,6 +91,41 @@ def test_grouped_and_vectorized_executors_match():
     second_worker.close()
 
 
+def test_fused_router_matches_reference_topk_and_normalization():
+    experts = [make_expert(0), make_expert(1), make_expert(2)]
+    hidden = torch.randn(2, 4, generator=torch.Generator().manual_seed(71))
+    logits = torch.tensor([[3.0, 2.0, 0.0], [0.0, 2.0, 3.0]])
+    reference_runtime, reference_registry, reference_worker = runtime_with(experts)
+    fused_runtime, fused_registry, fused_worker = runtime_with(experts)
+    calls = []
+
+    def fake_fused_topk(**kwargs):
+        calls.append(kwargs)
+        weights = torch.softmax(kwargs["gating_output"].float(), dim=-1)
+        weights, selected = weights.topk(kwargs["topk"], dim=-1)
+        if kwargs["renormalize"]:
+            weights /= weights.sum(dim=-1, keepdim=True)
+        token_expert_indices = torch.zeros_like(selected, dtype=torch.int32)
+        return weights, selected, token_expert_indices
+
+    reference = OffloadedExpertExecutor(reference_runtime, reference_registry, top_k=2)
+    fused = OffloadedExpertExecutor(
+        fused_runtime,
+        fused_registry,
+        top_k=2,
+        fused_topk=fake_fused_topk,
+    )
+
+    expected = reference(hidden, logits, layer=0, request_ids=["a", "b"])
+    actual = fused(hidden, logits, layer=0, request_ids=["a", "b"])
+
+    assert torch.allclose(actual, expected, atol=1e-5)
+    assert len(calls) == 1
+    assert calls[0]["renormalize"] is True
+    reference_worker.close()
+    fused_worker.close()
+
+
 def test_expert_demand_planning_requires_cpu_route_ids():
     experts = [make_expert(0), make_expert(1), make_expert(2)]
     runtime, registry, worker = runtime_with(experts)

@@ -336,6 +336,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     或 rollout Draft：完整 KV 已驻留且没有 expert speculative consumer，此时所有 Draft 输出
     都是死数据。JSON 新增 resolved `draft_signals_enabled` 和
     `prediction_prefetch_enabled`，避免把该策略误记为 speculative。
+13. vLLM MoE backend 现同时接入 vLLM fused router kernel，将每层的 FP32 softmax、Top-K、
+    Top-K sum/divide 归一化合并；torch backend 继续保留显式 reference 路径。CPU profile 中
+    独立 softmax 是 resident 小模型最重 router 算子，正式 GPU 收益仍由后续 matched run 验证。
 
 ## Next actions
 

@@ -206,6 +206,7 @@ class OffloadedExpertExecutor:
         miss_cost_ms: float = 0.5,
         vectorized_token_limit: int = 8,
         fused_moe: Callable[..., torch.Tensor] | None = None,
+        fused_topk: Callable[..., tuple[torch.Tensor, ...]] | None = None,
     ) -> None:
         self.runtime = runtime
         self.registry = registry
@@ -213,6 +214,7 @@ class OffloadedExpertExecutor:
         self.miss_cost_ms = miss_cost_ms
         self.vectorized_token_limit = vectorized_token_limit
         self.fused_moe = fused_moe
+        self.fused_topk = fused_topk
 
     def _load(
         self,
@@ -366,9 +368,18 @@ class OffloadedExpertExecutor:
             raise ValueError("hidden states and router logits must be two-dimensional")
         if len(hidden_states) != len(request_ids) or len(hidden_states) != len(router_logits):
             raise ValueError("tokens, router rows, and request IDs must align")
-        routing = torch.softmax(router_logits.float(), dim=-1)
-        routing, selected = routing.topk(min(self.top_k, routing.shape[-1]), dim=-1)
-        routing = (routing / routing.sum(dim=-1, keepdim=True)).to(hidden_states.dtype)
+        top_k = min(self.top_k, router_logits.shape[-1])
+        if self.fused_topk is not None:
+            routing, selected, *_ = self.fused_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=True,
+            )
+        else:
+            routing = torch.softmax(router_logits.float(), dim=-1)
+            routing, selected = routing.topk(top_k, dim=-1)
+            routing = (routing / routing.sum(dim=-1, keepdim=True)).to(hidden_states.dtype)
         # Demand planning needs route identities on the host. Snapshot the tiny
         # Top-K matrix once per layer, then perform unique/consumer discovery on
         # CPU instead of synchronizing once for unique() and again for every
@@ -442,3 +453,26 @@ def optional_vllm_fused_moe(mode: str, backend) -> Callable[..., torch.Tensor] |
     envs.VLLM_MOE_USE_ACEXT = False
     envs.VLLM_USE_DEEP_GEMM = False
     return fused_experts
+
+
+def optional_vllm_fused_topk(mode: str, backend) -> Callable[..., tuple[torch.Tensor, ...]] | None:
+    """Resolve vLLM's fused router softmax/Top-K kernel with the MoE backend."""
+    if mode not in {"auto", "torch", "vllm"}:
+        raise ValueError("MoE backend must be auto, torch, or vllm")
+    if mode == "torch":
+        return None
+    if not (
+        hasattr(backend, "packed_expert_weights")
+        and hasattr(backend, "expert_map")
+        and hasattr(backend, "expert_slot")
+    ):
+        if mode == "vllm":
+            raise RuntimeError("vLLM fused MoE requires a packed expert backend")
+        return None
+    try:
+        from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+    except Exception:
+        if mode == "vllm":
+            raise
+        return None
+    return fused_topk

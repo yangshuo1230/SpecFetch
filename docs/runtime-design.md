@@ -63,6 +63,9 @@ Target router 的 GPU Top-K route IDs 每层只复制为一个很小的 CPU snap
 `where` 和逐标量同步；原始 GPU selected/routing tensor 仍直接进入 fused MoE。
 Preloaded expert registry entries use a read-only lock-free lookup. Within one predicted
 layer/horizon, overlapping routes across requests also share one registry resolution.
+The vLLM MoE backend also uses its fused router kernel, combining FP32 softmax, Top-K,
+and Top-K renormalization instead of launching each PyTorch operation separately. The
+torch backend retains the explicit reference path.
 
 ## Sparse KV stopping
 
