@@ -208,9 +208,9 @@ def expert_prediction_requests(
     queued = []
     requests = []
     keys: dict[int, ResourceKey] = {}
-    for row, request_id in zip(probabilities, request_ids):
-        values, experts = row.topk(min(top_k, row.numel()))
-        for probability, expert in zip(values.tolist(), experts.tolist()):
+    values, experts = probabilities.topk(min(top_k, probabilities.shape[1]), dim=1)
+    for row_values, row_experts, request_id in zip(values.tolist(), experts.tolist(), request_ids):
+        for probability, expert in zip(row_values, row_experts):
             key = keys.get(expert)
             if key is None:
                 key = registry.ensure(layer, expert)

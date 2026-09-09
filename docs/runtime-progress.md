@@ -354,6 +354,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 18. Layer-balanced expert eviction 在层内新增 actual-demand frequency tie-break，再以 LRU
     决胜；稳定高频 route 不会因一次冷 expert 到达而被逐出，且纯 speculative arrival 不增加
     frequency。定向 trace 验证了高频但 LRU 更旧的 expert 被保留。
+19. Draft expert probes 从 48 个逐层小 GEMM 合并为一次 batched GEMM，probe 参数 stack 首次
+    构建后缓存；每层 predicted expert route 也从逐 request Top-K 改为整个 batch 一次二维
+    Top-K/tolist。所有 layer/horizon/request 输出布局均有逐层 reference 对照测试。
 
 ## Next actions
 

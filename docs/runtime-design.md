@@ -111,7 +111,9 @@ Prediction admission likewise bypasses per-request KV retain/prefetch bookkeepin
 mode; expert prediction requests still use the unified queue and normal consumer leases.
 Across all modes, mapped attention rows are transferred once per horizon and expert
 features once per complete rollout, rather than one D2H synchronization per draft layer.
-Each expert probe evaluates every horizon as one CPU batch.
+All target-layer expert probes evaluate every horizon with one cached-parameter batched
+CPU GEMM. Predicted routes use one matrix Top-K per target layer rather than one call per
+request row.
 When resident KV is paired with demand-only expert loading (or no expert probes), decode
 has no consumer for any Draft signal. The release runner therefore does not load or run
 the Draft model for that policy and records the resolved signal/prefetch state explicitly.

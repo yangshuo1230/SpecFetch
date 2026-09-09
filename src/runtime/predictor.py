@@ -35,6 +35,9 @@ class ProbeEntry:
 class ExpertProbeBank:
     def __init__(self, entries: dict[int, ProbeEntry]) -> None:
         self.entries = entries
+        self._parameter_batches: dict[
+            tuple[int, ...], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = {}
 
     def predict(self, target_layer: int, hidden_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
         entry = self.entries[target_layer]
@@ -46,6 +49,32 @@ class ExpertProbeBank:
         entry = self.entries[target_layer]
         scores = predict_probe(entry.probe, features)
         return torch.sigmoid(scores)
+
+    def predict_feature_batch(
+        self,
+        target_layers: list[int],
+        features: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate aligned layers as one batched probe GEMM.
+
+        ``features`` has shape ``(target_layers, samples, hidden_size)``.
+        """
+        key = tuple(target_layers)
+        if features.ndim != 3 or len(features) != len(key):
+            raise ValueError("batched probe features must align with target layers")
+        parameters = self._parameter_batches.get(key)
+        if parameters is None:
+            probes = [self.entries[layer].probe for layer in key]
+            parameters = (
+                torch.stack([probe["x_mean"].squeeze(0) for probe in probes])[:, None],
+                torch.stack([probe["x_scale"].squeeze(0) for probe in probes])[:, None],
+                torch.stack([probe["y_mean"].squeeze(0) for probe in probes])[:, None],
+                torch.stack([probe["coef"] for probe in probes]),
+            )
+            self._parameter_batches[key] = parameters
+        x_mean, x_scale, y_mean, coefficients = parameters
+        normalized = (features.float() - x_mean) / x_scale
+        return torch.sigmoid(torch.bmm(normalized, coefficients) + y_mean)
 
     def save(self, path: str | Path) -> None:
         payload = {
@@ -253,12 +282,17 @@ class DraftSignalProvider:
                 .float()
                 .cpu()
             )
-            for target_layer, feature_layer in enumerate(target_feature_layers):
-                features = cpu_features[:, feature_offsets[feature_layer]]
-                probabilities = self.probe_bank.predict_features(
-                    target_layer,
-                    features.flatten(0, 1),
-                ).unflatten(0, (len(outputs), len(self.request_ids)))
-                for horizon, values in zip(horizons, probabilities):
+            target_features = torch.stack(
+                [
+                    cpu_features[:, feature_offsets[feature_layer]].flatten(0, 1)
+                    for feature_layer in target_feature_layers
+                ]
+            )
+            probabilities = self.probe_bank.predict_feature_batch(
+                list(range(target_layers)),
+                target_features,
+            ).unflatten(1, (len(outputs), len(self.request_ids)))
+            for target_layer, layer_probabilities in enumerate(probabilities):
+                for horizon, values in zip(horizons, layer_probabilities):
                     horizon.experts[target_layer] = values
         return DraftPredictionPlan(horizons, torch.stack(proposed, dim=1).detach().cpu())
