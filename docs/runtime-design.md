@@ -67,6 +67,9 @@ priority or the single batched queue upsert.
 Each record caches aggregate speculative lease priority/deadline whenever leases change.
 Entering actual demand switches priority to infinity; batched release restores the cached
 values, avoiding a sum/min scan of unchanged consumer leases twice per expert and layer.
+Immutable resource identities cache their composite hash at construction. Queue,
+residency, lease, and transfer dictionaries reuse that integer instead of repeatedly
+hashing kind/layer/object/request fields on every decode lookup.
 All experts consumed by one MoE invocation are released with one residency critical
 section. CUDA packed slots share one compute-stream completion event for that invocation,
 rather than allocating and recording an equivalent event for every expert.

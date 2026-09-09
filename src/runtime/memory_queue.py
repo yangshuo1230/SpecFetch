@@ -24,6 +24,17 @@ class ResourceKey:
     layer: int
     object_id: int
     request_id: str = ""
+    _cached_hash: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_cached_hash",
+            hash((self.kind, self.layer, self.object_id, self.request_id)),
+        )
+
+    def __hash__(self) -> int:
+        return self._cached_hash
 
 
 @dataclass

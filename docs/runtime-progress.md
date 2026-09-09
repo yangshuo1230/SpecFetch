@@ -378,6 +378,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     6.2 ms/token），其中重复 lease `sum/min` 是最大 Python 项。现改为仅在 lease 变化时缓存
     aggregate priority/deadline；demand enter/release 只切换 infinity 与缓存值。相同微基准降至
     77.7 us/layer、3.73 ms/48 layers，约减少 39.7%。
+26. 同一 profile 的最大剩余 Python 项是 immutable `ResourceKey` 的重复组合 hash；现于 key
+    构造时缓存，queue/residency/transfer 的所有 dict/set lookup 复用该值，并保留完整相等性。
+    相同 32-expert hit 微基准进一步由 77.7 降至 46.9 us/layer（48 层 3.73→2.25 ms），
+    再减少约 39.6%。
 
 ## Next actions
 

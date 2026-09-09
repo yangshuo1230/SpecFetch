@@ -30,6 +30,17 @@ def resource(index, kind=ResourceKind.EXPERT):
     return ResourceKey(kind, layer=0, object_id=index)
 
 
+def test_resource_key_caches_stable_identity_hash():
+    first = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=7, request_id="r0")
+    same = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=7, request_id="r0")
+    different = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=8, request_id="r0")
+
+    assert hash(first) == first._cached_hash == hash(same)
+    assert first == same
+    assert first != different
+    assert {first: "value"}[same] == "value"
+
+
 def build_runtime(capacity=2, delay=0.0):
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: capacity, ResourceKind.KV: capacity})
