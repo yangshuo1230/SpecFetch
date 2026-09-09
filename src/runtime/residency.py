@@ -36,6 +36,8 @@ class ResourceRecord:
     demand_active: bool = False
     demand_count: int = 0
     consumer_leases: dict[str, tuple[float, int]] = field(default_factory=dict)
+    lease_priority: float = 0.0
+    lease_deadline: int = 0
 
 
 class ResidencyManager:
@@ -120,7 +122,7 @@ class ResidencyManager:
                 if record.state == ResourceState.GPU_RESIDENT:
                     record.demand_active = True
                     record.used = True
-                    self._refresh_priority(record)
+                    record.priority = float("inf")
                     self._resident[key.kind].move_to_end(key)
                     values[key] = record.gpu_value
                     continue
@@ -128,7 +130,7 @@ class ResidencyManager:
                 if record.state == ResourceState.IN_FLIGHT:
                     record.demand_active = True
                     record.used = True
-                    self._refresh_priority(record)
+                    record.priority = float("inf")
                     continue
                 if record.state == ResourceState.CPU_ONLY:
                     record.state = ResourceState.QUEUED
@@ -242,14 +244,13 @@ class ResidencyManager:
 
     @staticmethod
     def _refresh_priority(record: ResourceRecord) -> None:
-        if record.demand_active:
-            record.priority = float("inf")
-        else:
-            record.priority = sum(priority for priority, _ in record.consumer_leases.values())
-        record.deadline = min(
+        record.lease_priority = sum(priority for priority, _ in record.consumer_leases.values())
+        record.lease_deadline = min(
             (deadline for _, deadline in record.consumer_leases.values()),
             default=0,
         )
+        record.priority = float("inf") if record.demand_active else record.lease_priority
+        record.deadline = record.lease_deadline
 
     def _evict_victim(self, kind: ResourceKind, victim: ResourceKey) -> None:
         lru = self._resident[kind]
@@ -404,7 +405,7 @@ class ResidencyManager:
             record = self._records[key]
             record.demand_active = True
             record.used = True
-            self._refresh_priority(record)
+            record.priority = float("inf")
 
     def release(self, key: ResourceKey) -> None:
         self.release_many([key])
@@ -415,7 +416,8 @@ class ResidencyManager:
             for key in dict.fromkeys(keys):
                 record = self._records[key]
                 record.demand_active = False
-                self._refresh_priority(record)
+                record.priority = record.lease_priority
+                record.deadline = record.lease_deadline
 
     def evict(self, key: ResourceKey) -> bool:
         with self._condition:

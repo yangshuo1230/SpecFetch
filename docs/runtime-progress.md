@@ -374,6 +374,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 24. Packed expert eviction 的 device map `=-1` 不再逐 expert 发射标量 kernel；host ownership
     立即删除，device removals 与下一 transfer batch assignments 合成每 layer 一次 indexed
     update。同一 MoE batch 共享的 completion event 在 transfer stream 也只 wait 一次。
+25. 32-expert 全命中层的 CPU 微基准中，batched demand+release 为 128.8 us（48 层约
+    6.2 ms/token），其中重复 lease `sum/min` 是最大 Python 项。现改为仅在 lease 变化时缓存
+    aggregate priority/deadline；demand enter/release 只切换 infinity 与缓存值。相同微基准降至
+    77.7 us/layer、3.73 ms/48 layers，约减少 39.7%。
 
 ## Next actions
 

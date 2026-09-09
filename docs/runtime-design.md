@@ -64,6 +64,9 @@ Actual demand batches inspect hits, promote misses, mark active dependencies, an
 completed GPU payloads with one residency critical section before and after the wait.
 This replaces per-resource state/mark/get/wait lock round trips without changing demand
 priority or the single batched queue upsert.
+Each record caches aggregate speculative lease priority/deadline whenever leases change.
+Entering actual demand switches priority to infinity; batched release restores the cached
+values, avoiding a sum/min scan of unchanged consumer leases twice per expert and layer.
 All experts consumed by one MoE invocation are released with one residency critical
 section. CUDA packed slots share one compute-stream completion event for that invocation,
 rather than allocating and recording an equivalent event for every expert.

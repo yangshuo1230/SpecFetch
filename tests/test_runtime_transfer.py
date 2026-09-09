@@ -293,8 +293,10 @@ def test_consumer_lease_cancellation_and_demand_scope_recompute_priority():
     assert residency.record(key).priority == 3
     residency.mark_demand(key)
     assert residency.record(key).priority == float("inf")
+    residency.cancel_lease(key, "b")
     residency.release(key)
-    assert residency.record(key).priority == 3
+    assert residency.record(key).priority == 0
+    assert residency.record(key).deadline == 0
 
 
 def test_release_many_records_one_backend_use_batch_and_clears_demands():
