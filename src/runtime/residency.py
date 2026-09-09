@@ -34,6 +34,7 @@ class ResourceRecord:
     speculative: bool = False
     used: bool = False
     demand_active: bool = False
+    demand_count: int = 0
     consumer_leases: dict[str, tuple[float, int]] = field(default_factory=dict)
 
 
@@ -115,6 +116,7 @@ class ResidencyManager:
         with self._condition:
             for key in dict.fromkeys(keys):
                 record = self._records[key]
+                record.demand_count += 1
                 if record.state == ResourceState.GPU_RESIDENT:
                     record.demand_active = True
                     record.used = True
@@ -215,7 +217,7 @@ class ResidencyManager:
     ) -> ResourceKey | None:
         lru = self._resident[kind]
         victim = None
-        victim_rank: tuple[float, int, int, int] | None = None
+        victim_rank: tuple[float, int, int, int, int] | None = None
         layer_counts = self._resident_layer_counts[kind]
         for lru_order, key in enumerate(lru):
             record = self._records[key]
@@ -226,7 +228,13 @@ class ResidencyManager:
             # the cache. Among equally urgent experts, evict from the most
             # represented layer first so every layer retains reusable entries.
             layer_balance = -layer_counts.get(key.layer, 0) if kind == ResourceKind.EXPERT else 0
-            rank = (record.priority, -record.deadline, layer_balance, lru_order)
+            rank = (
+                record.priority,
+                -record.deadline,
+                layer_balance,
+                record.demand_count,
+                lru_order,
+            )
             if victim_rank is None or rank < victim_rank:
                 victim = key
                 victim_rank = rank

@@ -81,6 +81,9 @@ For equal prediction priority and deadline, expert eviction is layer-balanced be
 LRU tie-break: entries are removed from the most represented layer. This avoids global
 LRU's zero-hit cyclic-scan failure when every decode token revisits all model layers but
 the expert working set is larger than the cache. KV eviction remains priority/deadline/LRU.
+Within the selected layer, lower observed actual-demand frequency is evicted before LRU.
+Only true demand increments this frequency, so unused speculative arrivals cannot displace
+stable cross-token expert routes merely by being recent.
 
 ## Sparse KV stopping
 

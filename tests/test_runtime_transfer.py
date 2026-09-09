@@ -92,6 +92,33 @@ def test_expert_eviction_preserves_cross_token_hits_across_layers():
     assert {key.layer for key in residency.resident_keys(ResourceKind.EXPERT)} == {0, 1}
 
 
+def test_expert_eviction_retains_frequent_route_within_layer():
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    hot, cold, replacement = (resource(index) for index in range(3))
+    for key in (hot, cold, replacement):
+        residency.register_cpu(key, f"cpu:{key.object_id}", 1)
+
+    def demand(key):
+        values, pending, _ = residency.prepare_demands([key])
+        if pending:
+            assert residency.begin_transfer(key, demand=True)
+            residency.complete_transfer(key, f"gpu:{key.object_id}")
+        else:
+            assert key in values
+        residency.release(key)
+
+    demand(hot)
+    for _ in range(3):
+        demand(hot)
+    demand(cold)
+    # hot is older in LRU order here, but its observed demand frequency is higher.
+    demand(replacement)
+
+    assert residency.state(hot) == ResourceState.GPU_RESIDENT
+    assert residency.state(cold) == ResourceState.CPU_ONLY
+    assert residency.record(hot).demand_count == 4
+
+
 def test_demand_promotes_queued_resource():
     runtime, _, worker, backend = build_runtime(delay=0.005)
     runtime.prefetch(resource(0), consumer="r0", probability=0.9, deadline=1, miss_cost_ms=1)
