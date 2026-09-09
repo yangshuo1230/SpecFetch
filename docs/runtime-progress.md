@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-09 02:50 UTC
+Updated: 2026-09-09 02:58 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -52,7 +52,7 @@ residency/cache 起点，避免把资源预取伪装成免费 prefill。
 | 4. Prediction | Stateful four-token Draft rollout, KV ranking, expert probes, hybrid online stop | Complete |
 | 5. Serving | Variable-length admission, request removal/backfill, request-level TTFT/latency | Complete; full-model run passed |
 | 6. Optimization | Decode-only pipeline: packed slots, coalesced queue/H2D, fused kernels, C++/CUDA hot paths | In progress |
-| 7. Evaluation | Causality/quality plus matched 512/4K decode; SpecFetch throughput >=1.50x vLLM offload | In progress; legacy end-to-end baselines complete, decode-only baseline pending |
+| 7. Evaluation | Causality/quality plus matched 512/4K decode; SpecFetch throughput >=1.50x vLLM offload | In progress; decode-only runners complete, matched GPU measurements pending |
 | 8. Release | Final regression, progress/results update, merge to `main`, push | Pending |
 
 ## Implemented
@@ -287,37 +287,34 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 
 ## Known gaps
 
-1. 当前 vLLM baseline 只记录总请求时间，尚无严格匹配的 decode-only wall time/TPOT；
-   旧的 3.38x（c512）和 14.79x（4K）均为历史端到端差距，不能用于新门禁。
-2. 现有 c512 的 6.600 s `Target decode` 漏计被归入 `draft_prefill_seconds` 的首次 rollout；
-   runner 必须拆分 prefix-cache 构造与首次 rollout，并用至少 64、优先 128 个输出 token
-   测量 steady state。
-3. 4K H1 预测覆盖远低于提交规模并增加 demand wait；需要依据批量 KV 复测重新决定
+1. decode-only runner 已实现但尚未在空闲 GPU 上实测：SpecFetch 在 Target/Draft prefix
+   cache 就绪后、首次 rollout 前启动 batch wall timer；vLLM 逐步驱动 offline engine，在
+   整批每个请求恰好返回首 token 后启动 timer。两侧默认总输出 65 token，即计时后续
+   64 token/request，并直接报告相同的 wall、TPOT、token 数和 tokens/s 字段。
+2. 4K H1 预测覆盖远低于提交规模并增加 demand wait；需要依据批量 KV 复测重新决定
    长上下文的 admission budget/背压，不能沿用 c512 的无界候选提交。
-4. Python queue/residency、逐层控制流和标量同步仍可能主导 TPOT；最新 GPU profile 后需要
+3. Python queue/residency、逐层控制流和标量同步仍可能主导 TPOT；最新 GPU profile 后需要
    明确 C++/CUDA 下沉边界，不能把 Python reference 当作最终性能实现。
-5. 尚无任何配置满足 `SpecFetch decode tokens/s / vLLM decode tokens/s >= 1.50`；在匹配
+4. 尚无任何配置满足 `SpecFetch decode tokens/s / vLLM decode tokens/s >= 1.50`；在匹配
    decode-only 基线建立前，不得用 Target-kernel 子计时或端到端旧结果代替该门禁。
-6. vLLM and the custom adapter use different BF16 attention/MoE kernel orders. Their
+5. vLLM and the custom adapter use different BF16 attention/MoE kernel orders. Their
    first six generated tokens match in the short test, after which rounding changes the
    greedy path. Quality must be assessed statistically, not by requiring bit identity to
    vLLM.
 
 ## Next actions
 
-1. 先改造 SpecFetch 与 vLLM runner 的计时：独立记录 prefix prefill、首次 rollout、后续
-   refresh 和匹配的 decode wall time；固定输出至少 64 token、优先 128 token，忽略 EOS。
-2. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
+1. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
    GQA、跨请求 KV demand 和 layer lookahead 2，并建立相同显存约束的 vLLM decode-only
    baseline。
-3. c512 通过后重跑 batch-4/context-4K 的长输出 demand/speculative，核对 token 因果一致、
+2. c512 通过后重跑 batch-4/context-4K 的长输出 demand/speculative，核对 token 因果一致、
    TPOT、最大单批候选、dropped speculative、H2D overlap 与 demand wait。
-4. 用 CUDA profiler 分解 Target kernel、Draft、Python 调度、queue/residency、同步和 H2D；
+3. 用 CUDA profiler 分解 Target kernel、Draft、Python 调度、queue/residency、同步和 H2D；
    对主导路径实施架构优化，必要时迁移到 C++/CUDA、融合 kernel 或 CUDA Graph，而不是
    继续堆叠 Python 微优化。
-5. 若滚动窗口仍提交过量，再扫描 expert/KV 唯一资源预算；只保留降低 decode TPOT 的配置，
+4. 若滚动窗口仍提交过量，再扫描 expert/KV 唯一资源预算；只保留降低 decode TPOT 的配置，
    未经 GPU 验证不设为默认。
-6. 更新本文档并执行最终审计；所有正确性与 decode 性能门禁结算后再把 feature 分支合并到
+5. 更新本文档并执行最终审计；所有正确性与 decode 性能门禁结算后再把 feature 分支合并到
    `main`。每个预先声明的主工作负载都必须达到 >=1.50x vLLM decode throughput；不能以
    单一有利 workload、微基准、Target-kernel 子计时或非匹配口径替代发布门禁。
 
@@ -335,6 +332,8 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
   它不能替代本检查点的待跑 GPU 门禁。
 - 旧 JSON 的 `request_seconds`、端到端 throughput 和首次 rollout 归属仍按旧 runner 定义；
   它们作为历史记录保留，但不满足新的 decode-only 发布口径。
+- decode-only runner 改造提交 `e46565f` 已通过 89 项 CPU 回归（另 2 项 CUDA 跳过）和
+  ruff；这只验证计时状态机与字段口径，尚未产生 GPU 性能证据。
 
 ### CPU 热路径微基准
 
