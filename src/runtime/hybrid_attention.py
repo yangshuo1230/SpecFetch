@@ -40,18 +40,24 @@ def marginal_partition_mass(previous_lse: torch.Tensor, chunk_lse: torch.Tensor)
     return torch.exp(chunk_lse - combined)
 
 
+def _gqa_logits(query: torch.Tensor, key: torch.Tensor, scale: float | None = None) -> torch.Tensor:
+    if query.ndim != 2 or key.ndim != 3:
+        raise ValueError("query must be (heads, dim), key must be (tokens, kv_heads, dim)")
+    heads, dimension = query.shape
+    kv_heads = key.shape[1]
+    if key.shape[-1] != dimension or heads % kv_heads:
+        raise ValueError("incompatible query and KV head shapes")
+    groups = heads // kv_heads
+    grouped_query = query.float().reshape(kv_heads, groups, dimension)
+    logits = torch.einsum("kgd,tkd->kgt", grouped_query, key.float())
+    return logits.reshape(heads, len(key)) * (scale or dimension**-0.5)
+
+
 def chunk_logsumexp(
     query: torch.Tensor, key: torch.Tensor, scale: float | None = None
 ) -> torch.Tensor:
     """Per-head log partition for one GQA KV chunk and one query token."""
-    if query.ndim != 2 or key.ndim != 3:
-        raise ValueError("query must be (heads, dim), key must be (tokens, kv_heads, dim)")
-    heads, dimension = query.shape
-    if key.shape[-1] != dimension or heads % key.shape[1]:
-        raise ValueError("incompatible query and KV head shapes")
-    repeated_key = key.repeat_interleave(heads // key.shape[1], dim=1)
-    logits = torch.einsum("hd,thd->ht", query.float(), repeated_key.float())
-    return torch.logsumexp(logits * (scale or dimension**-0.5), dim=-1)
+    return torch.logsumexp(_gqa_logits(query, key, scale), dim=-1)
 
 
 def mean_target_marginal(previous_lse: torch.Tensor, chunk_lse: torch.Tensor) -> float:
@@ -64,6 +70,23 @@ def update_partition(previous_lse: torch.Tensor, chunk_lse: torch.Tensor) -> tor
     if previous_lse.shape != chunk_lse.shape:
         raise ValueError("partition tensors must have the same shape")
     return torch.logaddexp(previous_lse, chunk_lse)
+
+
+def sequence_target_marginals(
+    previous_lse: torch.Tensor, chunk_lses: list[torch.Tensor]
+) -> tuple[torch.Tensor, list[float]]:
+    """Update an ordered partition while synchronizing all marginal scalars once."""
+    if not chunk_lses:
+        return previous_lse, []
+    marginals = []
+    partition = previous_lse
+    for chunk_lse in chunk_lses:
+        if partition.shape != chunk_lse.shape:
+            raise ValueError("partition tensors must have the same shape")
+        combined = torch.logaddexp(partition, chunk_lse)
+        marginals.append(torch.exp(chunk_lse - combined).mean())
+        partition = combined
+    return partition, torch.stack(marginals).tolist()
 
 
 def empty_partition(heads: int, device: torch.device | str = "cpu") -> torch.Tensor:
@@ -81,10 +104,12 @@ def attention_output(
     heads, dimension = query.shape
     keys = torch.cat([key for key, _ in chunks])
     values = torch.cat([value for _, value in chunks])
-    if keys.shape != values.shape or heads % keys.shape[1]:
+    if keys.shape != values.shape:
         raise ValueError("incompatible query, key, and value shapes")
-    keys = keys.repeat_interleave(heads // keys.shape[1], dim=1)
-    values = values.repeat_interleave(heads // values.shape[1], dim=1)
-    logits = torch.einsum("hd,thd->ht", query.float(), keys.float())
-    weights = torch.softmax(logits * (scale or dimension**-0.5), dim=-1)
-    return torch.einsum("ht,thd->hd", weights.to(values.dtype), values)
+    kv_heads = keys.shape[1]
+    if heads % kv_heads:
+        raise ValueError("incompatible query, key, and value shapes")
+    groups = heads // kv_heads
+    logits = _gqa_logits(query, keys, scale).reshape(kv_heads, groups, len(keys))
+    weights = torch.softmax(logits, dim=-1).to(values.dtype)
+    return torch.einsum("kgt,tkd->kgd", weights, values).reshape(heads, dimension)

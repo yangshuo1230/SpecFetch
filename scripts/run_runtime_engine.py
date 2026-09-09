@@ -55,6 +55,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expert-cache-slots", type=int, default=64)
     parser.add_argument("--kv-cache-slots", type=int, default=512)
     parser.add_argument("--transfer-batch-size", type=int, default=32)
+    parser.add_argument(
+        "--speculative-expert-budget",
+        type=int,
+        help="Maximum unique expert candidates admitted by one prediction update",
+    )
+    parser.add_argument(
+        "--speculative-kv-budget",
+        type=int,
+        help="Maximum unique KV candidates admitted by one prediction update",
+    )
+    parser.add_argument(
+        "--speculative-layer-lookahead",
+        type=int,
+        help="Queue only this many logical layer deadlines ahead; unset queues all horizons",
+    )
     parser.add_argument("--disable-prefetch", action="store_true")
     parser.add_argument(
         "--shadow-attention",
@@ -103,6 +118,9 @@ def main() -> None:
         minimum_old_chunks=args.minimum_old_chunks,
         expert_cache_slots=args.expert_cache_slots,
         kv_cache_slots=args.kv_cache_slots,
+        speculative_expert_budget=args.speculative_expert_budget,
+        speculative_kv_budget=args.speculative_kv_budget,
+        speculative_layer_lookahead=args.speculative_layer_lookahead,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.target, trust_remote_code=True)
     input_ids = fixed_contexts(

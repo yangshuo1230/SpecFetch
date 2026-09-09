@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import torch
@@ -18,7 +19,7 @@ from src.runtime.expert import (
 from src.runtime.kv_cache import RequestLayerKV, SparseAttentionResult
 from src.runtime.memory_queue import ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager
-from src.runtime.transfer import OffloadRuntime
+from src.runtime.transfer import OffloadRuntime, PrefetchRequest
 
 
 class ModuleExpertSource:
@@ -239,42 +240,80 @@ class Qwen3SparseOffloadEngine:
         logits = self.model.lm_head(hidden)
         return EngineOutput(logits, BatchState(request_ids, [tokens] * batch, caches), {})
 
-    def enqueue_predictions(self, state: BatchState, predictions: list[StepPredictions]) -> None:
+    def _reset_prediction_window(self, state: BatchState) -> None:
         self.runtime.cancel_many(state.speculative_consumers)
         state.speculative_consumers.clear()
+
+    def _retire_prediction_layer(self, state: BatchState, layer_index: int) -> None:
+        """Cancel current-token candidates after their layer's last possible use."""
+        current_consumers = {f"{request_id}@{state.step + 1}" for request_id in state.request_ids}
+        retiring = []
+        retained = []
+        for key, consumer in state.speculative_consumers:
+            if key.layer == layer_index and consumer in current_consumers:
+                retiring.append((key, consumer))
+            else:
+                retained.append((key, consumer))
+        self.runtime.cancel_many(retiring)
+        state.speculative_consumers = retained
+
+    def _enqueue_prediction_items(
+        self,
+        state: BatchState,
+        items: Iterable[tuple[int, StepPredictions, int]],
+    ) -> None:
         layers = len(self.model.model.layers)
-        prefetch_requests = []
-        for horizon, prediction in enumerate(predictions, 1):
-            for layer_index in range(layers):
-                deadline = (state.step + horizon - 1) * layers + layer_index
-                expert_probabilities = prediction.experts.get(layer_index)
-                consumers = [
-                    f"{request_id}@{state.step + horizon}" for request_id in state.request_ids
-                ]
-                if expert_probabilities is not None:
-                    expert_requests, expert_consumers = expert_prediction_requests(
-                        expert_probabilities,
-                        layer=layer_index,
-                        request_ids=consumers,
-                        top_k=self.model.config.num_experts_per_tok,
-                        deadline=deadline,
-                        miss_cost_ms=0.5,
-                        registry=self.expert_registry,
-                    )
-                    prefetch_requests.extend(expert_requests)
-                    state.speculative_consumers.extend(expert_consumers)
-                for request_id, consumer in zip(state.request_ids, consumers):
-                    cache = state.kv[(request_id, layer_index)]
-                    scores = prediction.kv.get((request_id, layer_index), {})
-                    kv_requests, kv_consumers = cache.prefetch_requests(
-                        scores,
-                        deadline,
-                        miss_cost_ms=0.05,
-                        consumer=consumer,
-                    )
-                    prefetch_requests.extend(kv_requests)
-                    state.speculative_consumers.extend(kv_consumers)
-        self.runtime.prefetch_many(prefetch_requests)
+        prefetch_requests: list[PrefetchRequest] = []
+        for horizon, prediction, layer_index in items:
+            deadline = (state.step + horizon - 1) * layers + layer_index
+            expert_probabilities = prediction.experts.get(layer_index)
+            consumers = [f"{request_id}@{state.step + horizon}" for request_id in state.request_ids]
+            if expert_probabilities is not None:
+                expert_requests, _ = expert_prediction_requests(
+                    expert_probabilities,
+                    layer=layer_index,
+                    request_ids=consumers,
+                    top_k=self.model.config.num_experts_per_tok,
+                    deadline=deadline,
+                    miss_cost_ms=0.5,
+                    registry=self.expert_registry,
+                )
+                prefetch_requests.extend(expert_requests)
+            for request_id, consumer in zip(state.request_ids, consumers):
+                cache = state.kv[(request_id, layer_index)]
+                scores = prediction.kv.get((request_id, layer_index), {})
+                kv_requests, _ = cache.prefetch_requests(
+                    scores,
+                    deadline,
+                    miss_cost_ms=0.05,
+                    consumer=consumer,
+                )
+                prefetch_requests.extend(kv_requests)
+        candidate_count = len(prefetch_requests)
+        prefetch_requests = self._apply_prefetch_budget(prefetch_requests)
+        state.speculative_consumers.extend(
+            (request.key, request.consumer) for request in prefetch_requests
+        )
+        self.runtime.prefetch_many(prefetch_requests, candidate_count=candidate_count)
+
+    def _enqueue_prediction_layers(
+        self,
+        state: BatchState,
+        predictions: list[StepPredictions],
+        layer_indices: Iterable[int],
+    ) -> None:
+        layer_indices = tuple(layer_indices)
+        self._enqueue_prediction_items(
+            state,
+            [
+                (horizon, prediction, layer_index)
+                for horizon, prediction in enumerate(predictions, 1)
+                for layer_index in layer_indices
+            ],
+        )
+
+    def _retain_predictions(self, state: BatchState, predictions: list[StepPredictions]) -> None:
+        layers = len(self.model.model.layers)
         for layer_index in range(layers):
             for request_id in state.request_ids:
                 cache = state.kv[(request_id, layer_index)]
@@ -282,6 +321,45 @@ class Qwen3SparseOffloadEngine:
                     item.kv.get((request_id, layer_index), {}) for item in predictions[:2]
                 ]
                 cache.retain_predicted(keep_predictions)
+
+    def enqueue_predictions(self, state: BatchState, predictions: list[StepPredictions]) -> None:
+        """Replace the prediction window and admit all layers (compatibility API)."""
+        self._reset_prediction_window(state)
+        self._enqueue_prediction_layers(state, predictions, range(len(self.model.model.layers)))
+        self._retain_predictions(state, predictions)
+
+    def _apply_prefetch_budget(self, requests: list[PrefetchRequest]) -> list[PrefetchRequest]:
+        """Admit the highest-value unique resources without splitting shared consumers."""
+        budgets = {
+            ResourceKind.EXPERT: self.config.speculative_expert_budget,
+            ResourceKind.KV: self.config.speculative_kv_budget,
+        }
+        if all(budget is None for budget in budgets.values()):
+            return requests
+        grouped: dict[ResourceKey, list[PrefetchRequest]] = {}
+        for request in requests:
+            grouped.setdefault(request.key, []).append(request)
+        selected: set[ResourceKey] = set()
+        current_step = self.runtime.queue.current_step
+        for kind, budget in budgets.items():
+            keys = [key for key in grouped if key.kind == kind]
+            if budget is None or len(keys) <= budget:
+                selected.update(keys)
+                continue
+
+            def rank(key: ResourceKey):
+                consumers = grouped[key]
+                deadline = min(request.deadline for request in consumers)
+                probability = sum(request.probability for request in consumers)
+                miss_cost_ms = max(request.miss_cost_ms for request in consumers)
+                size_bytes = self.residency.record(key).size_bytes
+                urgency = 1.0 / max(1, deadline - current_step)
+                priority = miss_cost_ms * probability * urgency / max(size_bytes / 2**20, 1e-6)
+                identity = (key.layer, key.object_id, key.request_id)
+                return (-priority, deadline, identity)
+
+            selected.update(sorted(keys, key=rank)[:budget])
+        return [request for request in requests if request.key in selected]
 
     def add_state(self, state: BatchState, admitted: BatchState) -> None:
         """Append separately-prefilled requests to an active decode batch."""
@@ -334,19 +412,45 @@ class Qwen3SparseOffloadEngine:
         if not predictions:
             predictions = [StepPredictions()]
         if prefetch:
-            self.enqueue_predictions(state, predictions)
+            self._reset_prediction_window(state)
+            self._retain_predictions(state, predictions)
         current_predictions = predictions[0]
         hidden = self.model.model.embed_tokens(token_ids[:, None].to(self.device))
         positions = torch.tensor(state.lengths, device=self.device)[:, None]
         position_embeddings = self.model.model.rotary_emb(hidden, positions)
         traces = {}
         layers = len(self.model.model.layers)
+        scheduled_deadlines: set[int] = set()
         for layer_index, layer in enumerate(self.model.model.layers):
-            self.runtime.queue.set_step(state.step * layers + layer_index)
+            current_deadline = state.step * layers + layer_index
+            self.runtime.queue.set_step(current_deadline)
+            if prefetch:
+                if self.config.speculative_layer_lookahead is None:
+                    if not scheduled_deadlines:
+                        self._enqueue_prediction_layers(state, predictions, range(layers))
+                        scheduled_deadlines.update(
+                            (state.step + horizon - 1) * layers + predicted_layer
+                            for horizon in range(1, len(predictions) + 1)
+                            for predicted_layer in range(layers)
+                        )
+                else:
+                    items = []
+                    for deadline in range(
+                        current_deadline,
+                        current_deadline + self.config.speculative_layer_lookahead,
+                    ):
+                        if deadline in scheduled_deadlines:
+                            continue
+                        horizon = deadline // layers - state.step + 1
+                        if not 1 <= horizon <= len(predictions):
+                            continue
+                        items.append((horizon, predictions[horizon - 1], deadline % layers))
+                        scheduled_deadlines.add(deadline)
+                    self._enqueue_prediction_items(state, items)
             residual = hidden
             normalized = layer.input_layernorm(hidden)
             query, key, value = self._project(layer, normalized, position_embeddings)
-            attended = []
+            layer_scores = {}
             for request_index, request_id in enumerate(state.request_ids):
                 cache = state.kv[(request_id, layer_index)]
                 cache.append(
@@ -357,10 +461,26 @@ class Qwen3SparseOffloadEngine:
                 if scores is None:
                     count = len(cache.old)
                     scores = {index: 1 / count for index in cache.old} if count else {}
+                layer_scores[request_id] = scores
+            guaranteed_requests = []
+            for request_id in state.request_ids:
+                cache = state.kv[(request_id, layer_index)]
+                guaranteed_requests.extend(
+                    cache.guaranteed_demand_requests(layer_scores[request_id], miss_cost_ms=0.05)
+                )
+            guaranteed_payloads = (
+                self.runtime.demand_many(guaranteed_requests)
+                if len(guaranteed_requests) <= self.residency.capacities[ResourceKind.KV]
+                else None
+            )
+            attended = []
+            for request_index, request_id in enumerate(state.request_ids):
+                cache = state.kv[(request_id, layer_index)]
                 result = cache.sparse_attention(
                     query[request_index, :, 0],
-                    scores,
+                    layer_scores[request_id],
                     miss_cost_ms=0.05,
+                    guaranteed_payloads=guaranteed_payloads,
                     shadow=shadow_attention,
                     shadow_thresholds=shadow_thresholds,
                 )
@@ -375,6 +495,8 @@ class Qwen3SparseOffloadEngine:
                 layer_index,
                 state.request_ids,
             )
+            if prefetch:
+                self._retire_prediction_layer(state, layer_index)
         hidden = self.model.model.norm(hidden)
         logits = self.model.lm_head(hidden)
         state.lengths = [length + 1 for length in state.lengths]

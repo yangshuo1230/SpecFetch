@@ -88,14 +88,20 @@ def test_phase_metrics_preserve_local_peak_instead_of_subtracting_gauge():
     worker.metrics.submitted = 5
     worker.metrics.maximum_transfer_batch = 4
     worker._phase_maximum_transfer_batch = 4
+    worker.record_prefetch_admission(12, 5)
     current, first = worker.phase_metrics_since(earlier)
     assert first.submitted == 5
     assert first.maximum_transfer_batch == 4
+    assert first.maximum_prefetch_candidates == 12
+    assert first.maximum_prefetch_admitted == 5
     worker.metrics.submitted = 7
     worker._phase_maximum_transfer_batch = 2
+    worker.record_prefetch_admission(3, 2)
     _, second = worker.phase_metrics_since(current)
     assert second.submitted == 2
     assert second.maximum_transfer_batch == 2
+    assert second.maximum_prefetch_candidates == 3
+    assert second.maximum_prefetch_admitted == 2
 
 
 def test_packed_expert_slots_reuse_released_storage():
@@ -226,6 +232,45 @@ def test_prefetch_many_queues_each_consumer_and_marks_resource_once():
     assert residency.state(key) == ResourceState.QUEUED
     assert request.consumer_probabilities == {"a": 0.6, "b": 0.3}
     assert request.deadline == 3
+    pending_leases = residency.record(key).consumer_leases
+    assert set(pending_leases) == {"a", "b"}
+    assert {consumer: deadline for consumer, (_, deadline) in pending_leases.items()} == {
+        "a": 3,
+        "b": 5,
+    }
+
+
+def test_cancel_after_queue_pop_prevents_stale_speculative_transfer():
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    key = resource(0)
+    residency.register_cpu(key, "cpu", 2**20)
+    worker = TransferWorker(queue, residency, FakeBackend())
+    runtime = OffloadRuntime(queue, residency, worker)
+    runtime.prefetch(key, consumer="a@1", probability=0.8, deadline=3, miss_cost_ms=4.0)
+    [popped] = queue.pop_many(1)
+
+    runtime.cancel_many([(key, "a@1")])
+    consumer_leases = {
+        consumer: (
+            popped.miss_cost_ms
+            * probability
+            / max(1, popped.consumer_deadlines[consumer] - queue.current_step)
+            / max(popped.size_bytes / 2**20, 1e-6),
+            popped.consumer_deadlines[consumer],
+        )
+        for consumer, probability in popped.consumer_probabilities.items()
+    }
+    accepted = residency.begin_transfer(
+        key,
+        priority=popped.priority(queue.current_step),
+        deadline=popped.deadline,
+        consumer_leases=consumer_leases,
+    )
+
+    assert not accepted
+    assert residency.state(key) == ResourceState.CPU_ONLY
+    assert not residency.record(key).consumer_leases
 
 
 def test_demand_many_uses_one_backend_transfer_batch():

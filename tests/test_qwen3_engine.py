@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
@@ -11,6 +13,15 @@ from src.runtime.transfer import OffloadRuntime, TransferWorker
 class IdentityBackend:
     def copy_to_gpu(self, key, value):
         return value
+
+
+class BatchBackend(IdentityBackend):
+    def __init__(self):
+        self.batches = []
+
+    def copy_many_to_gpu(self, items):
+        self.batches.append([key for key, _ in items])
+        return [value for _, value in items]
 
 
 def tiny_model():
@@ -35,17 +46,28 @@ def tiny_model():
     return Qwen3MoeForCausalLM(config).eval()
 
 
-def build_engine(model):
+def build_engine(
+    model,
+    *,
+    speculative_expert_budget=None,
+    speculative_kv_budget=None,
+    speculative_layer_lookahead=None,
+    backend=None,
+    kv_cache_slots=32,
+):
     queue = MemoryRequestQueue()
-    residency = ResidencyManager({ResourceKind.EXPERT: 8, ResourceKind.KV: 32})
-    worker = TransferWorker(queue, residency, IdentityBackend())
+    residency = ResidencyManager({ResourceKind.EXPERT: 8, ResourceKind.KV: kv_cache_slots})
+    worker = TransferWorker(queue, residency, backend or IdentityBackend())
     runtime = OffloadRuntime(queue, residency, worker)
     runtime_config = RuntimeConfig(
         sink_tokens=2,
         recent_tokens=8,
         kv_chunk_tokens=2,
         expert_cache_slots=8,
-        kv_cache_slots=32,
+        kv_cache_slots=kv_cache_slots,
+        speculative_expert_budget=speculative_expert_budget,
+        speculative_kv_budget=speculative_kv_budget,
+        speculative_layer_lookahead=speculative_layer_lookahead,
     )
     engine = Qwen3SparseOffloadEngine.from_transformers_model(
         model, runtime, residency, runtime_config
@@ -89,6 +111,152 @@ def test_prediction_window_submits_expert_and_kv_requests_as_one_queue_batch():
     assert worker.metrics.prefetch_batches - before == 1
     assert state.speculative_consumers
     engine.remove_requests(state, ["a"])
+    worker.close()
+
+
+def test_prediction_budget_caps_unique_resources_and_preserves_shared_consumers():
+    engine, worker = build_engine(
+        tiny_model(), speculative_expert_budget=1, speculative_kv_budget=1
+    )
+    state = engine.prefill(torch.tensor([[1] * 12, [2] * 12]), ["a", "b"]).state
+    prediction = StepPredictions(
+        kv={
+            (request_id, layer): {chunk: 1.0 for chunk in state.kv[(request_id, layer)].old}
+            for request_id in ("a", "b")
+            for layer in range(2)
+        },
+        experts={layer: torch.tensor([[0.7, 0.2, 0.1, 0.0]] * 2) for layer in range(2)},
+    )
+
+    engine.enqueue_predictions(state, [prediction])
+
+    admitted = state.speculative_consumers
+    admitted_keys = {key for key, _ in admitted}
+    assert sum(key.kind == ResourceKind.EXPERT for key in admitted_keys) == 1
+    assert sum(key.kind == ResourceKind.KV for key in admitted_keys) == 1
+    assert len(admitted) == 3  # one shared expert has both request consumers
+    assert worker.metrics.prefetch_candidates == 12
+    assert worker.metrics.prefetch_requests == 3
+    assert worker.metrics.prefetch_budget_dropped == 9
+    assert worker.metrics.maximum_prefetch_candidates == 12
+    assert worker.metrics.maximum_prefetch_admitted == 3
+    engine.remove_requests(state, ["a", "b"])
+    worker.close()
+
+
+def test_decode_rolls_prediction_admission_forward_by_layer():
+    engine, worker = build_engine(tiny_model(), speculative_layer_lookahead=1)
+    state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
+    prediction = StepPredictions(
+        kv={
+            ("a", layer): {chunk: 1.0 for chunk in state.kv[("a", layer)].old} for layer in range(2)
+        },
+        experts={layer: torch.tensor([[0.7, 0.2, 0.1, 0.0]]) for layer in range(2)},
+    )
+    calls = []
+    enqueue = engine._enqueue_prediction_items
+
+    def record_items(state, items):
+        items = tuple(items)
+        calls.append(tuple((horizon, layer) for horizon, _, layer in items))
+        enqueue(state, items)
+
+    engine._enqueue_prediction_items = record_items
+    engine.decode(torch.tensor([3]), state, prediction)
+
+    assert calls == [((1, 0),), ((1, 1),)]
+    assert worker.metrics.prefetch_candidates == 6
+    assert worker.metrics.maximum_prefetch_candidates == 3
+    assert not state.speculative_consumers
+    engine.remove_requests(state, ["a"])
+    worker.close()
+
+
+def test_retiring_layer_cancels_only_current_token_consumers():
+    engine, worker = build_engine(tiny_model())
+    state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
+    layer_zero = state.kv[("a", 0)].old[0]
+    layer_one = state.kv[("a", 1)].old[0]
+    state.speculative_consumers = [
+        (layer_zero, "a@1"),
+        (layer_zero, "a@2"),
+        (layer_one, "a@1"),
+    ]
+    cancel_many = Mock()
+    engine.runtime.cancel_many = cancel_many
+
+    engine._retire_prediction_layer(state, 0)
+
+    cancel_many.assert_called_once_with([(layer_zero, "a@1")])
+    assert state.speculative_consumers == [
+        (layer_zero, "a@2"),
+        (layer_one, "a@1"),
+    ]
+    engine.runtime.cancel_many = Mock()
+    engine.remove_requests(state, ["a"])
+    worker.close()
+
+
+def test_decode_retains_next_token_consumers_after_current_layer_retires():
+    engine, worker = build_engine(tiny_model(), speculative_layer_lookahead=2)
+    state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
+    prediction = StepPredictions(
+        kv={
+            ("a", layer): {chunk: 1.0 for chunk in state.kv[("a", layer)].old} for layer in range(2)
+        },
+        experts={layer: torch.tensor([[0.7, 0.2, 0.1, 0.0]]) for layer in range(2)},
+    )
+
+    engine.decode(torch.tensor([3]), state, [prediction, prediction])
+
+    assert state.speculative_consumers
+    assert {consumer for _, consumer in state.speculative_consumers} == {"a@2"}
+    assert {key.layer for key, _ in state.speculative_consumers} == {0}
+    engine.remove_requests(state, ["a"])
+    worker.close()
+
+
+def test_decode_batches_guaranteed_kv_across_requests_per_layer():
+    backend = BatchBackend()
+    engine, worker = build_engine(tiny_model(), backend=backend)
+    state = engine.prefill(torch.tensor([[1] * 12, [2] * 12]), ["a", "b"]).state
+    prediction = StepPredictions(
+        kv={
+            (request_id, layer): {chunk: 1.0 for chunk in state.kv[(request_id, layer)].old}
+            for request_id in ("a", "b")
+            for layer in range(2)
+        }
+    )
+    backend.batches.clear()
+
+    engine.decode(torch.tensor([3, 4]), state, prediction, prefetch=False)
+
+    kv_batches = [batch for batch in backend.batches if batch and batch[0].kind == ResourceKind.KV]
+    assert len(kv_batches) == 2
+    assert all({key.request_id for key in batch} == {"a", "b"} for batch in kv_batches)
+    engine.remove_requests(state, ["a", "b"])
+    worker.close()
+
+
+def test_decode_falls_back_when_cross_request_kv_batch_exceeds_capacity():
+    backend = BatchBackend()
+    engine, worker = build_engine(tiny_model(), backend=backend, kv_cache_slots=1)
+    state = engine.prefill(torch.tensor([[1] * 12, [2] * 12]), ["a", "b"]).state
+    prediction = StepPredictions(
+        kv={
+            (request_id, layer): {chunk: 1.0 for chunk in state.kv[(request_id, layer)].old}
+            for request_id in ("a", "b")
+            for layer in range(2)
+        }
+    )
+    backend.batches.clear()
+
+    engine.decode(torch.tensor([3, 4]), state, prediction, prefetch=False)
+
+    kv_batches = [batch for batch in backend.batches if batch and batch[0].kind == ResourceKind.KV]
+    assert len(kv_batches) == 4
+    assert all(len(batch) == 1 for batch in kv_batches)
+    engine.remove_requests(state, ["a", "b"])
     worker.close()
 
 

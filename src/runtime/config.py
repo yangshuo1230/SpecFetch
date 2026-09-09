@@ -16,6 +16,9 @@ class RuntimeConfig:
     minimum_old_chunks: int = 2
     expert_cache_slots: int = 64
     kv_cache_slots: int = 512
+    speculative_expert_budget: int | None = None
+    speculative_kv_budget: int | None = None
+    speculative_layer_lookahead: int | None = None
 
     def __post_init__(self) -> None:
         positive = {
@@ -30,6 +33,13 @@ class RuntimeConfig:
         for name, value in positive.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
+        for name, value in (
+            ("speculative_expert_budget", self.speculative_expert_budget),
+            ("speculative_kv_budget", self.speculative_kv_budget),
+            ("speculative_layer_lookahead", self.speculative_layer_lookahead),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive when set")
         for name, value in (
             ("predicted_mass_threshold", self.predicted_mass_threshold),
             ("marginal_mass_threshold", self.marginal_mass_threshold),

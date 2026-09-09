@@ -82,6 +82,14 @@ pass. Both backends use the same CPU source, packed GPU expert slots, queue and 
 融合 backend 会在请求计时前预热实际预填充和解码形状，随后恢复冷专家驻留并重置指标；
 预热耗时独立记录，可通过 `--disable-moe-warmup` 关闭。
 
+预测准入有两个独立的时间尺度：`--prefetch-horizons` 限制提前考虑的未来 token 数，
+`--speculative-layer-lookahead` 则让每个 token 只滚动提交当前层附近的请求，完成一层后
+才补入下一个远期层，避免尚需很久才会消费的 expert/KV 长时间占据队列。可选的
+`--speculative-expert-budget` 与 `--speculative-kv-budget` 会在每次滚动提交内按队列的
+概率、deadline、miss cost 和字节数优先级限制唯一资源数。layer lookahead 未设置时仍
+一次提交全层候选，预算未设置时不截断候选，便于做成对性能比较；两种模式都会在当前
+层完成后撤销已经错过消费时点的 consumer，避免过期请求继续争抢传输。
+
 Variable output lengths and request backfill are available through the continuous runner:
 
 ~~~bash

@@ -12,6 +12,7 @@ from src.runtime.hybrid_attention import (
     chunk_logsumexp,
     empty_partition,
     mean_target_marginal,
+    sequence_target_marginals,
     update_partition,
 )
 from src.runtime.memory_queue import ResourceKey, ResourceKind
@@ -180,12 +181,41 @@ class RequestLayerKV:
                 self._unwanted.add(identity)
         self.reap_unwanted()
 
+    def ordered_old_chunks(self, draft_mass: dict[int, float]) -> list[int]:
+        return [
+            chunk
+            for chunk in sorted(draft_mass, key=draft_mass.get, reverse=True)
+            if chunk in self.old
+        ]
+
+    def guaranteed_chunks(self, draft_mass: dict[int, float]) -> list[int]:
+        """Return the Draft prefix required before Target marginal stopping can apply."""
+        guaranteed = []
+        predicted_mass = 0.0
+        for chunk in self.ordered_old_chunks(draft_mass):
+            guaranteed.append(chunk)
+            predicted_mass = min(1.0, predicted_mass + draft_mass[chunk])
+            if predicted_mass >= self.config.predicted_mass_threshold and len(guaranteed) >= min(
+                self.config.minimum_old_chunks, len(self.old)
+            ):
+                break
+        return guaranteed
+
+    def guaranteed_demand_requests(
+        self, draft_mass: dict[int, float], miss_cost_ms: float
+    ) -> list[DemandRequest]:
+        return [
+            DemandRequest(self.old[chunk], self.request_id, miss_cost_ms)
+            for chunk in self.guaranteed_chunks(draft_mass)
+        ]
+
     def sparse_attention(
         self,
         query: torch.Tensor,
         draft_mass: dict[int, float],
         *,
         miss_cost_ms: float,
+        guaranteed_payloads: dict[ResourceKey, tuple[torch.Tensor, torch.Tensor]] | None = None,
         shadow: bool = False,
         shadow_thresholds: tuple[float, ...] = (),
     ) -> SparseAttentionResult:
@@ -204,41 +234,37 @@ class RequestLayerKV:
         selected = []
         marginals = []
         selected_payloads: list[tuple[torch.Tensor, torch.Tensor]] = []
-        ordered_chunks = [
-            chunk
-            for chunk in sorted(draft_mass, key=draft_mass.get, reverse=True)
-            if chunk in self.old
-        ]
-        guaranteed = []
-        predicted_mass = 0.0
-        for chunk in ordered_chunks:
-            guaranteed.append(chunk)
-            predicted_mass = min(1.0, predicted_mass + draft_mass[chunk])
-            if predicted_mass >= self.config.predicted_mass_threshold and len(guaranteed) >= min(
-                self.config.minimum_old_chunks, len(self.old)
-            ):
+        ordered_chunks = self.ordered_old_chunks(draft_mass)
+        guaranteed = self.guaranteed_chunks(draft_mass)
+        if guaranteed_payloads is None:
+            guaranteed_payloads = self.runtime.demand_many(
+                self.guaranteed_demand_requests(draft_mass, miss_cost_ms)
+            )
+        guaranteed_values = [guaranteed_payloads[self.old[chunk]] for chunk in guaranteed]
+        guaranteed_lses = [chunk_logsumexp(query, key) for key, _ in guaranteed_values]
+        partition, guaranteed_marginals = sequence_target_marginals(partition, guaranteed_lses)
+        stopped = False
+        for chunk, payload, marginal in zip(guaranteed, guaranteed_values, guaranteed_marginals):
+            selected.append(chunk)
+            marginals.append(marginal)
+            selected_payloads.append(payload)
+            stopped = controller.observe(draft_mass[chunk], marginal)
+        for chunk in ordered_chunks[len(guaranteed) :]:
+            if stopped:
                 break
-        guaranteed_payloads = self.runtime.demand_many(
-            [DemandRequest(self.old[chunk], self.request_id, miss_cost_ms) for chunk in guaranteed]
-        )
-        for index, chunk in enumerate(ordered_chunks):
             identity = self.old[chunk]
-            if index < len(guaranteed):
-                key, value = guaranteed_payloads[identity]
-            else:
-                key, value = self.runtime.demand(
-                    identity,
-                    consumer=self.request_id,
-                    miss_cost_ms=miss_cost_ms,
-                )
+            key, value = self.runtime.demand(
+                identity,
+                consumer=self.request_id,
+                miss_cost_ms=miss_cost_ms,
+            )
             chunk_lse = chunk_logsumexp(query, key)
             marginal = mean_target_marginal(partition, chunk_lse)
             partition = update_partition(partition, chunk_lse)
             selected.append(chunk)
             marginals.append(marginal)
             selected_payloads.append((key, value))
-            if controller.observe(draft_mass[chunk], marginal):
-                break
+            stopped = controller.observe(draft_mass[chunk], marginal)
         output = attention_output(query, always + selected_payloads)
         coverage = None
         relative_l2 = None

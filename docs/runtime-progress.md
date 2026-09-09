@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-08 21:23 UTC
+Updated: 2026-09-09 00:54 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -31,7 +31,7 @@ count. Unseen Target mass is never used online.
 | 4. Prediction | Stateful four-token Draft rollout, KV ranking, expert probes, hybrid online stop | Complete |
 | 5. Serving | Variable-length admission, request removal/backfill, request-level TTFT/latency | Complete; full-model run passed |
 | 6. Optimization | Packed slots, coalesced queue, batched H2D, fused slot-mapped MoE | In progress |
-| 7. Evaluation | Demand/spec causality match, shadow quality, batch 1/4, 512/4K, vLLM baselines | Complete; 4K optimization rerun pending |
+| 7. Evaluation | Demand/spec causality match, shadow quality, batch 1/4, 512/4K, vLLM baselines | In progress; prior baselines complete, current CUDA/4K reruns pending |
 | 8. Release | Final regression, progress/results update, merge to `main`, push | Pending |
 
 ## Implemented
@@ -51,6 +51,9 @@ count. Unseen Target mass is never used online.
 - 上一预测窗口的 consumer 也通过批量事务撤销：队列按资源聚合 consumer、每个资源最多
   重建一次堆项，驻留 lease 在一次锁内统一刷新；耗尽 consumer 的 QUEUED 资源会原子地
   回到 CPU_ONLY。测试覆盖共享请求保留、重复取消去重和完全撤销。
+- QUEUED residency 现在也保存待处理 consumer lease；worker 在 `pop` 后开始传输前会在
+  同一 residency 锁内重读有效 lease。若该窗口已被撤销则原子回到 CPU_ONLY 并跳过 H2D，
+  封住 `pop -> cancel -> begin_transfer` 竞态，确定性测试覆盖该时序。
 - speculative admission 对驻留状态的分类、CPU_ONLY 到 QUEUED 的状态迁移，以及
   resident/in-flight consumer lease 写入现在合并到一次驻留锁；同一资源每批只刷新一次
   优先级。8,448 请求合成基准的 enqueue 中位数由约 96.5 ms 降至 73.5 ms（-23.8%），
@@ -58,7 +61,9 @@ count. Unseen Target mass is never used online.
 - Sparse KV 会先按 Draft 累计质量确定必然要取的候选前缀，并通过一次 `demand_many`
   提交；达到预测质量阈值后仍逐块计算 Target marginal 并在线停止，因而不改变选块或
   输出语义。batch-4/context-512 demand 实测 transfer batch 从 2,688 降至 1,171，
-  请求时延由 24.578 s 降至 24.078 s；4K 收益仍待下一检查点复测。
+  请求时延由 24.578 s 降至 24.078 s。4K demand 的 decode transfer batch 从
+  150,412 降至 7,006（-95.3%），decode wait 从 281.6 s 降至 258.7 s（-8.1%），
+  请求时延从 466.436 s 降至 451.895 s（-3.1%），68 个 token 保持完全一致。
 - Fixed packed expert slots: gate/up share a fused weight bank and evicted slots are
   overwritten in place rather than allocated again. Prefill batches experts within the
   physical-slot bound; compute-stream CUDA events prevent H2D from overwriting a slot
@@ -110,9 +115,10 @@ count. Unseen Target mass is never used online.
 
 ## Correctness evidence
 
-- 当前 73 项 CPU 测试全部通过；两项 opt-in CUDA 测试也在物理 GPU 2 通过，包括
-  multi-chunk slot-mapped fused MoE、容量 2/3、稀疏/全局 expert map 与事件槽复用。
-  本检查点再次通过完整 CPU/CUDA 测试、Ruff lint/format 与 `git diff --check`。
+- 当前 82 项 CPU 测试全部通过；两项 opt-in CUDA 测试已在此前检查点于物理 GPU 2 通过，
+  包括 multi-chunk slot-mapped fused MoE、容量 2/3、稀疏/全局 expert map 与事件槽复用。
+  最新滚动准入/GQA 改动已通过完整 CPU 测试、Ruff lint/format 与 `git diff --check`；
+  CUDA 和实模门禁因四张 GPU 均被外部任务占用而待跑，不能沿用上一提交替代。
 - On a random miniature Qwen3-MoE, custom dense prefill and incremental decode logits
   match the Transformers reference when all KV is selected.
 - The vectorized and grouped expert executors match numerically.
@@ -178,6 +184,7 @@ Workload: batch 4, context 4096, output 17, sink 4, recent 256, KV chunk 64.
 | System | Request seconds | Throughput | Relative to vLLM offload |
 | --- | ---: | ---: | ---: |
 | SpecFetch demand-only / vLLM MoE | 466.436 | 0.146 tok/s | 15.26x slower |
+| SpecFetch demand-only / batched KV demand | 451.895 | 0.150 tok/s | 14.79x slower |
 | SpecFetch speculative H1 / vLLM MoE | 610.714 | 0.111 tok/s | 19.98x slower |
 | vLLM `cpu_offload_gb=54` | 30.561 | 2.225 tok/s | reference |
 | vLLM full resident | 2.382 | 28.549 tok/s | 12.83x faster |
@@ -186,8 +193,17 @@ Workload: batch 4, context 4096, output 17, sink 4, recent 256, KV chunk 64.
 实现使 demand decode 产生 169,118 次 miss、150,412 个 transfer batch，累计 wait
 281.6 s。H1 虽得到 7,982 个 decode hit，却提交 208,128 个预测请求、丢弃 186,514 个，
 并因竞争把 decode demand wait 增至 296.9 s，所以比 demand-only 慢 30.9%。该结果是
-重要的长上下文反例；上面的 guaranteed-prefix KV 批量 demand 正针对其极小传输批次，
-优化后 4K 结果尚待复测，不能用 c512 收益外推。
+重要的长上下文反例；它早于 guaranteed-prefix KV 批量 demand，不能直接代表当前路径。
+
+批量 KV demand 复测保持相同的选块统计和 68 个 token，将 decode transfer batch 降低
+95.3%，但端到端仅改善 3.1%，说明长上下文瓶颈不只是 CUDA 同步次数。针对 H1 的下一
+实验改为按层滚动准入：只提交当前层附近的 deadline，完成一层后再补入后续层；窗口内
+还可按同一队列优先级公式限制 expert/KV 唯一资源数。该实现已通过 CPU 因果与队列测试，
+并会在当前层最后一次可能消费后撤销过期 consumer，同时保留下个 token 的近端 consumer。
+待测分支还把同层整个 batch 的 guaranteed KV 合成一次 demand（超过容量时自动回退），
+将必需前缀的 Target marginal 合并为一次 CPU 同步，并用 grouped-query contraction 避免
+物理复制 KV head。真实 GPU 数值与时延尚未验证，因此当前表中仍保留旧 H1 反例，不作
+收益声明。
 
 ### Full-model continuous batching
 
@@ -240,9 +256,8 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 
 ## Known gaps
 
-1. 当前最佳 c512 仍比 vLLM 54-GiB weight offload 慢 3.38x；4K 的旧逐块 KV demand
-   结果慢 15.26x。guaranteed-prefix 批量 KV demand 已通过 c512，但 4K 必须复测后才能
-   判断缩小了多少差距。
+1. 当前最佳 c512 仍比 vLLM 54-GiB weight offload 慢 3.38x；4K 的批量 KV demand
+   仍慢 14.79x。传输批次数大幅下降但总时延只改善 3.1%，性能门禁仍未通过。
 2. 4K H1 预测覆盖远低于提交规模并增加 demand wait；需要依据批量 KV 复测重新决定
    长上下文的 admission budget/背压，不能沿用 c512 的无界候选提交。
 3. 连续 runner 已合并同长度准入请求；不同 prompt 长度仍需分组串行执行。分块预填充和
@@ -254,12 +269,30 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 
 ## Next actions
 
-1. 用 guaranteed-prefix KV 批量 demand 重跑 batch-4/context-4K/output-17 demand；若
-   transfer batch 与时延显著下降，再跑 speculative H1 并重新结算长上下文策略门禁。
-2. 根据 4K 新 profile 给 speculative admission 加候选预算或背压，只在减少过量预测且
-   保持 68-token 因果一致时保留。
-3. 更新本文档并执行最终审计；所有正确性与性能门禁结算后再把 feature 分支合并到
+1. GPU 继续繁忙时完成三项 CPU 可验证优化：驻留淘汰候选单遍选择、同资源批量 upsert
+   避免逐 consumer 重算 deadline、TransferWorker 每批只读取一次 logical step；分别用
+   等价性/锁访问测试和微基准记录收益后提交。
+2. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 快速复测
+   grouped GQA、跨请求 KV demand 和 layer lookahead 2 的 20-token 数值与时延。
+3. c512 通过后重跑 batch-4/context-4K/output-17 demand 与 speculative H1，核对
+   68-token 因果一致、最大单批候选、dropped speculative、demand wait 与端到端时延。
+4. 若滚动窗口仍提交过量，再在窗口内扫描 expert/KV 唯一资源预算；只保留降低时延的
+   配置，未经 GPU 验证不设为默认。
+5. 更新本文档并执行最终审计；所有正确性与性能门禁结算后再把 feature 分支合并到
    `main`, and push only after every correctness/performance gate is accounted for.
+
+## 当前 CPU 检查点边界
+
+- 本检查点在四张 GPU 均被外部作业长期占用时提交，目的是先固化已通过 82 项 CPU
+  回归的实现与审计结果；它不是性能发布版本，也不改变 `main`。
+- 新增滚动 deadline 准入、过期 consumer 撤销、窗口内唯一资源预算、跨请求 KV demand、
+  单次 Target marginal 同步和 grouped GQA 均只有 CPU 数值/状态机证据，不能据此宣称
+  CUDA 正确性或速度提升。`speculative_layer_lookahead` 和两类预算默认未设置。
+- 两类预算是每次滚动增量提交内的唯一资源上限，不是整个队列或完整窗口的全局 cap；
+  是否需要全局背压必须由后续 GPU profile 决定，当前文档不作该声明。
+- `runtime-batched-demand-vllm-kvbatch-b4-c4096-o17.json` 的 451.895 s 结果来自上述
+  grouped GQA/跨请求合批改动之前，只证明上一轮 guaranteed-prefix KV demand batching；
+  它不能替代本检查点的待跑 GPU 门禁。
 
 ## Safety and versioning
 

@@ -225,6 +225,10 @@ class TransferMetrics:
     demand_hits: int = 0
     demand_misses: int = 0
     prefetch_requests: int = 0
+    prefetch_candidates: int = 0
+    prefetch_budget_dropped: int = 0
+    maximum_prefetch_candidates: int = 0
+    maximum_prefetch_admitted: int = 0
     prefetch_enqueued: int = 0
     prefetch_batches: int = 0
     prefetch_enqueue_ms: float = 0.0
@@ -278,6 +282,8 @@ class TransferWorker:
             residency.set_eviction_callback(release_gpu)
         self.metrics = TransferMetrics()
         self._phase_maximum_transfer_batch = 0
+        self._phase_maximum_prefetch_candidates = 0
+        self._phase_maximum_prefetch_admitted = 0
         self._thread: threading.Thread | None = None
         self._error: BaseException | None = None
 
@@ -367,6 +373,20 @@ class TransferWorker:
         if self._error is not None:
             raise RuntimeError("transfer worker failed") from self._error
 
+    def record_prefetch_admission(self, candidate_count: int, admitted_count: int) -> None:
+        self.metrics.maximum_prefetch_candidates = max(
+            self.metrics.maximum_prefetch_candidates, candidate_count
+        )
+        self.metrics.maximum_prefetch_admitted = max(
+            self.metrics.maximum_prefetch_admitted, admitted_count
+        )
+        self._phase_maximum_prefetch_candidates = max(
+            self._phase_maximum_prefetch_candidates, candidate_count
+        )
+        self._phase_maximum_prefetch_admitted = max(
+            self._phase_maximum_prefetch_admitted, admitted_count
+        )
+
     def metrics_snapshot(self) -> TransferMetrics:
         """Copy monotonic counters for phase-level reporting.
 
@@ -383,7 +403,11 @@ class TransferWorker:
         current = self.metrics_snapshot()
         delta = current.delta(earlier)
         delta.maximum_transfer_batch = self._phase_maximum_transfer_batch
+        delta.maximum_prefetch_candidates = self._phase_maximum_prefetch_candidates
+        delta.maximum_prefetch_admitted = self._phase_maximum_prefetch_admitted
         self._phase_maximum_transfer_batch = 0
+        self._phase_maximum_prefetch_candidates = 0
+        self._phase_maximum_prefetch_admitted = 0
         return current, delta
 
     def close(self, *, drain: bool = False) -> None:
@@ -424,13 +448,21 @@ class OffloadRuntime:
     def prefetch_many(
         self,
         requests: list[PrefetchRequest],
+        *,
+        candidate_count: int | None = None,
     ) -> None:
         """Submit one prediction group with a single queue lock acquisition."""
         if not requests:
             return
+        candidate_count = len(requests) if candidate_count is None else candidate_count
+        if candidate_count < len(requests):
+            raise ValueError("candidate count cannot be smaller than admitted requests")
         start = time.perf_counter()
         self.worker.metrics.prefetch_batches += 1
+        self.worker.metrics.prefetch_candidates += candidate_count
+        self.worker.metrics.prefetch_budget_dropped += candidate_count - len(requests)
         self.worker.metrics.prefetch_requests += len(requests)
+        self.worker.record_prefetch_admission(candidate_count, len(requests))
         for request in requests:
             if not 0 <= request.probability <= 1:
                 raise ValueError("probability must be in [0, 1]")

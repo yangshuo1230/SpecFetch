@@ -110,7 +110,8 @@ class ResidencyManager:
         """Prepare one speculative batch under one residency lock.
 
         CPU-only resources become queued and are returned for queue admission.
-        Resources already resident or in flight receive consumer leases directly.
+        Queued, resident and in-flight records retain the current consumer leases so
+        cancellation stays linearizable while a worker claims a popped request.
         """
         queued: list[QueueUpdate] = []
         refresh: dict[ResourceKey, ResourceRecord] = {}
@@ -121,18 +122,30 @@ class ResidencyManager:
                     record = self._records[key]
                 except KeyError as error:
                     raise KeyError(f"unregistered resource {key}") from error
-                if record.state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
-                    urgency = 1 / max(1, deadline - current_step)
-                    mib = max(record.size_bytes / 2**20, 1e-6)
-                    priority = miss_cost_ms * probability * urgency / mib
+                urgency = 1 / max(1, deadline - current_step)
+                mib = max(record.size_bytes / 2**20, 1e-6)
+                priority = miss_cost_ms * probability * urgency / mib
+                if record.state in (
+                    ResourceState.QUEUED,
+                    ResourceState.GPU_RESIDENT,
+                    ResourceState.IN_FLIGHT,
+                ):
                     record.consumer_leases[consumer] = (priority, deadline)
                     record.speculative = True
                     record.used = False
                     refresh[key] = record
-                    continue
+                    if record.state in (
+                        ResourceState.GPU_RESIDENT,
+                        ResourceState.IN_FLIGHT,
+                    ):
+                        continue
                 if record.state == ResourceState.CPU_ONLY:
                     record.state = ResourceState.QUEUED
                     transitioned = True
+                    record.consumer_leases[consumer] = (priority, deadline)
+                    record.speculative = True
+                    record.used = False
+                    refresh[key] = record
                 queued.append(
                     QueueUpdate(
                         key,
@@ -155,6 +168,10 @@ class ResidencyManager:
             if record.state != ResourceState.QUEUED:
                 return False
             record.state = ResourceState.CPU_ONLY
+            record.consumer_leases.clear()
+            record.speculative = False
+            record.used = False
+            self._refresh_priority(record)
             self._condition.notify_all()
             return True
 
@@ -214,6 +231,21 @@ class ResidencyManager:
             record = self._records[key]
             if record.state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
                 return False
+            effective_consumer_leases = consumer_leases
+            if not demand and record.state == ResourceState.QUEUED:
+                if not record.consumer_leases:
+                    record.state = ResourceState.CPU_ONLY
+                    record.speculative = False
+                    record.used = False
+                    self._refresh_priority(record)
+                    self._condition.notify_all()
+                    return False
+                effective_consumer_leases = dict(record.consumer_leases)
+                if consumer_leases is not None:
+                    for consumer in effective_consumer_leases.keys() & consumer_leases.keys():
+                        effective_consumer_leases[consumer] = consumer_leases[consumer]
+                priority = sum(value for value, _ in effective_consumer_leases.values())
+                deadline = min(value for _, value in effective_consumer_leases.values())
             kind = key.kind
             protected = protected or set()
             used = len(self._resident[kind]) + len(self._reserved[kind])
@@ -235,10 +267,10 @@ class ResidencyManager:
             record.demand_active = demand
             if demand:
                 record.consumer_leases = {}
-            elif consumer_leases is None:
+            elif effective_consumer_leases is None:
                 record.consumer_leases = {"__transfer__": (priority, deadline)}
             else:
-                record.consumer_leases = dict(consumer_leases)
+                record.consumer_leases = dict(effective_consumer_leases)
             self._refresh_priority(record)
             self._condition.notify_all()
             return True
