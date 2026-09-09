@@ -298,6 +298,7 @@ class TransferWorker:
             requests = self.queue.pop_many(self.max_batch_size, block=True)
             if not requests:
                 return
+            current_step = self.queue.current_step
             accepted = []
             for request in requests:
                 mib = max(request.size_bytes / 2**20, 1e-6)
@@ -307,7 +308,7 @@ class TransferWorker:
                         * probability
                         / max(
                             1,
-                            request.consumer_deadlines[consumer] - self.queue.current_step,
+                            request.consumer_deadlines[consumer] - current_step,
                         )
                         / mib,
                         request.consumer_deadlines[consumer],
@@ -316,7 +317,7 @@ class TransferWorker:
                 }
                 if self.residency.begin_transfer(
                     request.key,
-                    priority=request.priority(self.queue.current_step),
+                    priority=request.priority(current_step),
                     deadline=request.deadline,
                     demand=request.demand,
                     consumer_leases=consumer_leases,

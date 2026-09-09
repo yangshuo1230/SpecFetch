@@ -128,15 +128,38 @@ def benchmark_shared_queue_upsert(consumers: int, iterations: int, repeat: int) 
     print(f"shared queue upsert speedup: {legacy / current:.2f}x")
 
 
+def benchmark_worker_step_snapshot(accesses: int, iterations: int, repeat: int) -> None:
+    """Compare repeated locked logical-step reads with one batch snapshot."""
+    queue = MemoryRequestQueue()
+
+    def legacy_per_consumer_reads() -> int:
+        current_step = 0
+        for _ in range(accesses):
+            current_step = queue.current_step
+        return current_step
+
+    def current_batch_snapshot() -> int:
+        return queue.current_step
+
+    legacy = _measure(legacy_per_consumer_reads, iterations, repeat)
+    current = _measure(current_batch_snapshot, iterations, repeat)
+    print(f"worker logical step, {accesses} uses: legacy_repeated_lock_us={legacy:.3f}")
+    print(f"worker logical step, {accesses} uses: current_batch_snapshot_us={current:.3f}")
+    print(f"worker logical-step read speedup: {legacy / current:.2f}x")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=2_000)
     parser.add_argument("--queue-iterations", type=int, default=20)
     parser.add_argument("--queue-consumers", type=int, default=2_000)
+    parser.add_argument("--step-accesses", type=int, default=100_000)
+    parser.add_argument("--step-iterations", type=int, default=20)
     parser.add_argument("--repeat", type=int, default=7)
     args = parser.parse_args()
     benchmark_residency_eviction(args.iterations, args.repeat)
     benchmark_shared_queue_upsert(args.queue_consumers, args.queue_iterations, args.repeat)
+    benchmark_worker_step_snapshot(args.step_accesses, args.step_iterations, args.repeat)
 
 
 if __name__ == "__main__":

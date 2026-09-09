@@ -240,6 +240,41 @@ def test_prefetch_many_queues_each_consumer_and_marks_resource_once():
     }
 
 
+def test_transfer_worker_reads_current_step_once_per_popped_batch():
+    class CountingQueue(MemoryRequestQueue):
+        def __init__(self):
+            super().__init__()
+            self.current_step_reads = 0
+
+        @property
+        def current_step(self):
+            self.current_step_reads += 1
+            return super().current_step
+
+    queue = CountingQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 3, ResourceKind.KV: 1})
+    backend = FakeBackend()
+    worker = TransferWorker(queue, residency, backend, max_batch_size=3)
+    runtime = OffloadRuntime(queue, residency, worker)
+    for index in range(3):
+        residency.register_cpu(resource(index), f"cpu:{index}", 2**20)
+    runtime.prefetch_many(
+        [
+            PrefetchRequest(resource(index), consumer, 0.5, index + 2, 4.0)
+            for index in range(3)
+            for consumer in ("a", "b")
+        ]
+    )
+    queue.current_step_reads = 0
+    queue.close()
+
+    worker.start()
+    worker.close(drain=True)
+
+    assert queue.current_step_reads == 1
+    assert set(backend.copies) == {resource(index) for index in range(3)}
+
+
 def test_cancel_after_queue_pop_prevents_stale_speculative_transfer():
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})

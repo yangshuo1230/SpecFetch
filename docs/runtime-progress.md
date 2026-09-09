@@ -115,7 +115,7 @@ count. Unseen Target mass is never used online.
 
 ## Correctness evidence
 
-- 当前 82 项 CPU 测试全部通过；两项 opt-in CUDA 测试已在此前检查点于物理 GPU 2 通过，
+- 当前 87 项 CPU 测试全部通过；两项 opt-in CUDA 测试已在此前检查点于物理 GPU 2 通过，
   包括 multi-chunk slot-mapped fused MoE、容量 2/3、稀疏/全局 expert map 与事件槽复用。
   最新滚动准入/GQA 改动已通过完整 CPU 测试、Ruff lint/format 与 `git diff --check`；
   CUDA 和实模门禁因四张 GPU 均被外部任务占用而待跑，不能沿用上一提交替代。
@@ -269,20 +269,18 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 
 ## Next actions
 
-1. GPU 继续繁忙时完成最后一项 CPU 可验证优化：TransferWorker 每批只读取一次
-   logical step，用锁访问测试和微基准记录收益后提交。
-2. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 快速复测
+1. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 快速复测
    grouped GQA、跨请求 KV demand 和 layer lookahead 2 的 20-token 数值与时延。
-3. c512 通过后重跑 batch-4/context-4K/output-17 demand 与 speculative H1，核对
+2. c512 通过后重跑 batch-4/context-4K/output-17 demand 与 speculative H1，核对
    68-token 因果一致、最大单批候选、dropped speculative、demand wait 与端到端时延。
-4. 若滚动窗口仍提交过量，再在窗口内扫描 expert/KV 唯一资源预算；只保留降低时延的
+3. 若滚动窗口仍提交过量，再在窗口内扫描 expert/KV 唯一资源预算；只保留降低时延的
    配置，未经 GPU 验证不设为默认。
-5. 更新本文档并执行最终审计；所有正确性与性能门禁结算后再把 feature 分支合并到
+4. 更新本文档并执行最终审计；所有正确性与性能门禁结算后再把 feature 分支合并到
    `main`, and push only after every correctness/performance gate is accounted for.
 
 ## 当前 CPU 检查点边界
 
-- 本检查点在四张 GPU 均被外部作业长期占用时提交，目的是先固化已通过 82 项 CPU
+- 本检查点在四张 GPU 均被外部作业长期占用时提交，目的是先固化已通过 87 项 CPU
   回归的实现与审计结果；它不是性能发布版本，也不改变 `main`。
 - 新增滚动 deadline 准入、过期 consumer 撤销、窗口内唯一资源预算、跨请求 KV demand、
   单次 Target marginal 同步和 grouped GQA 均只有 CPU 数值/状态机证据，不能据此宣称
@@ -311,6 +309,14 @@ deadline 并压入一个堆项；重复 consumer 仍以最后一次 probability/
 不代表端到端或 GPU 加速；可用同一脚本的 `--queue-consumers` 和 `--queue-iterations`
 参数调整规模。等价性测试覆盖重复 consumer、deadline、miss cost、demand 和每唯一
 资源只生成一个堆项。
+
+TransferWorker 现在在每次 `pop_many` 成功后快照一次 logical step，同一批内所有
+consumer lease 和资源 priority 共用该值，避免在每个 consumer 和每个资源上重复
+获取 queue condition 锁。CPython 3.12、100,000 次逻辑读取、每轮 20 次、7 轮中位数：
+旧的重复加锁路径 43.409 ms/次，新的单次快照 0.432 us/次，即 100,520x。该比较只
+隔离逻辑时间读取开销，不包含批内其余 worker 工作，也不是端到端收益。测试使用
+三资源、六 consumer 的实际 worker batch 锁定每批恰好一次 `current_step` 读取；
+微基准可用 `--step-accesses` 和 `--step-iterations` 调整。
 
 ## Safety and versioning
 
