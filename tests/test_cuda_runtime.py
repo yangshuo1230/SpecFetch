@@ -124,7 +124,7 @@ def test_cuda_batched_packed_vllm_fused_moe_matches_torch(monkeypatch):
 def test_vllm_rms_norm_matches_reference_for_batched_decode_shape():
     backend = CudaTransferBackend("cuda:0", expert_slots=1)
     fused = optional_vllm_rms_norm("vllm", backend)
-    hidden = torch.randn(4, 1, 128, dtype=torch.bfloat16, device="cuda:0")
+    hidden = torch.randn(4, 1, 4, 128, dtype=torch.bfloat16, device="cuda:0")
     weight = torch.randn(128, dtype=torch.bfloat16, device="cuda:0")
 
     actual = fused(hidden, weight, 1e-6)

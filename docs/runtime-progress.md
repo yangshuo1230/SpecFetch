@@ -408,6 +408,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     layout；参数严格沿用 Qwen full head dim、NeoX rotate、theta/scaling/max position，cache 在
     engine 初始化时上设备。torch 保留 HF 路径，CUDA opt-in 对 511/1023/4095/4096 位置与
     vLLM native reference 对照。
+34. Attention `q_norm`/`k_norm` 也统一接入 fused RMSNorm，四维 `[B,T,H,D]` 保持 last-dim
+    归一化语义；每层再消除两组 HF cast/pow/mean/rsqrt/multiply/cast 链，CUDA opt-in RMSNorm
+    测试相应覆盖四维 Q layout。
 
 ## Next actions
 

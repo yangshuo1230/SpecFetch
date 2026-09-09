@@ -413,8 +413,8 @@ class Qwen3SparseOffloadEngine:
             dim=-1,
         )
         shape = (*hidden.shape[:-1], -1, attention.head_dim)
-        query = attention.q_norm(query_states.view(shape))
-        key = attention.k_norm(key_states.view(shape))
+        query = self._norm(attention.q_norm, query_states.view(shape))
+        key = self._norm(attention.k_norm, key_states.view(shape))
         value = value.view(shape).transpose(1, 2)
         if self._rotary_embedding is not None:
             query, key = self._rotary_embedding(positions, query, key)

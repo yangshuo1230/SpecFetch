@@ -126,7 +126,7 @@ def test_engine_routes_every_norm_through_resolved_kernel():
     output = engine.prefill(torch.tensor([[1, 2, 3]]), ["a"])
     engine.decode(output.logits[:, -1].argmax(-1), output.state, StepPredictions())
 
-    assert len(calls) == 10  # input/post/final norm in both 2-layer passes.
+    assert len(calls) == 18  # Input/post/Q/K/final norms in both 2-layer passes.
     worker.close()
 
 
@@ -152,7 +152,7 @@ def test_engine_fuses_residual_add_norm_boundaries():
     engine.decode(output.logits[:, -1].argmax(-1), output.state, StepPredictions())
 
     assert len(fused_calls) == 8  # Four residual boundaries per 2-layer pass.
-    assert len(standalone_calls) == 10  # Includes the eight fake fused norm bodies.
+    assert len(standalone_calls) == 18  # Also includes eight Q/K norms.
     worker.close()
 
 
