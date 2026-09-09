@@ -174,6 +174,14 @@ class DraftSignalProvider:
         if target_state.request_ids != self.request_ids:
             raise ValueError("draft and target request order differs")
         base_length = self.cache.get_seq_length()
+        # Full-resident Target KV never consumes draft attention ranks.  Asking
+        # Transformers for attentions in that mode materializes every draft
+        # layer's (batch, heads, 1, context) tensor and then needlessly copies it
+        # to CPU.  Keep hidden states independently enabled for expert probes.
+        predict_kv = not target_state.kv or any(
+            cache.config.kv_storage != "resident" for cache in target_state.kv.values()
+        )
+        predict_experts = self.probe_bank is not None
         token = self.next_logits.argmax(dim=-1)
         proposed = []
         outputs = []
@@ -183,8 +191,8 @@ class DraftSignalProvider:
                 input_ids=token[:, None],
                 past_key_values=self.cache,
                 use_cache=True,
-                output_attentions=True,
-                output_hidden_states=True,
+                output_attentions=predict_kv,
+                output_hidden_states=predict_experts,
                 return_dict=True,
             )
             outputs.append(output)
@@ -192,24 +200,25 @@ class DraftSignalProvider:
         self.cache.crop(base_length)
 
         target_layers = len({layer for _, layer in target_state.kv})
-        draft_layers = len(outputs[0].attentions)
+        draft_layers = len(outputs[0].attentions) if predict_kv else 0
         horizons = []
         for output in outputs:
             prediction = StepPredictions()
             cpu_attentions: dict[int, torch.Tensor] = {}
             cpu_features: dict[int, torch.Tensor] = {}
             for target_layer in range(target_layers):
-                draft_layer = map_layer(target_layer, target_layers, draft_layers)
-                if draft_layer not in cpu_attentions:
-                    cpu_attentions[draft_layer] = (
-                        output.attentions[draft_layer][:, :, -1].detach().float().cpu()
-                    )
-                attention = cpu_attentions[draft_layer]
-                for request_index, request_id in enumerate(self.request_ids):
-                    ranges = target_state.kv[(request_id, target_layer)].old_ranges
-                    prediction.kv[(request_id, target_layer)] = aggregate_old_chunk_mass(
-                        attention[request_index], ranges
-                    )
+                if predict_kv:
+                    draft_layer = map_layer(target_layer, target_layers, draft_layers)
+                    if draft_layer not in cpu_attentions:
+                        cpu_attentions[draft_layer] = (
+                            output.attentions[draft_layer][:, :, -1].detach().float().cpu()
+                        )
+                    attention = cpu_attentions[draft_layer]
+                    for request_index, request_id in enumerate(self.request_ids):
+                        ranges = target_state.kv[(request_id, target_layer)].old_ranges
+                        prediction.kv[(request_id, target_layer)] = aggregate_old_chunk_mass(
+                            attention[request_index], ranges
+                        )
                 if self.probe_bank is not None:
                     feature_layer = self.probe_bank.entries[target_layer].draft_layer
                     if feature_layer not in cpu_features:

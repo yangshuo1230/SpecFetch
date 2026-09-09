@@ -78,6 +78,8 @@ KV chunks, 64 expert slots, and 512 old-KV slots.
 Resident KV mode bypasses KV queue traffic and hybrid stopping. Each decode append is an
 in-place write into the preallocated cache and attention uses PyTorch SDPA with native
 GQA, avoiding old-chunk concatenation and per-chunk target-marginal synchronization.
+The Draft rollout independently disables attention outputs and CPU attention aggregation
+for resident Target KV, while retaining hidden-state output when expert probes need it.
 The sparse mode remains the default until matched GPU measurements establish which mode
 wins at each release context.
 

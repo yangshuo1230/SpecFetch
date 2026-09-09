@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -9,6 +11,12 @@ from src.runtime.predictor import (
     aggregate_old_chunk_mass,
 )
 from src.runtime.qwen3_engine import BatchState
+
+
+class StubTargetCache:
+    def __init__(self, kv_storage: str, old_ranges=None):
+        self.config = SimpleNamespace(kv_storage=kv_storage)
+        self.old_ranges = old_ranges or {}
 
 
 def test_attention_aggregation_uses_target_chunk_ranges():
@@ -62,6 +70,89 @@ def test_draft_rollout_restores_prefix_cache():
     assert provider.cache.get_seq_length() == 4
     provider.advance(torch.tensor([[5, 6]]))
     assert provider.cache.get_seq_length() == 6
+
+
+def test_resident_target_skips_draft_attentions_but_keeps_expert_features():
+    config = Qwen3Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        max_position_embeddings=32,
+    )
+    config._attn_implementation = "eager"
+    model = Qwen3ForCausalLM(config).eval()
+    rollout_options = []
+    original_forward = model.forward
+
+    def recording_forward(*args, **kwargs):
+        if "output_attentions" in kwargs:
+            rollout_options.append((kwargs["output_attentions"], kwargs["output_hidden_states"]))
+        return original_forward(*args, **kwargs)
+
+    model.forward = recording_forward
+    probe = {
+        "x_mean": torch.zeros(1, config.hidden_size),
+        "x_scale": torch.ones(1, config.hidden_size),
+        "y_mean": torch.zeros(1, 2),
+        "coef": torch.zeros(config.hidden_size, 2),
+    }
+    provider = DraftSignalProvider(
+        model,
+        ExpertProbeBank({0: ProbeEntry(0, probe)}),
+        lookahead=2,
+    )
+    provider.initialize(torch.tensor([[1, 2, 3]]), ["r0"])
+    state = BatchState(
+        ["r0"],
+        [3],
+        {("r0", 0): StubTargetCache("resident")},
+    )
+
+    plan = provider.predict(state)
+
+    assert rollout_options == [(False, True), (False, True)]
+    assert all(not prediction.kv for prediction in plan.horizons)
+    assert all(0 in prediction.experts for prediction in plan.horizons)
+
+
+def test_sparse_target_still_requests_and_aggregates_draft_attention():
+    config = Qwen3Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        max_position_embeddings=32,
+    )
+    config._attn_implementation = "eager"
+    model = Qwen3ForCausalLM(config).eval()
+    rollout_options = []
+    original_forward = model.forward
+
+    def recording_forward(*args, **kwargs):
+        if "output_attentions" in kwargs:
+            rollout_options.append((kwargs["output_attentions"], kwargs["output_hidden_states"]))
+        return original_forward(*args, **kwargs)
+
+    model.forward = recording_forward
+    provider = DraftSignalProvider(model, probe_bank=None, lookahead=1)
+    provider.initialize(torch.tensor([[1, 2, 3]]), ["r0"])
+    state = BatchState(
+        ["r0"],
+        [3],
+        {("r0", 0): StubTargetCache("sparse", {0: (0, 2), 1: (2, 4)})},
+    )
+
+    plan = provider.predict(state)
+
+    assert rollout_options == [(True, False)]
+    assert set(plan.horizons[0].kv[("r0", 0)]) == {0, 1}
 
 
 def test_batched_draft_prefix_splits_into_independent_request_caches():
