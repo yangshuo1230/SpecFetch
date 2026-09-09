@@ -142,6 +142,18 @@ def test_expert_demand_planning_requires_cpu_route_ids():
     worker.close()
 
 
+def test_registry_reuses_canonical_preloaded_resource_key():
+    experts = [make_expert(0)]
+    _, registry, worker = runtime_with(experts)
+
+    first = registry.ensure(0, 0)
+    second = registry.ensure(0, 0)
+
+    assert first is second
+    assert registry._keys[(0, 0)] is first
+    worker.close()
+
+
 def test_grouped_prefill_streams_more_experts_than_cache_capacity():
     from src.runtime.transfer import PackedExpertSlots
 

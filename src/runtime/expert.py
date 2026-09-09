@@ -141,20 +141,25 @@ class ExpertRegistry:
         self.source = source
         self.residency = residency
         self._registered: set[ResourceKey] = set()
+        self._keys: dict[tuple[int, int], ResourceKey] = {}
         self._lock = threading.Lock()
 
     def ensure(self, layer: int, expert: int) -> ResourceKey:
-        key = expert_key(layer, expert)
+        identity = (layer, expert)
+        key = self._keys.get(identity)
         # Registrations only grow, and release/eviction never removes the CPU
         # record. Preloaded serving therefore takes this read-only fast path
         # instead of acquiring one registry lock per predicted/actual route.
-        if key in self._registered:
+        if key is not None:
             return key
         with self._lock:
-            if key not in self._registered:
+            key = self._keys.get(identity)
+            if key is None:
+                key = expert_key(layer, expert)
                 weights = self.source.get(layer, expert)
                 self.residency.register_cpu(key, weights, weights.size_bytes)
                 self._registered.add(key)
+                self._keys[identity] = key
         return key
 
     def preload(self, layers: range, experts: range) -> None:

@@ -423,6 +423,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     仍以实际 pop 时的 current step 精确计算，heap 工作移出 Target compute 关键路径。
     1,000 queued resources 下 100,000 次连续 step 发布为 0.648 us/call；旧同步 heapify 基准
     为 0.681 ms/call，Target 侧约三个数量级下降，惰性 rebuild 由 worker 承担并可合并。
+38. Release 形状 expert prediction admission 的 CPU profile 为 23.10 ms/refresh，其中 preload
+    命中仍每窗口构造约 1,384 个等值 `ResourceKey`。ExpertRegistry 现缓存并返回每个
+    `(layer, expert)` 的 canonical key，消除刷新期身份对象构造和初始组合 hash。相同完整
+    admission/cancel 微基准降至 19.45 ms/refresh，约减少 15.8%。
 
 ## Next actions
 
