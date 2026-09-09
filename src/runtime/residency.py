@@ -179,17 +179,17 @@ class ResidencyManager:
         self, kind: ResourceKind, protected: set[ResourceKey]
     ) -> ResourceKey | None:
         lru = self._resident[kind]
-        order = {key: index for index, key in enumerate(lru)}
-        candidates = [key for key in lru if key not in protected and not self._records[key].pinned]
-        return min(
-            candidates,
-            key=lambda key: (
-                self._records[key].priority,
-                -self._records[key].deadline,
-                order[key],
-            ),
-            default=None,
-        )
+        victim = None
+        victim_rank: tuple[float, int, int] | None = None
+        for lru_order, key in enumerate(lru):
+            record = self._records[key]
+            if key in protected or record.pinned:
+                continue
+            rank = (record.priority, -record.deadline, lru_order)
+            if victim_rank is None or rank < victim_rank:
+                victim = key
+                victim_rank = rank
+        return victim
 
     @staticmethod
     def _refresh_priority(record: ResourceRecord) -> None:
@@ -202,11 +202,8 @@ class ResidencyManager:
             default=0,
         )
 
-    def _evict_one(self, kind: ResourceKind, protected: set[ResourceKey]) -> None:
+    def _evict_victim(self, kind: ResourceKind, victim: ResourceKey) -> None:
         lru = self._resident[kind]
-        victim = self._eviction_candidate(kind, protected)
-        if victim is None:
-            raise CacheFullError(f"no evictable {kind.value} cache slot")
         lru.pop(victim)
         record = self._records[victim]
         if record.speculative and not record.used:
@@ -257,7 +254,7 @@ class ResidencyManager:
                     record.state = ResourceState.CPU_ONLY
                     self._condition.notify_all()
                     return False
-                self._evict_one(kind, protected | {key})
+                self._evict_victim(kind, victim)
             self._reserved[kind].add(key)
             record.state = ResourceState.IN_FLIGHT
             record.priority = priority

@@ -269,9 +269,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 
 ## Next actions
 
-1. GPU 继续繁忙时完成三项 CPU 可验证优化：驻留淘汰候选单遍选择、同资源批量 upsert
-   避免逐 consumer 重算 deadline、TransferWorker 每批只读取一次 logical step；分别用
-   等价性/锁访问测试和微基准记录收益后提交。
+1. GPU 继续繁忙时完成余下两项 CPU 可验证优化：同资源批量 upsert 避免逐 consumer
+   重算 deadline、TransferWorker 每批只读取一次 logical step；分别用等价性/锁访问测试
+   和微基准记录收益后提交。
 2. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 快速复测
    grouped GQA、跨请求 KV demand 和 layer lookahead 2 的 20-token 数值与时延。
 3. c512 通过后重跑 batch-4/context-4K/output-17 demand 与 speculative H1，核对
@@ -293,6 +293,16 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 - `runtime-batched-demand-vllm-kvbatch-b4-c4096-o17.json` 的 451.895 s 结果来自上述
   grouped GQA/跨请求合批改动之前，只证明上一轮 guaranteed-prefix KV demand batching；
   它不能替代本检查点的待跑 GPU 门禁。
+
+### CPU 热路径微基准
+
+驻留满缓存路径已把候选选择从构造 `order` 字典、候选列表并扫描两次，改为单遍维护
+最小 rank，且准入检查与实际淘汰复用同一 victim。CPython 3.12、512 个 resident、每轮
+2,000 次、7 轮中位数：旧参考路径 1681.729 us/次，新路径 348.423 us/次，即 4.83x；
+这是 CPU bookkeeping 微基准，不代表端到端或 GPU 加速。测试同时锁定 priority、deadline、
+LRU tie-break、pinned/protected 排除、低优先级拒绝，以及每次满缓存准入只选择一次。
+可用 `PYTHONPATH=. python benchmarks/runtime_cpu_microbench.py --iterations 2000 --repeat 7`
+复测。
 
 ## Safety and versioning
 

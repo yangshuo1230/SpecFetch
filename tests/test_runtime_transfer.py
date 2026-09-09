@@ -339,3 +339,44 @@ def test_low_priority_prefetch_cannot_evict_high_priority_lease():
     assert not residency.begin_transfer(resource(1), priority=1, deadline=5)
     assert residency.state(resource(0)) == ResourceState.GPU_RESIDENT
     assert residency.state(resource(1)) == ResourceState.CPU_ONLY
+
+
+def test_eviction_prefers_priority_then_deadline_then_lru_and_honors_protection():
+    residency = ResidencyManager({ResourceKind.EXPERT: 5, ResourceKind.KV: 1})
+    for index in range(6):
+        residency.register_cpu(resource(index), str(index), 1)
+    leases = [
+        (2.0, 1),
+        (1.0, 4),
+        (1.0, 6),
+        (1.0, 6),
+        (0.5, 10),
+    ]
+    for index, (priority, deadline) in enumerate(leases):
+        assert residency.begin_transfer(resource(index), priority=priority, deadline=deadline)
+        residency.complete_transfer(resource(index), f"gpu:{index}")
+    residency.set_pinned(resource(4), True)
+
+    assert residency._eviction_candidate(ResourceKind.EXPERT, set()) == resource(2)
+    assert residency._eviction_candidate(ResourceKind.EXPERT, {resource(2)}) == resource(3)
+
+
+def test_full_cache_prefetch_selects_eviction_candidate_once(monkeypatch):
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    residency.register_cpu(resource(0), "a", 1)
+    residency.register_cpu(resource(1), "b", 1)
+    assert residency.begin_transfer(resource(0), priority=1, deadline=5)
+    residency.complete_transfer(resource(0), "gpu:a")
+    calls = 0
+    original = residency._eviction_candidate
+
+    def counted_candidate(kind, protected):
+        nonlocal calls
+        calls += 1
+        return original(kind, protected)
+
+    monkeypatch.setattr(residency, "_eviction_candidate", counted_candidate)
+    assert residency.begin_transfer(resource(1), priority=2, deadline=1)
+    assert calls == 1
+    assert residency.state(resource(0)) == ResourceState.CPU_ONLY
+    assert residency.state(resource(1)) == ResourceState.IN_FLIGHT
