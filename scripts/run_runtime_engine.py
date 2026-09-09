@@ -5,6 +5,7 @@ import json
 import math
 import statistics
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -64,6 +65,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--marginal-patience", type=int, default=2)
     parser.add_argument("--minimum-old-chunks", type=int, default=2)
     parser.add_argument("--expert-cache-slots", type=int, default=64)
+    parser.add_argument(
+        "--maximize-expert-cache",
+        action="store_true",
+        help="Fill the matched GPU budget with expert slots after a workspace reserve",
+    )
+    parser.add_argument(
+        "--gpu-workspace-reserve-gib",
+        type=float,
+        default=1.0,
+        help="GPU memory kept outside persistent model/KV/expert payloads in maximize mode",
+    )
     parser.add_argument("--kv-cache-slots", type=int, default=512)
     parser.add_argument(
         "--kv-storage",
@@ -126,6 +138,25 @@ def draft_signals_required(
     return kv_storage == "sparse" or (prefetch_enabled and expert_probes_available)
 
 
+def maximize_expert_cache_slots(
+    *,
+    memory_limit_gib: float,
+    base_allocated_gib: float,
+    resident_kv_bytes: int,
+    expert_slot_bytes: int,
+    workspace_reserve_gib: float,
+    maximum_slots: int,
+) -> int:
+    """Fill persistent headroom with whole expert slots after a fixed reserve."""
+    available_gib = (
+        memory_limit_gib - base_allocated_gib - resident_kv_bytes / 2**30 - workspace_reserve_gib
+    )
+    slots = int(available_gib * 2**30 // expert_slot_bytes)
+    if slots <= 0:
+        raise ValueError("GPU budget leaves no expert cache slot after the workspace reserve")
+    return min(slots, maximum_slots)
+
+
 def main() -> None:
     args = parse_args()
     if args.max_new_tokens < 2:
@@ -134,6 +165,10 @@ def main() -> None:
         not math.isfinite(args.gpu_memory_limit_gib) or args.gpu_memory_limit_gib <= 0
     ):
         raise ValueError("gpu-memory-limit-gib must be positive")
+    if not math.isfinite(args.gpu_workspace_reserve_gib) or args.gpu_workspace_reserve_gib < 0:
+        raise ValueError("gpu-workspace-reserve-gib must be non-negative")
+    if args.maximize_expert_cache and args.gpu_memory_limit_gib is None:
+        raise ValueError("maximize-expert-cache requires gpu-memory-limit-gib")
     require_idle_gpus(1000, 10, {args.physical_gpu_index})
     cuda_device = torch.device(args.device)
     total_gpu_gib = torch.cuda.get_device_properties(cuda_device).total_memory / 2**30
@@ -206,6 +241,24 @@ def main() -> None:
         provider = DraftSignalProvider(draft, probes, args.lookahead)
     else:
         provider = None
+
+    if args.maximize_expert_cache:
+        resident_bytes = Qwen3SparseOffloadEngine.resident_kv_payload_bytes(
+            target,
+            config,
+            args.batch_size,
+        )
+        resolved_expert_cache_slots = maximize_expert_cache_slots(
+            memory_limit_gib=args.gpu_memory_limit_gib,
+            base_allocated_gib=torch.cuda.memory_allocated(cuda_device) / 2**30,
+            resident_kv_bytes=resident_bytes,
+            expert_slot_bytes=Qwen3SparseOffloadEngine.expert_slot_bytes(target),
+            workspace_reserve_gib=args.gpu_workspace_reserve_gib,
+            maximum_slots=len(target.model.layers) * target.config.num_experts,
+        )
+        config = replace(config, expert_cache_slots=resolved_expert_cache_slots)
+    else:
+        resolved_expert_cache_slots = config.expert_cache_slots
 
     queue = MemoryRequestQueue()
     residency = ResidencyManager(
@@ -422,6 +475,7 @@ def main() -> None:
             "policy": "speculative" if use_prediction_prefetch else "demand_only",
             "draft_signals_enabled": use_draft_signals,
             "prediction_prefetch_enabled": use_prediction_prefetch,
+            "resolved_expert_cache_slots": resolved_expert_cache_slots,
             "resolved_moe_backend": engine.moe_backend,
         },
         "timing_protocol": "batch_decode_after_all_prefix_caches_v1",

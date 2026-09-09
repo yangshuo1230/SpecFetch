@@ -251,16 +251,17 @@ class Qwen3SparseOffloadEngine:
     def device(self) -> torch.device:
         return self.model.model.embed_tokens.weight.device
 
-    def resident_kv_allocation_bytes(self, batch_size: int) -> int:
+    @staticmethod
+    def resident_kv_payload_bytes(model, config: RuntimeConfig, batch_size: int) -> int:
         """Return the exact persistent buffer payload allocated by resident KV."""
         if batch_size <= 0:
             raise ValueError("batch size must be positive")
-        if self.config.kv_storage != "resident":
+        if config.kv_storage != "resident":
             return 0
-        capacity = self.config.resident_kv_capacity_tokens
+        capacity = config.resident_kv_capacity_tokens
         assert capacity is not None
         total = 0
-        for layer in self.model.model.layers:
+        for layer in model.model.layers:
             attention = layer.self_attn
             total += (
                 batch_size
@@ -272,16 +273,22 @@ class Qwen3SparseOffloadEngine:
             )
         return total
 
+    def resident_kv_allocation_bytes(self, batch_size: int) -> int:
+        return self.resident_kv_payload_bytes(self.model, self.config, batch_size)
+
+    @staticmethod
+    def expert_slot_bytes(model) -> int:
+        """Return one packed gate/up/down expert slot payload."""
+        return (
+            3
+            * model.config.hidden_size
+            * model.config.moe_intermediate_size
+            * model.model.embed_tokens.weight.element_size()
+        )
+
     def expert_slot_allocation_bytes(self) -> int:
         """Return the exact packed payload reserved by fixed expert slots."""
-        element_size = self.model.model.embed_tokens.weight.element_size()
-        return (
-            self.config.expert_cache_slots
-            * 3
-            * self.model.config.hidden_size
-            * self.model.config.moe_intermediate_size
-            * element_size
-        )
+        return self.config.expert_cache_slots * self.expert_slot_bytes(self.model)
 
     def _project(self, layer, hidden: torch.Tensor, position_embeddings):
         attention = layer.self_attn

@@ -365,6 +365,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 21. Target serving prefill 的 lm_head 只投影最后一个 prefix hidden row；full-sequence logits 改为
     显式 reference 选项。batch 4/context 4096/151,936 vocab 的 BF16 全 logits 约 4.64 GiB，
     旧路径生成后只读取末行；新路径消除该临时分配，同时末 token 与 full reference 对齐。
+22. 新增 opt-in `--maximize-expert-cache`：在 matched cap 中扣除实测 base allocation、精确
+    resident KV payload 和显式 `--gpu-workspace-reserve-gib` 后，以完整 expert slot 为单位填满
+    剩余空间，并记录 resolved slots。默认仍为 64，待两项真实工作负载确定共同安全 reserve。
 
 ## Next actions
 

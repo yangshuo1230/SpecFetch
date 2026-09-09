@@ -134,3 +134,7 @@ Packed expert slots are budgeted the same way from slot count, hidden/expert wid
 dtype. The allocator cap is installed before model loading and warmup; pre-warmup and
 post-warmup lower bounds account for expert slots even when lazy initialization has not
 materialized them yet. This makes larger cache configurations reject safely before work.
+The opt-in cache maximizer fills the remaining matched cap with whole expert slots after
+an explicit workspace reserve, capped at the model's complete expert set. It records the
+resolved slot count; the fixed 64-slot default remains until matched GPU validation chooses
+a safe reserve for both release contexts.
