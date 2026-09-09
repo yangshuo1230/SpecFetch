@@ -332,6 +332,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 11. Expert registry 的 preload 命中新增只读无锁快路径，且同一 layer/horizon 的跨请求重复
     expert 只解析一次。以 batch 4、48 Target layers、4 horizons、Top-8 的窗口为例，避免了
     最多 6,144 次没有状态变化的 registry lock 进入。
+12. `resident + demand-only`（以及 resident 下没有 expert probes）的 decode 不再加载、prefill
+    或 rollout Draft：完整 KV 已驻留且没有 expert speculative consumer，此时所有 Draft 输出
+    都是死数据。JSON 新增 resolved `draft_signals_enabled` 和
+    `prediction_prefetch_enabled`，避免把该策略误记为 speculative。
 
 ## Next actions
 

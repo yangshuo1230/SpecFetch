@@ -116,6 +116,16 @@ def parse_thresholds(value: str) -> tuple[float, ...]:
     return thresholds
 
 
+def draft_signals_required(
+    kv_storage: str,
+    *,
+    prefetch_enabled: bool,
+    expert_probes_available: bool,
+) -> bool:
+    """Whether decode consumes any signal produced by the Draft model."""
+    return kv_storage == "sparse" or (prefetch_enabled and expert_probes_available)
+
+
 def main() -> None:
     args = parse_args()
     if args.max_new_tokens < 2:
@@ -131,6 +141,12 @@ def main() -> None:
     if not 0 < args.prefetch_horizons <= args.lookahead:
         raise ValueError("prefetch-horizons must be in [1, lookahead]")
     shadow_thresholds = parse_thresholds(args.shadow_thresholds)
+    use_draft_signals = draft_signals_required(
+        args.kv_storage,
+        prefetch_enabled=not args.disable_prefetch,
+        expert_probes_available=args.probes is not None,
+    )
+    use_prediction_prefetch = not args.disable_prefetch and use_draft_signals
     config = RuntimeConfig(
         sink_tokens=args.sink_tokens,
         recent_tokens=args.recent_tokens,
@@ -164,14 +180,18 @@ def main() -> None:
         dtype=torch.bfloat16,
         pin_experts=not args.no_pin_experts,
     )
-    draft = AutoModelForCausalLM.from_pretrained(
-        args.draft,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-    ).to(args.device)
-    probes = ExpertProbeBank.load(args.probes) if args.probes else None
+    if use_draft_signals:
+        draft = AutoModelForCausalLM.from_pretrained(
+            args.draft,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        ).to(args.device)
+        probes = ExpertProbeBank.load(args.probes) if args.probes else None
+        provider = DraftSignalProvider(draft, probes, args.lookahead)
+    else:
+        provider = None
 
     queue = MemoryRequestQueue()
     residency = ResidencyManager(
@@ -191,7 +211,6 @@ def main() -> None:
         config,
         moe_backend=args.moe_backend,
     )
-    provider = DraftSignalProvider(draft, probes, args.lookahead)
     request_ids = [f"request-{index}" for index in range(args.batch_size)]
     expert_preload_start = time.perf_counter()
     if not args.lazy_expert_store:
@@ -249,10 +268,13 @@ def main() -> None:
         prefill_seconds = time.perf_counter() - start
         transfer_after_prefill, prefill_transfer = worker.phase_metrics_since(transfer_start)
         residency_after_prefill = (residency.evictions, residency.wasted_prefetches)
-        start = time.perf_counter()
-        provider.initialize(input_ids, request_ids)
-        synchronize(args.device)
-        draft_prefill_seconds = time.perf_counter() - start
+        if provider is not None:
+            start = time.perf_counter()
+            provider.initialize(input_ids, request_ids)
+            synchronize(args.device)
+            draft_prefill_seconds = time.perf_counter() - start
+        else:
+            draft_prefill_seconds = 0.0
         transfer_after_draft_prefill, draft_prefill_transfer = worker.phase_metrics_since(
             transfer_after_prefill
         )
@@ -272,17 +294,21 @@ def main() -> None:
         threshold_sweep: dict[str, dict[str, list[float]]] = {}
         pending_actual: list[torch.Tensor] = []
         decode_start = time.perf_counter()
-        first_rollout_start = decode_start
-        plan = provider.predict(output.state)
-        synchronize(args.device)
-        first_rollout_seconds = time.perf_counter() - first_rollout_start
-        remaining_horizons = plan.horizons[:refresh_tokens]
+        if provider is not None:
+            first_rollout_start = decode_start
+            plan = provider.predict(output.state)
+            synchronize(args.device)
+            first_rollout_seconds = time.perf_counter() - first_rollout_start
+            remaining_horizons = plan.horizons[:refresh_tokens]
+        else:
+            first_rollout_seconds = 0.0
+            remaining_horizons = []
         for step_index in range(args.max_new_tokens - 1):
             # The first measured step starts before the initial rollout. Later
             # steps start at their own refresh/Target boundary.
             step_start = decode_start if step_index == 0 else time.perf_counter()
             draft_step_seconds = 0.0
-            if not remaining_horizons:
+            if provider is not None and not remaining_horizons:
                 draft_start = time.perf_counter()
                 provider.advance(torch.stack(pending_actual, dim=1))
                 plan = provider.predict(output.state)
@@ -295,14 +321,15 @@ def main() -> None:
                 token_ids,
                 output.state,
                 remaining_horizons[: args.prefetch_horizons],
-                prefetch=not args.disable_prefetch,
+                prefetch=use_prediction_prefetch,
                 shadow_attention=args.shadow_attention,
                 shadow_thresholds=shadow_thresholds,
             )
             synchronize(args.device)
             target_decode_seconds.append(time.perf_counter() - target_start)
             draft_seconds.append(draft_step_seconds)
-            pending_actual.append(token_ids)
+            if provider is not None:
+                pending_actual.append(token_ids)
             remaining_horizons = remaining_horizons[1:]
             token_ids = output.logits[:, -1].argmax(dim=-1).cpu()
             generated.append(token_ids)
@@ -366,7 +393,9 @@ def main() -> None:
             "prompts": str(args.prompts),
             "output": str(args.output),
             "probes": str(args.probes) if args.probes else None,
-            "policy": "demand_only" if args.disable_prefetch else "speculative",
+            "policy": "speculative" if use_prediction_prefetch else "demand_only",
+            "draft_signals_enabled": use_draft_signals,
+            "prediction_prefetch_enabled": use_prediction_prefetch,
             "resolved_moe_backend": engine.moe_backend,
         },
         "timing_protocol": "batch_decode_after_all_prefix_caches_v1",

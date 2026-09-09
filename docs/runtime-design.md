@@ -91,6 +91,9 @@ mode; expert prediction requests still use the unified queue and normal consumer
 Across all modes, mapped attention rows are transferred once per horizon and expert
 features once per complete rollout, rather than one D2H synchronization per draft layer.
 Each expert probe evaluates every horizon as one CPU batch.
+When resident KV is paired with demand-only expert loading (or no expert probes), decode
+has no consumer for any Draft signal. The release runner therefore does not load or run
+the Draft model for that policy and records the resolved signal/prefetch state explicitly.
 The sparse mode remains the default until matched GPU measurements establish which mode
 wins at each release context.
 
