@@ -3,6 +3,16 @@
 This repository tests whether signals already produced by speculative decoding can prefetch
 offloaded memory for Qwen/Qwen3-30B-A3B. The draft model is Qwen/Qwen3-0.6B.
 
+The current optimization target is steady-state decode, not prefill or model loading. Target and
+Draft prefix caches may be built by a separate straightforward high-performance prefill path. The
+decode timer starts immediately before the first speculative rollout, so every rollout/refresh,
+queue operation, H2D wait and Target decode kernel needed for generated tokens remains charged to
+the proposed method. The release target is at least 1.5x the decode tokens/s of vLLM
+CPU-weight-offload under the same model, precision, workload and GPU-memory limit. For a fixed
+number of generated tokens, the equivalent latency gate is at most two thirds of vLLM's decode
+wall time and TPOT. Python remains the semantic reference; measured hot paths may move to C++/CUDA,
+fused kernels, CUDA Graphs or device-side scheduling.
+
 ## Sparse offload inference runtime
 
 The `feature/sparse-offload-runtime` implementation is a runnable Qwen3-MoE reference engine, not
@@ -60,8 +70,23 @@ python -m scripts.run_runtime_engine \
 ~~~
 
 Both runtime modes use the same draft-ranked sparse KV set. `demand-only` suppresses early H2D but
-retains the predictor for an apples-to-apples sparse-attention choice. Timing includes draft prefill,
-rollout, draft-cache advancement, target compute and every demand wait.
+retains the predictor for an apples-to-apples sparse-attention choice. Legacy result files report
+end-to-end request time, but the active optimization gate excludes prefix prefill and includes the
+first rollout, later draft-cache advancement/refresh, Target compute, queue work and every demand
+wait in decode wall time.
+
+Decode comparisons use fixed-length generation with EOS ignored and enough output tokens to
+amortize startup jitter (64 tokens minimum, 128 preferred). The primary metrics are decode TPOT,
+decode tokens/s and batch decode wall time. vLLM must be measured over the matching interval after
+its first token rather than compared through total request latency. Cold-residency and warmed
+steady-state results are reported separately; they must not be mixed in one speedup claim. A
+configuration passes only when its matched SpecFetch/vLLM decode-throughput ratio is at least 1.50
+(equivalently its TPOT and fixed-token decode-wall-time ratios are at most 0.667).
+The predeclared release workloads are batch 4 at contexts 512 and 4096, each timing 64 fixed decode
+tokens after the first token from a matching declared residency state. Both workloads must pass;
+batch-1 diagnostics and preferred 128-token confirmation runs cannot substitute for either one.
+Kernel/JIT warmup may run outside the timer only if the declared residency/cache state is restored
+before measurement.
 
 For quality analysis, one non-performance run can compare every sparse attention output with a
 CPU full-attention shadow and evaluate several stopping thresholds on the same Target queries:
@@ -104,6 +129,8 @@ python -m scripts.run_continuous_runtime \
 
 结果会分别记录等待队列时延、单请求预填充、解码服务、活跃服务、TTFT 和端到端请求
 时延，使准入与回填成本保持可见，而不是全部折叠进单一吞吐量指标。
+这些服务指标继续保留用于诊断，但当前性能验收以 decode wall time/TPOT 为准，prefill、
+TTFT 和端到端请求时延不再决定本阶段是否通过。
 同一轮准入中长度相同的 prompt 会合并为一次 Target 预填充；不同长度仍分组执行，且每个
 请求继续维护独立的 Draft KV 状态。同组请求的 Draft 前缀也只批量计算一次，随后拆成
 请求私有 KV 缓存供独立推进；首轮 lookahead 同样先按组计算，再拆分为请求私有预测。

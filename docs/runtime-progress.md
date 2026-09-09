@@ -1,6 +1,6 @@
 # Sparse offload runtime progress
 
-Updated: 2026-09-09 00:54 UTC
+Updated: 2026-09-09 02:50 UTC
 Branch: `feature/sparse-offload-runtime`
 
 ## 协作约定
@@ -21,6 +21,27 @@ Sparse KV uses the agreed hybrid stopping rule: cumulative draft mass, target ma
 partition contribution, a consecutive-low-marginal requirement, and a minimum chunk
 count. Unseen Target mass is never used online.
 
+当前阶段的优化和发布门禁只针对 steady-state decode。模型加载、kernel warmup、Target/
+Draft prefix prefill 与 prefix cache 构造不计入主性能指标；prefill 可以采用与本项目解耦的
+直接高效实现，不要求走 speculative offload 路径。计时边界设在两侧 prefix cache 准备完成
+之后、首次 speculative rollout 之前，因此首次 rollout、后续 refresh、queue/residency
+调度、H2D、demand wait 和 Target decode 均计入 decode wall time，不能把必要工作藏入
+prefill。
+
+主指标改为固定长度 steady-state decode 的 batch wall time、TPOT 和 decode tokens/s；
+冷 residency 与稳态热缓存分别报告。vLLM 对照必须使用相同模型、精度、batch、context、
+输出长度和 GPU 显存约束，并从首 token 后的匹配区间计算 decode-only 指标。发布硬门禁是
+SpecFetch decode tokens/s 至少为 vLLM CPU-weight-offload 的 1.50 倍；固定 token 数下等价为
+decode wall time 和 TPOT 至多是 vLLM 的 0.667 倍。full-resident vLLM 只作为硬件上界。
+Python 路径继续承担语义参考和回归测试，profile 证明处于关键路径的调度、同步和 kernel
+必须允许下沉至 C++/CUDA、融合 kernel、CUDA Graph 或设备侧调度。
+
+预先声明的主发布 workload 为 batch 4、context 512 和 batch 4、context 4096；两者均在
+首 token 之后计时 64 个固定 decode token，并分别用一致的冷 residency 起点比较 SpecFetch
+与 vLLM。batch 1 用于定位低并发开销，128-token 运行用于确认稳态趋势，但不得替代两个
+主 workload。kernel/JIT warmup 可以在计时外完成，不过必须在开始计时前恢复声明的
+residency/cache 起点，避免把资源预取伪装成免费 prefill。
+
 ## Work breakdown and completion gates
 
 | Phase | Deliverable / gate | Status |
@@ -30,8 +51,8 @@ count. Unseen Target mass is never used online.
 | 3. Qwen execution | Meta non-expert load, exact Top-8 MoE, sparse KV decode, fixed-batch correctness | Complete |
 | 4. Prediction | Stateful four-token Draft rollout, KV ranking, expert probes, hybrid online stop | Complete |
 | 5. Serving | Variable-length admission, request removal/backfill, request-level TTFT/latency | Complete; full-model run passed |
-| 6. Optimization | Packed slots, coalesced queue, batched H2D, fused slot-mapped MoE | In progress |
-| 7. Evaluation | Demand/spec causality match, shadow quality, batch 1/4, 512/4K, vLLM baselines | In progress; prior baselines complete, current CUDA/4K reruns pending |
+| 6. Optimization | Decode-only pipeline: packed slots, coalesced queue/H2D, fused kernels, C++/CUDA hot paths | In progress |
+| 7. Evaluation | Causality/quality plus matched 512/4K decode; SpecFetch throughput >=1.50x vLLM offload | In progress; legacy end-to-end baselines complete, decode-only baseline pending |
 | 8. Release | Final regression, progress/results update, merge to `main`, push | Pending |
 
 ## Implemented
@@ -165,13 +186,19 @@ Workload: batch 4, context 512, output 5, sink 4, recent 256, KV chunk 64.
 | vLLM `cpu_offload_gb=54` | 6.524 | n/a | 3.066 tok/s |
 | vLLM full resident | 0.457 | n/a | 43.717 tok/s |
 
+该表是调整目标前的历史端到端实验，`Request seconds` 与端到端吞吐不再作为当前发布门禁。
+其中 SpecFetch 的 `Target decode` 也不是完整的新口径：首次 Draft rollout 被旧 runner 计入
+`draft_prefill_seconds`，而 vLLM 又没有独立 decode 计时，因此不能据此声称已经接近或超过
+vLLM。后续统一使用下文定义的长输出 decode-only protocol。
+
 At the target batch size speculation is a real speedup: 10.6% end-to-end throughput,
 26.6% Target-decode latency reduction, and 48.0% less cumulative decode demand wait.
 It turns 2,144 of 7,083 decode demands into hits while increasing total H2D bytes by only
 0.9%. Demand and speculative runs generate the same 20 tokens. 真实形状 warmup 后的 vLLM
 融合 MoE 路径保持 20 个 token 完全一致，并把 speculative 请求时延再降低 8.6%；剩余
 生产权重卸载基线差距由 3.67x 缩至 3.38x，但仍不满足期望的
-"roughly baseline" performance gate.
+当时使用的端到端 "roughly baseline" gate；该旧门禁现已被上文的 decode-only 1.50x
+硬目标取代。
 
 KV guaranteed-prefix 批量 demand 的首轮 c512 demand 复测为 24.078 s、0.831 tok/s；
 它比同后端批处理前快约 2.0%，但尚未重跑 speculative，所以上表保留成对可比结果。
@@ -188,6 +215,10 @@ Workload: batch 4, context 4096, output 17, sink 4, recent 256, KV chunk 64.
 | SpecFetch speculative H1 / vLLM MoE | 610.714 | 0.111 tok/s | 19.98x slower |
 | vLLM `cpu_offload_gb=54` | 30.561 | 2.225 tok/s | reference |
 | vLLM full resident | 2.382 | 28.549 tok/s | 12.83x faster |
+
+该表同样保留为历史诊断。端到端相对倍数不再是当前门禁，但 SpecFetch 已记录的 Target
+decode/demand wait 仍表明 4K decode 存在数量级瓶颈；必须用匹配的 vLLM decode-only
+结果重新定量，不能因排除 prefill 而忽略该问题。
 
 混合停止规则在该 4K 工作负载平均选择 48.71 个旧块。旧的逐块 blocking demand
 实现使 demand decode 产生 169,118 次 miss、150,412 个 transfer batch，累计 wait
@@ -256,27 +287,39 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 
 ## Known gaps
 
-1. 当前最佳 c512 仍比 vLLM 54-GiB weight offload 慢 3.38x；4K 的批量 KV demand
-   仍慢 14.79x。传输批次数大幅下降但总时延只改善 3.1%，性能门禁仍未通过。
-2. 4K H1 预测覆盖远低于提交规模并增加 demand wait；需要依据批量 KV 复测重新决定
+1. 当前 vLLM baseline 只记录总请求时间，尚无严格匹配的 decode-only wall time/TPOT；
+   旧的 3.38x（c512）和 14.79x（4K）均为历史端到端差距，不能用于新门禁。
+2. 现有 c512 的 6.600 s `Target decode` 漏计被归入 `draft_prefill_seconds` 的首次 rollout；
+   runner 必须拆分 prefix-cache 构造与首次 rollout，并用至少 64、优先 128 个输出 token
+   测量 steady state。
+3. 4K H1 预测覆盖远低于提交规模并增加 demand wait；需要依据批量 KV 复测重新决定
    长上下文的 admission budget/背压，不能沿用 c512 的无界候选提交。
-3. 连续 runner 已合并同长度准入请求；不同 prompt 长度仍需分组串行执行。分块预填充和
-   预填充/解码的 kernel 级交错仍属于后续生产集成工作。
-4. vLLM and the custom adapter use different BF16 attention/MoE kernel orders. Their
+4. Python queue/residency、逐层控制流和标量同步仍可能主导 TPOT；最新 GPU profile 后需要
+   明确 C++/CUDA 下沉边界，不能把 Python reference 当作最终性能实现。
+5. 尚无任何配置满足 `SpecFetch decode tokens/s / vLLM decode tokens/s >= 1.50`；在匹配
+   decode-only 基线建立前，不得用 Target-kernel 子计时或端到端旧结果代替该门禁。
+6. vLLM and the custom adapter use different BF16 attention/MoE kernel orders. Their
    first six generated tokens match in the short test, after which rounding changes the
    greedy path. Quality must be assessed statistically, not by requiring bit identity to
    vLLM.
 
 ## Next actions
 
-1. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 快速复测
-   grouped GQA、跨请求 KV demand 和 layer lookahead 2 的 20-token 数值与时延。
-2. c512 通过后重跑 batch-4/context-4K/output-17 demand 与 speculative H1，核对
-   68-token 因果一致、最大单批候选、dropped speculative、demand wait 与端到端时延。
-3. 若滚动窗口仍提交过量，再在窗口内扫描 expert/KV 唯一资源预算；只保留降低时延的
-   配置，未经 GPU 验证不设为默认。
-4. 更新本文档并执行最终审计；所有正确性与性能门禁结算后再把 feature 分支合并到
-   `main`, and push only after every correctness/performance gate is accounted for.
+1. 先改造 SpecFetch 与 vLLM runner 的计时：独立记录 prefix prefill、首次 rollout、后续
+   refresh 和匹配的 decode wall time；固定输出至少 64 token、优先 128 token，忽略 EOS。
+2. GPU 空闲后先运行两项 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
+   GQA、跨请求 KV demand 和 layer lookahead 2，并建立相同显存约束的 vLLM decode-only
+   baseline。
+3. c512 通过后重跑 batch-4/context-4K 的长输出 demand/speculative，核对 token 因果一致、
+   TPOT、最大单批候选、dropped speculative、H2D overlap 与 demand wait。
+4. 用 CUDA profiler 分解 Target kernel、Draft、Python 调度、queue/residency、同步和 H2D；
+   对主导路径实施架构优化，必要时迁移到 C++/CUDA、融合 kernel 或 CUDA Graph，而不是
+   继续堆叠 Python 微优化。
+5. 若滚动窗口仍提交过量，再扫描 expert/KV 唯一资源预算；只保留降低 decode TPOT 的配置，
+   未经 GPU 验证不设为默认。
+6. 更新本文档并执行最终审计；所有正确性与 decode 性能门禁结算后再把 feature 分支合并到
+   `main`。每个预先声明的主工作负载都必须达到 >=1.50x vLLM decode throughput；不能以
+   单一有利 workload、微基准、Target-kernel 子计时或非匹配口径替代发布门禁。
 
 ## 当前 CPU 检查点边界
 
@@ -290,6 +333,8 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 - `runtime-batched-demand-vllm-kvbatch-b4-c4096-o17.json` 的 451.895 s 结果来自上述
   grouped GQA/跨请求合批改动之前，只证明上一轮 guaranteed-prefix KV demand batching；
   它不能替代本检查点的待跑 GPU 门禁。
+- 旧 JSON 的 `request_seconds`、端到端 throughput 和首次 rollout 归属仍按旧 runner 定义；
+  它们作为历史记录保留，但不满足新的 decode-only 发布口径。
 
 ### CPU 热路径微基准
 

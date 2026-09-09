@@ -3,6 +3,27 @@
 The runtime separates model compute from memory movement. Compute submits resource
 intent and waits only on a missing dependency; one transfer worker owns the H2D stream.
 
+## Optimization scope and performance architecture
+
+当前优化阶段只研究 decode。模型加载、kernel warmup、Target/Draft prefix prefill 和
+prefix KV cache 构造不进入主性能门禁；prefill 可以使用独立、直接且高效的实现，不要求
+经过本项目的 speculative queue、稀疏 KV 选择或专家 offload 调度路径。prefill 的职责是
+为两种策略提供数值一致的起始 token 和 cache state，而不是验证本项目的核心假设。
+
+Decode 计时从 Target 和 Draft prefix cache 均准备完成之后、首次 speculative rollout
+之前开始。首次 rollout、后续 Draft refresh、预测准入与撤销、H2D、demand wait 和 Target
+计算均是产生后续 token 所必需的 decode 工作，必须计入 wall time，不能移入 prefill。
+主指标是固定长度 steady-state decode 的 TPOT、decode tokens/s 和 batch wall time；传输量、
+命中率、queue/admission 时间与 kernel 时间用于解释结果。
+
+Python 实现负责语义参考、因果测试和快速迭代，不被视为最终性能架构。如果 profile 表明
+Python 调度、逐层同步、queue/residency bookkeeping 或 kernel launch 位于关键路径，性能
+实现应下沉到 C++/CUDA，或采用 fused kernel、CUDA Graph 和设备侧调度。最终硬门禁是在
+相同模型、batch/context/output、精度与 GPU 显存约束下，使 decode tokens/s 至少达到
+vLLM CPU-weight-offload decode 的 1.5 倍；对固定生成 token 数，这等价于 batch decode
+wall time 和 TPOT 不高于 vLLM 的 2/3。vLLM full-resident 仅作硬件上界，不是本阶段
+主门禁。
+
 ## Resource lifecycle
 
 ~~~text
