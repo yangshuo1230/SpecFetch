@@ -54,6 +54,8 @@ def build_engine(
     speculative_layer_lookahead=None,
     backend=None,
     kv_cache_slots=32,
+    kv_storage="sparse",
+    resident_kv_capacity_tokens=None,
 ):
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 8, ResourceKind.KV: kv_cache_slots})
@@ -68,6 +70,8 @@ def build_engine(
         speculative_expert_budget=speculative_expert_budget,
         speculative_kv_budget=speculative_kv_budget,
         speculative_layer_lookahead=speculative_layer_lookahead,
+        kv_storage=kv_storage,
+        resident_kv_capacity_tokens=resident_kv_capacity_tokens,
     )
     engine = Qwen3SparseOffloadEngine.from_transformers_model(
         model, runtime, residency, runtime_config
@@ -273,6 +277,29 @@ def test_decode_matches_full_sequence_when_all_kv_is_resident():
     full = torch.cat((prefix, next_tokens[:, None]), dim=1)
     expected = reference(full, use_cache=False).logits[:, -1]
     assert torch.allclose(actual, expected, atol=3e-5, rtol=3e-5)
+    worker.close()
+
+
+def test_preallocated_resident_kv_decode_matches_full_sequence():
+    torch.manual_seed(121)
+    model = tiny_model()
+    reference = tiny_model()
+    reference.load_state_dict(model.state_dict())
+    engine, worker = build_engine(
+        model,
+        kv_storage="resident",
+        resident_kv_capacity_tokens=8,
+    )
+    tokens = torch.tensor([[1, 2, 3], [3, 2, 1]])
+    state = engine.prefill(tokens, ["a", "b"]).state
+
+    for next_tokens in (torch.tensor([4, 5]), torch.tensor([6, 7])):
+        actual = engine.decode(next_tokens, state, StepPredictions()).logits[:, -1]
+        tokens = torch.cat((tokens, next_tokens[:, None]), dim=1)
+        expected = reference(tokens, use_cache=False).logits[:, -1]
+        assert torch.allclose(actual, expected, atol=3e-5, rtol=3e-5)
+
+    assert not engine.residency.resident_keys(ResourceKind.KV)
     worker.close()
 
 

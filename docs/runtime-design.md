@@ -32,9 +32,13 @@ CPU_ONLY -> QUEUED -> IN_FLIGHT -> GPU_RESIDENT
     +--------------- EVICTED ----------+
 ~~~
 
-The authoritative copy of every old KV chunk and routed expert remains in pinned CPU
-memory. Sink and recent KV are pinned in the GPU residency manager. Other GPU objects
-are evictable.
+In sparse mode, the authoritative copy of every old KV chunk and routed expert remains
+in pinned CPU memory. Sink and recent KV are pinned in the GPU residency manager. Other
+GPU objects are evictable. The decode runner also exposes an opt-in `resident` KV mode:
+it preallocates each request/layer cache through the declared output bound and keeps the
+full prefix on GPU. This is an architecture experiment for contexts whose complete KV
+state fits under the same measured memory cap as the baseline; it does not weaken the
+expert-offload constraint or the matched-memory release gate.
 
 ## Unified queue
 
@@ -68,3 +72,9 @@ shadow pass.
 
 Default GPU residency is four sink tokens, 256 recent tokens per request, 64-token old
 KV chunks, 64 expert slots, and 512 old-KV slots.
+
+Resident KV mode bypasses KV queue traffic and hybrid stopping. Each decode append is an
+in-place write into the preallocated cache and attention uses PyTorch SDPA with native
+GQA, avoiding old-chunk concatenation and per-chunk target-marginal synchronization.
+The sparse mode remains the default until matched GPU measurements establish which mode
+wins at each release context.

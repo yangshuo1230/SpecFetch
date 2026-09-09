@@ -307,13 +307,18 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
    first six generated tokens match in the short test, after which rounding changes the
    greedy path. Quality must be assessed statistically, not by requiring bit identity to
    vLLM.
+6. 新增的 opt-in `--kv-storage resident` 已在 CPU 小模型上验证两步 decode 与完整序列
+   reference 一致。它按 context+最大输出长度预分配每请求/层 KV，以原位 append、原生
+   GQA SDPA 绕过 KV queue、旧块拼接与逐块 marginal 同步；但尚未在真实 GPU 上验证
+   10 GiB 上限、速度或数值，因此不改变默认 sparse 配置，也不构成性能结论。
 
 ## Next actions
 
 1. GPU 空闲后先运行三项 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
    GQA、跨请求 KV demand 和 layer lookahead 2，并建立相同显存约束的 vLLM decode-only
    baseline。
-2. c512 通过后重跑 batch-4/context-4K 的长输出 demand/speculative，核对 token 因果一致、
+2. c512 通过后重跑 batch-4/context-4K 的长输出 demand/speculative，并在同一 10 GiB cap
+   下测量 resident KV 候选，核对 token 因果一致、
    TPOT、最大单批候选、dropped speculative、H2D overlap 与 demand wait。
 3. 用 CUDA profiler 分解 Target kernel、Draft、Python 调度、queue/residency、同步和 H2D；
    对主导路径实施架构优化，必要时迁移到 C++/CUDA、融合 kernel 或 CUDA Graph，而不是

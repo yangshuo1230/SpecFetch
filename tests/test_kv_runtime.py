@@ -49,6 +49,61 @@ def test_layout_keeps_sink_and_bounded_recent_window():
     worker.close()
 
 
+def test_resident_layout_preallocates_and_appends_without_offload():
+    config = RuntimeConfig(
+        sink_tokens=2,
+        recent_tokens=2,
+        kv_chunk_tokens=2,
+        kv_storage="resident",
+        resident_kv_capacity_tokens=7,
+    )
+    cache, residency, worker = build_cache(config)
+    key = torch.arange(20.0).reshape(5, 2, 2)
+    value = key + 1
+    cache.initialize(key, value)
+    buffers = cache._resident_buffers
+    cache.append(key[:2] + 100, value[:2] + 100)
+
+    assert cache._resident_buffers == buffers
+    assert len(cache.recent[0]) == 7
+    assert not cache.old
+    assert not residency.resident_keys(ResourceKind.KV)
+    assert torch.equal(cache.recent[0][:5], key)
+    assert torch.equal(cache.recent[0][5:], key[:2] + 100)
+    worker.close()
+
+
+def test_resident_attention_matches_reference_gqa():
+    config = RuntimeConfig(
+        kv_storage="resident",
+        resident_kv_capacity_tokens=8,
+    )
+    cache, _, worker = build_cache(config)
+    generator = torch.Generator().manual_seed(19)
+    key = torch.randn(7, 2, 4, generator=generator)
+    value = torch.randn(7, 2, 4, generator=generator)
+    query = torch.randn(4, 4, generator=generator)
+    cache.initialize(key, value)
+
+    actual = cache.sparse_attention(query, {}, miss_cost_ms=1)
+    expected = attention_output(query, [(key, value)])
+
+    assert actual.selected_old_chunks == []
+    assert actual.predicted_mass == 1.0
+    assert torch.allclose(actual.output, expected, atol=1e-5, rtol=1e-5)
+    worker.close()
+
+
+def test_resident_kv_rejects_capacity_overflow():
+    config = RuntimeConfig(kv_storage="resident", resident_kv_capacity_tokens=3)
+    cache, _, worker = build_cache(config)
+    values = torch.randn(3, 1, 2)
+    cache.initialize(values, values)
+    with pytest.raises(RuntimeError, match="capacity"):
+        cache.append(values[:1], values[:1])
+    worker.close()
+
+
 def test_sparse_attention_matches_dense_when_all_old_chunks_selected():
     config = RuntimeConfig(
         sink_tokens=2,

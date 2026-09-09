@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-old-chunks", type=int, default=2)
     parser.add_argument("--expert-cache-slots", type=int, default=64)
     parser.add_argument("--kv-cache-slots", type=int, default=512)
+    parser.add_argument(
+        "--kv-storage",
+        choices=("sparse", "resident"),
+        default="sparse",
+        help="Offloaded sparse KV or preallocated full GPU-resident KV for decode",
+    )
     parser.add_argument("--transfer-batch-size", type=int, default=32)
     parser.add_argument(
         "--speculative-expert-budget",
@@ -138,6 +144,10 @@ def main() -> None:
         speculative_expert_budget=args.speculative_expert_budget,
         speculative_kv_budget=args.speculative_kv_budget,
         speculative_layer_lookahead=args.speculative_layer_lookahead,
+        kv_storage=args.kv_storage,
+        resident_kv_capacity_tokens=(
+            args.context_tokens + args.max_new_tokens if args.kv_storage == "resident" else None
+        ),
     )
     tokenizer = AutoTokenizer.from_pretrained(args.target, trust_remote_code=True)
     input_ids = fixed_contexts(

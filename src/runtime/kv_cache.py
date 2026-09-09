@@ -69,6 +69,7 @@ class RequestLayerKV:
         self.pin_cpu = torch.cuda.is_available() if pin_cpu is None else pin_cpu
         self.sink: tuple[torch.Tensor, torch.Tensor] | None = None
         self.recent: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._resident_buffers: tuple[torch.Tensor, torch.Tensor] | None = None
         self.old: dict[int, ResourceKey] = {}
         self.old_ranges: dict[int, tuple[int, int]] = {}
         self._next_chunk = 0
@@ -93,6 +94,27 @@ class RequestLayerKV:
         if self.sink is not None:
             raise RuntimeError("KV cache is already initialized")
         tokens = len(key)
+        if self.config.kv_storage == "resident":
+            capacity = self.config.resident_kv_capacity_tokens
+            assert capacity is not None
+            if tokens > capacity:
+                raise ValueError(
+                    f"prefix has {tokens} tokens but resident KV capacity is {capacity}"
+                )
+            buffers = tuple(
+                torch.empty((capacity, *tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device)
+                for tensor in (key, value)
+            )
+            for buffer, tensor in zip(buffers, (key, value)):
+                buffer[:tokens].copy_(tensor)
+            self._resident_buffers = buffers
+            # Keep the public resident window view usable by diagnostics while avoiding
+            # duplicate prefix storage. Resident mode never creates offloaded chunks.
+            self.sink = tuple(buffer[:0] for buffer in buffers)
+            self.recent = tuple(buffer[:tokens] for buffer in buffers)
+            self._recent_start = 0
+            self._total_tokens = tokens
+            return
         sink_end = min(tokens, self.config.sink_tokens)
         old_tokens = max(0, tokens - sink_end - self.config.recent_tokens)
         old_tokens -= old_tokens % self.config.kv_chunk_tokens
@@ -109,6 +131,17 @@ class RequestLayerKV:
     def append(self, key: torch.Tensor, value: torch.Tensor) -> None:
         if self.recent is None or key.shape != value.shape or key.ndim != 3:
             raise ValueError("initialize first and append aligned 3-D KV tensors")
+        if self._resident_buffers is not None:
+            end = self._total_tokens + len(key)
+            if end > len(self._resident_buffers[0]):
+                raise RuntimeError(
+                    f"resident KV capacity {len(self._resident_buffers[0])} exceeded by token {end}"
+                )
+            for buffer, tensor in zip(self._resident_buffers, (key, value)):
+                buffer[self._total_tokens : end].copy_(tensor)
+            self._total_tokens = end
+            self.recent = tuple(buffer[:end] for buffer in self._resident_buffers)
+            return
         recent_key = torch.cat((self.recent[0], key))
         recent_value = torch.cat((self.recent[1], value))
         limit = self.config.recent_tokens + self.config.kv_chunk_tokens - 1
@@ -221,6 +254,18 @@ class RequestLayerKV:
     ) -> SparseAttentionResult:
         if self.sink is None or self.recent is None:
             raise RuntimeError("KV cache is not initialized")
+        if self._resident_buffers is not None:
+            key, value = (buffer[: self._total_tokens] for buffer in self._resident_buffers)
+            q = query[None, :, None]
+            k = key.transpose(0, 1)[None]
+            v = value.transpose(0, 1)[None]
+            output = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                enable_gqa=q.shape[1] != k.shape[1],
+            )[0, :, 0]
+            return SparseAttentionResult(output, [], 1.0, [])
         always = [part for part in (self.sink, self.recent) if len(part[0])]
         partition = empty_partition(len(query), query.device)
         for key, _ in always:
@@ -399,3 +444,4 @@ class RequestLayerKV:
         self._unwanted.clear()
         self.sink = None
         self.recent = None
+        self._resident_buffers = None

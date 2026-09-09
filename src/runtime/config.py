@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,8 @@ class RuntimeConfig:
     speculative_expert_budget: int | None = None
     speculative_kv_budget: int | None = None
     speculative_layer_lookahead: int | None = None
+    kv_storage: Literal["sparse", "resident"] = "sparse"
+    resident_kv_capacity_tokens: int | None = None
 
     def __post_init__(self) -> None:
         positive = {
@@ -40,6 +43,12 @@ class RuntimeConfig:
         ):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive when set")
+        if self.kv_storage not in ("sparse", "resident"):
+            raise ValueError("kv_storage must be 'sparse' or 'resident'")
+        if self.kv_storage == "resident" and self.resident_kv_capacity_tokens is None:
+            raise ValueError("resident_kv_capacity_tokens is required for resident KV storage")
+        if self.resident_kv_capacity_tokens is not None and self.resident_kv_capacity_tokens <= 0:
+            raise ValueError("resident_kv_capacity_tokens must be positive when set")
         for name, value in (
             ("predicted_mass_threshold", self.predicted_mass_threshold),
             ("marginal_mass_threshold", self.marginal_mass_threshold),
