@@ -86,6 +86,9 @@ The Draft rollout independently disables attention outputs and CPU attention agg
 for resident Target KV, while retaining hidden-state output when expert probes need it.
 Prediction admission likewise bypasses per-request KV retain/prefetch bookkeeping in this
 mode; expert prediction requests still use the unified queue and normal consumer leases.
+Across all modes, mapped attention rows are transferred once per horizon and expert
+features once per complete rollout, rather than one D2H synchronization per draft layer.
+Each expert probe evaluates every horizon as one CPU batch.
 The sparse mode remains the default until matched GPU measurements establish which mode
 wins at each release context.
 

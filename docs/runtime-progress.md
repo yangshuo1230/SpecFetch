@@ -325,6 +325,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
    与 demand consumer 映射都在该 snapshot 上完成，避免此前每个 expert 各自执行 GPU
    `where` 并逐标量同步回 Python。GPU selected/routing 仍原样进入 fused MoE，exact Top-K
    语义不变。
+10. Draft rollout 的 host signal 提取已从逐 horizon、逐 draft layer 的小张量 `.cpu()` 改为
+    attention 每 horizon 一次、expert hidden features 每次完整 rollout 一次；expert probe
+    同时把全部 horizon 合成一个 CPU batch。对 28 层、lookahead 4 的 release Draft，单次
+    refresh 的 expert-feature D2H 同步次数由最多 112 降为 1，输出语义保持不变。
 
 ## Next actions
 

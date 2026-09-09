@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -100,11 +101,10 @@ def test_resident_target_skips_draft_attentions_but_keeps_expert_features():
         "y_mean": torch.zeros(1, 2),
         "coef": torch.zeros(config.hidden_size, 2),
     }
-    provider = DraftSignalProvider(
-        model,
-        ExpertProbeBank({0: ProbeEntry(0, probe)}),
-        lookahead=2,
-    )
+    probe_bank = ExpertProbeBank({0: ProbeEntry(0, probe)})
+    unbatched_predict = probe_bank.predict_features
+    probe_bank.predict_features = Mock(wraps=unbatched_predict)
+    provider = DraftSignalProvider(model, probe_bank, lookahead=2)
     provider.initialize(torch.tensor([[1, 2, 3]]), ["r0"])
     state = BatchState(
         ["r0"],
@@ -117,6 +117,12 @@ def test_resident_target_skips_draft_attentions_but_keeps_expert_features():
     assert rollout_options == [(False, True), (False, True)]
     assert all(not prediction.kv for prediction in plan.horizons)
     assert all(0 in prediction.experts for prediction in plan.horizons)
+    assert probe_bank.predict_features.call_count == 1
+    batched_features = probe_bank.predict_features.call_args.args[1]
+    assert batched_features.shape == (2, config.hidden_size)
+    for index, prediction in enumerate(plan.horizons):
+        expected = unbatched_predict(0, batched_features[index : index + 1])
+        assert torch.equal(prediction.experts[0], expected)
 
 
 def test_sparse_target_still_requests_and_aggregates_draft_attention():

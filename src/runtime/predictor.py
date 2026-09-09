@@ -200,33 +200,65 @@ class DraftSignalProvider:
         self.cache.crop(base_length)
 
         target_layers = len({layer for _, layer in target_state.kv})
-        draft_layers = len(outputs[0].attentions) if predict_kv else 0
-        horizons = []
-        for output in outputs:
-            prediction = StepPredictions()
-            cpu_attentions: dict[int, torch.Tensor] = {}
-            cpu_features: dict[int, torch.Tensor] = {}
-            for target_layer in range(target_layers):
-                if predict_kv:
-                    draft_layer = map_layer(target_layer, target_layers, draft_layers)
-                    if draft_layer not in cpu_attentions:
-                        cpu_attentions[draft_layer] = (
-                            output.attentions[draft_layer][:, :, -1].detach().float().cpu()
-                        )
-                    attention = cpu_attentions[draft_layer]
+        horizons = [StepPredictions() for _ in outputs]
+        if predict_kv and target_layers:
+            draft_layers = len(outputs[0].attentions)
+            target_draft_layers = [
+                map_layer(target_layer, target_layers, draft_layers)
+                for target_layer in range(target_layers)
+            ]
+            unique_draft_layers = sorted(set(target_draft_layers))
+            draft_offsets = {layer: index for index, layer in enumerate(unique_draft_layers)}
+            for prediction, output in zip(horizons, outputs):
+                # All last-token attention rows in one horizon have the same
+                # shape. Transfer every mapped draft layer in one D2H operation
+                # instead of synchronizing once per layer.
+                cpu_attentions = (
+                    torch.stack(
+                        [output.attentions[layer][:, :, -1] for layer in unique_draft_layers]
+                    )
+                    .detach()
+                    .float()
+                    .cpu()
+                )
+                for target_layer, draft_layer in enumerate(target_draft_layers):
+                    attention = cpu_attentions[draft_offsets[draft_layer]]
                     for request_index, request_id in enumerate(self.request_ids):
                         ranges = target_state.kv[(request_id, target_layer)].old_ranges
                         prediction.kv[(request_id, target_layer)] = aggregate_old_chunk_mass(
                             attention[request_index], ranges
                         )
-                if self.probe_bank is not None:
-                    feature_layer = self.probe_bank.entries[target_layer].draft_layer
-                    if feature_layer not in cpu_features:
-                        cpu_features[feature_layer] = (
-                            output.hidden_states[feature_layer + 1][:, -1].detach().float().cpu()
+        if self.probe_bank is not None and target_layers:
+            target_feature_layers = [
+                self.probe_bank.entries[target_layer].draft_layer
+                for target_layer in range(target_layers)
+            ]
+            unique_feature_layers = sorted(set(target_feature_layers))
+            feature_offsets = {layer: index for index, layer in enumerate(unique_feature_layers)}
+            # Hidden rows are uniform across both horizons and layers. A single
+            # snapshot amortizes D2H synchronization for the complete rollout.
+            cpu_features = (
+                torch.stack(
+                    [
+                        torch.stack(
+                            [
+                                output.hidden_states[layer + 1][:, -1]
+                                for layer in unique_feature_layers
+                            ]
                         )
-                    prediction.experts[target_layer] = self.probe_bank.predict_features(
-                        target_layer, cpu_features[feature_layer]
-                    )
-            horizons.append(prediction)
+                        for output in outputs
+                    ]
+                )
+                .detach()
+                .float()
+                .cpu()
+            )
+            for target_layer, feature_layer in enumerate(target_feature_layers):
+                features = cpu_features[:, feature_offsets[feature_layer]]
+                probabilities = self.probe_bank.predict_features(
+                    target_layer,
+                    features.flatten(0, 1),
+                ).unflatten(0, (len(outputs), len(self.request_ids)))
+                for horizon, values in zip(horizons, probabilities):
+                    horizon.experts[target_layer] = values
         return DraftPredictionPlan(horizons, torch.stack(proposed, dim=1).detach().cpu())
