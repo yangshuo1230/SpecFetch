@@ -208,11 +208,13 @@ def test_retiring_layer_cancels_only_current_token_consumers():
     state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
     layer_zero = state.kv[("a", 0)].old[0]
     layer_one = state.kv[("a", 1)].old[0]
-    state.speculative_consumers = [
-        (layer_zero, "a@1"),
-        (layer_zero, "a@2"),
-        (layer_one, "a@1"),
-    ]
+    state.speculative_consumers.extend(
+        [
+            (layer_zero, "a@1"),
+            (layer_zero, "a@2"),
+            (layer_one, "a@1"),
+        ]
+    )
     cancel_many = Mock()
     engine.runtime.cancel_many = cancel_many
 

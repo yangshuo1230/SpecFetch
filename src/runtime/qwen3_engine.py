@@ -58,13 +58,68 @@ class StepPredictions:
     experts: dict[int, torch.Tensor] = field(default_factory=dict)
 
 
+class SpeculativeConsumers:
+    """Prediction leases indexed by layer and absolute-token consumer."""
+
+    def __init__(self) -> None:
+        self._buckets: dict[tuple[int, str], list[ResourceKey]] = {}
+        self._size = 0
+
+    def __iter__(self):
+        for (_, consumer), keys in self._buckets.items():
+            for key in keys:
+                yield key, consumer
+
+    def __len__(self) -> int:
+        return self._size
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, SpeculativeConsumers):
+            return self._buckets == other._buckets
+        return list(self) == other
+
+    def add(self, key: ResourceKey, consumer: str) -> None:
+        self._buckets.setdefault((key.layer, consumer), []).append(key)
+        self._size += 1
+
+    def extend(self, consumers: Iterable[tuple[ResourceKey, str]]) -> None:
+        for key, consumer in consumers:
+            self.add(key, consumer)
+
+    def pop_all(self) -> list[tuple[ResourceKey, str]]:
+        consumers = list(self)
+        self._buckets.clear()
+        self._size = 0
+        return consumers
+
+    def pop_layer_consumers(
+        self, layer: int, consumers: Iterable[str]
+    ) -> list[tuple[ResourceKey, str]]:
+        removed = []
+        for consumer in consumers:
+            keys = self._buckets.pop((layer, consumer), [])
+            removed.extend((key, consumer) for key in keys)
+            self._size -= len(keys)
+        return removed
+
+    def pop_request_owners(self, owners: set[str]) -> list[tuple[ResourceKey, str]]:
+        removed = []
+        for layer, consumer in list(self._buckets):
+            if consumer.rsplit("@", 1)[0] not in owners:
+                continue
+            keys = self._buckets.pop((layer, consumer))
+            removed.extend((key, consumer) for key in keys)
+            self._size -= len(keys)
+        return removed
+
+
 @dataclass
 class BatchState:
     request_ids: list[str]
     lengths: list[int]
     kv: dict[tuple[str, int], RequestLayerKV]
     step: int = 0
-    speculative_consumers: list[tuple[ResourceKey, str]] = field(default_factory=list)
+    speculative_consumers: SpeculativeConsumers = field(default_factory=SpeculativeConsumers)
     resident_groups: list[ResidentKVGroup] = field(default_factory=list)
 
 
@@ -422,21 +477,13 @@ class Qwen3SparseOffloadEngine:
         )
 
     def _reset_prediction_window(self, state: BatchState) -> None:
-        self.runtime.cancel_many(state.speculative_consumers)
-        state.speculative_consumers.clear()
+        self.runtime.cancel_many(state.speculative_consumers.pop_all())
 
     def _retire_prediction_layer(self, state: BatchState, layer_index: int) -> None:
         """Cancel current-token candidates after their layer's last possible use."""
         current_consumers = {f"{request_id}@{state.step + 1}" for request_id in state.request_ids}
-        retiring = []
-        retained = []
-        for key, consumer in state.speculative_consumers:
-            if key.layer == layer_index and consumer in current_consumers:
-                retiring.append((key, consumer))
-            else:
-                retained.append((key, consumer))
+        retiring = state.speculative_consumers.pop_layer_consumers(layer_index, current_consumers)
         self.runtime.cancel_many(retiring)
-        state.speculative_consumers = retained
 
     def _enqueue_prediction_items(
         self,
@@ -562,14 +609,7 @@ class Qwen3SparseOffloadEngine:
         removing = set(request_ids)
         if not removing <= set(state.request_ids):
             raise KeyError("cannot remove a request that is not active")
-        retained_consumers = []
-        for key, consumer in state.speculative_consumers:
-            owner = consumer.rsplit("@", 1)[0]
-            if owner in removing:
-                self.runtime.cancel(key, consumer)
-            else:
-                retained_consumers.append((key, consumer))
-        state.speculative_consumers = retained_consumers
+        self.runtime.cancel_many(state.speculative_consumers.pop_request_owners(removing))
         for request_id in removing:
             for layer_index in range(len(self.model.model.layers)):
                 state.kv.pop((request_id, layer_index)).close()

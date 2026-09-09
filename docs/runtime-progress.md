@@ -390,6 +390,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     缓存；逐层仅 urgency 变化的 heap rebuild 不再扫描 consumer dict，并以禁止 `.values()`
     的回归对象验证重建路径只读取缓存。相同 1,000-request 基准进一步从 0.816 降至
     0.681 ms/rebuild，约减少 16.5%。
+29. Speculative consumer state 从扁平 list 改为 `(layer, absolute-token consumer)` buckets；
+    `_retire_prediction_layer` 直接 pop 当前 layer/request buckets，不再每层过滤全部未来
+    layers/horizons，消除 48 层下的二次扫描。请求完成也按 owner bucket 汇总后一次 cancel。
+    48 layers、2 horizons、batch 4、Top-8 的完整 enqueue/retire/reset CPU 微基准为
+    10.314→0.831 ms/window，约 12.4x。
 
 ## Next actions
 
