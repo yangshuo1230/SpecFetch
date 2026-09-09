@@ -135,6 +135,20 @@ def main() -> None:
     ):
         raise ValueError("gpu-memory-limit-gib must be positive")
     require_idle_gpus(1000, 10, {args.physical_gpu_index})
+    cuda_device = torch.device(args.device)
+    total_gpu_gib = torch.cuda.get_device_properties(cuda_device).total_memory / 2**30
+    if args.gpu_memory_limit_gib is not None:
+        if args.gpu_memory_limit_gib > total_gpu_gib:
+            raise ValueError(
+                f"gpu-memory-limit-gib ({args.gpu_memory_limit_gib}) exceeds device capacity "
+                f"({total_gpu_gib:.3f} GiB)"
+            )
+        # Apply the absolute cap before model load, fixed expert-slot allocation,
+        # warmup, and request work rather than auditing only after those allocations.
+        torch.cuda.set_per_process_memory_fraction(
+            args.gpu_memory_limit_gib / total_gpu_gib,
+            cuda_device,
+        )
     refresh_tokens = args.draft_refresh_tokens or args.lookahead
     if not 0 < refresh_tokens <= args.lookahead:
         raise ValueError("draft-refresh-tokens must be in [1, lookahead]")
@@ -211,6 +225,27 @@ def main() -> None:
         config,
         moe_backend=args.moe_backend,
     )
+    base_gpu_allocated_gib = torch.cuda.memory_allocated(cuda_device) / 2**30
+    base_gpu_reserved_gib = torch.cuda.memory_reserved(cuda_device) / 2**30
+    expert_slot_allocation_gib = engine.expert_slot_allocation_bytes() / 2**30
+    resident_kv_allocation_gib = engine.resident_kv_allocation_bytes(args.batch_size) / 2**30
+    persistent_payload_lower_bound_gib = (
+        base_gpu_allocated_gib + expert_slot_allocation_gib + resident_kv_allocation_gib
+    )
+    if args.gpu_memory_limit_gib is not None:
+        if base_gpu_reserved_gib > args.gpu_memory_limit_gib:
+            worker.close()
+            raise RuntimeError(
+                f"post-model-load reserved GPU memory {base_gpu_reserved_gib:.3f} GiB "
+                f"already exceeds the {args.gpu_memory_limit_gib:.3f} GiB limit"
+            )
+        if persistent_payload_lower_bound_gib > args.gpu_memory_limit_gib:
+            worker.close()
+            raise RuntimeError(
+                f"model plus packed expert slots and resident KV require at least "
+                f"{persistent_payload_lower_bound_gib:.3f} GiB, exceeding the "
+                f"{args.gpu_memory_limit_gib:.3f} GiB limit before temporary workspace"
+            )
     request_ids = [f"request-{index}" for index in range(args.batch_size)]
     expert_preload_start = time.perf_counter()
     if not args.lazy_expert_store:
@@ -230,18 +265,13 @@ def main() -> None:
         raise
     transfer_start, _ = worker.phase_metrics_since(worker.metrics_snapshot())
     residency_start = (residency.evictions, residency.wasted_prefetches)
-    cuda_device = torch.device(args.device)
-    total_gpu_gib = torch.cuda.get_device_properties(cuda_device).total_memory / 2**30
-    if args.gpu_memory_limit_gib is not None and args.gpu_memory_limit_gib > total_gpu_gib:
-        worker.close()
-        raise ValueError(
-            f"gpu-memory-limit-gib ({args.gpu_memory_limit_gib}) exceeds device capacity "
-            f"({total_gpu_gib:.3f} GiB)"
-        )
     initial_gpu_allocated_gib = torch.cuda.memory_allocated(cuda_device) / 2**30
     initial_gpu_reserved_gib = torch.cuda.memory_reserved(cuda_device) / 2**30
-    resident_kv_allocation_gib = engine.resident_kv_allocation_bytes(args.batch_size) / 2**30
     resident_kv_lower_bound_gib = initial_gpu_allocated_gib + resident_kv_allocation_gib
+    expert_slots_allocated = bool(backend.expert_slots and backend.expert_slots.allocated)
+    post_initialization_persistent_lower_bound_gib = resident_kv_lower_bound_gib + (
+        0.0 if expert_slots_allocated else expert_slot_allocation_gib
+    )
     if args.gpu_memory_limit_gib is not None:
         if initial_gpu_reserved_gib > args.gpu_memory_limit_gib:
             worker.close()
@@ -249,17 +279,13 @@ def main() -> None:
                 f"post-initialization reserved GPU memory {initial_gpu_reserved_gib:.3f} GiB "
                 f"already exceeds the {args.gpu_memory_limit_gib:.3f} GiB limit"
             )
-        if resident_kv_lower_bound_gib > args.gpu_memory_limit_gib:
+        if post_initialization_persistent_lower_bound_gib > args.gpu_memory_limit_gib:
             worker.close()
             raise RuntimeError(
-                f"resident KV requires {resident_kv_allocation_gib:.3f} GiB in addition to "
-                f"{initial_gpu_allocated_gib:.3f} GiB of persistent allocations, exceeding "
+                f"post-initialization persistent allocations require at least "
+                f"{post_initialization_persistent_lower_bound_gib:.3f} GiB, exceeding "
                 f"the {args.gpu_memory_limit_gib:.3f} GiB limit before temporary workspace"
             )
-        torch.cuda.set_per_process_memory_fraction(
-            args.gpu_memory_limit_gib / total_gpu_gib,
-            cuda_device,
-        )
     torch.cuda.reset_peak_memory_stats(cuda_device)
     try:
         start = time.perf_counter()
@@ -432,8 +458,16 @@ def main() -> None:
             "peak_reserved_gib": peak_gpu_reserved_gib,
             "initial_allocated_gib": initial_gpu_allocated_gib,
             "initial_reserved_gib": initial_gpu_reserved_gib,
+            "base_model_allocated_gib": base_gpu_allocated_gib,
+            "base_model_reserved_gib": base_gpu_reserved_gib,
+            "expert_slot_allocation_gib": expert_slot_allocation_gib,
+            "expert_slots_allocated_at_initial_measurement": expert_slots_allocated,
             "resident_kv_allocation_gib": resident_kv_allocation_gib,
             "resident_kv_allocated_lower_bound_gib": resident_kv_lower_bound_gib,
+            "persistent_payload_lower_bound_gib": persistent_payload_lower_bound_gib,
+            "post_initialization_persistent_lower_bound_gib": (
+                post_initialization_persistent_lower_bound_gib
+            ),
             "allocator_limit_enforced": args.gpu_memory_limit_gib is not None,
             "limit_satisfied": memory_limit_satisfied,
         },

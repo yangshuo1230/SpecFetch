@@ -348,6 +348,14 @@ def test_resident_kv_reports_exact_persistent_allocation_bytes():
     worker.close()
 
 
+def test_engine_reports_exact_packed_expert_slot_payload():
+    engine, worker = build_engine(tiny_model())
+
+    # 8 slots * gate/up/down * hidden 16 * expert width 8 * fp32 bytes 4.
+    assert engine.expert_slot_allocation_bytes() == 8 * 3 * 16 * 8 * 4
+    worker.close()
+
+
 def test_sparse_kv_reports_no_resident_allocation():
     engine, worker = build_engine(tiny_model())
     assert engine.resident_kv_allocation_bytes(2) == 0

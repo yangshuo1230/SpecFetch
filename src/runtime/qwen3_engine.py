@@ -272,6 +272,17 @@ class Qwen3SparseOffloadEngine:
             )
         return total
 
+    def expert_slot_allocation_bytes(self) -> int:
+        """Return the exact packed payload reserved by fixed expert slots."""
+        element_size = self.model.model.embed_tokens.weight.element_size()
+        return (
+            self.config.expert_cache_slots
+            * 3
+            * self.model.config.hidden_size
+            * self.model.config.moe_intermediate_size
+            * element_size
+        )
+
     def _project(self, layer, hidden: torch.Tensor, position_embeddings):
         attention = layer.self_attn
         shape = (*hidden.shape[:-1], -1, attention.head_dim)

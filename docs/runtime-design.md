@@ -126,3 +126,7 @@ rejects a run when persistent allocations plus that payload already exceed the m
 cap, and applies the same absolute cap to PyTorch's CUDA caching allocator so temporary
 workspace cannot silently oversubscribe it. Results record the initial allocator state,
 resident payload, conservative allocated-memory lower bound, and measured peak.
+Packed expert slots are budgeted the same way from slot count, hidden/expert widths, and
+dtype. The allocator cap is installed before model loading and warmup; pre-warmup and
+post-warmup lower bounds account for expert slots even when lazy initialization has not
+materialized them yet. This makes larger cache configurations reject safely before work.

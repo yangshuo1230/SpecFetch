@@ -357,6 +357,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 19. Draft expert probes 从 48 个逐层小 GEMM 合并为一次 batched GEMM，probe 参数 stack 首次
     构建后缓存；每层 predicted expert route 也从逐 request Top-K 改为整个 batch 一次二维
     Top-K/tolist。所有 layer/horizon/request 输出布局均有逐层 reference 对照测试。
+    Release 维度合成微基准（48 layers、16 samples、1024→128）中位数由 526.96 ms 降至
+    45.43 ms，即 CPU probe 阶段约 11.6x。
+20. Release runner 新增 packed expert-slot 精确 payload 与 model+expert+resident-KV 持久下界；
+    allocator cap 提前到模型加载前生效，lazy slots 在 post-init 下界中也不会漏算。输出记录
+    base model、expert slots、resident KV 及两阶段 lower bound，为安全扩大 expert cache 提供依据。
 
 ## Next actions
 
