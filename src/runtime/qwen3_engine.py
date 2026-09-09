@@ -86,6 +86,9 @@ class SpeculativeConsumers:
         self._buckets.setdefault((key.layer, consumer), []).append(key)
         self._size += 1
 
+    def contains(self, key: ResourceKey, consumer: str) -> bool:
+        return key in self._buckets.get((key.layer, consumer), ())
+
     def extend(self, consumers: Iterable[tuple[ResourceKey, str]]) -> None:
         for key, consumer in consumers:
             self.add(key, consumer)
@@ -648,10 +651,23 @@ class Qwen3SparseOffloadEngine:
                     prefetch_requests.extend(kv_requests)
         candidate_count = len(prefetch_requests)
         prefetch_requests = self._apply_prefetch_budget(prefetch_requests)
+        admitted_count = len(prefetch_requests)
+        unseen_requests = []
+        seen = set()
+        for request in prefetch_requests:
+            identity = (request.key, request.consumer)
+            if identity in seen or state.speculative_consumers.contains(*identity):
+                continue
+            seen.add(identity)
+            unseen_requests.append(request)
+        prefetch_requests = unseen_requests
         state.speculative_consumers.extend(
             (request.key, request.consumer) for request in prefetch_requests
         )
-        self.runtime.prefetch_many(prefetch_requests, candidate_count=candidate_count)
+        self.runtime.prefetch_many(
+            prefetch_requests,
+            candidate_count=candidate_count - (admitted_count - len(prefetch_requests)),
+        )
 
     def _enqueue_prediction_layers(
         self,
@@ -760,6 +776,7 @@ class Qwen3SparseOffloadEngine:
         predictions: StepPredictions | list[StepPredictions],
         *,
         prefetch: bool = True,
+        reuse_prediction_window: bool = False,
         shadow_attention: bool = False,
         shadow_thresholds: tuple[float, ...] = (),
     ) -> EngineOutput:
@@ -768,7 +785,12 @@ class Qwen3SparseOffloadEngine:
         predictions = [predictions] if isinstance(predictions, StepPredictions) else predictions
         if not predictions:
             predictions = [StepPredictions()]
-        if prefetch:
+        reuse_prediction_window = reuse_prediction_window and (
+            self.config.speculative_expert_budget is None
+            and self.config.speculative_kv_budget is None
+            and self.config.speculative_layer_lookahead is None
+        )
+        if prefetch and not reuse_prediction_window:
             self._reset_prediction_window(state)
             self._retain_predictions(state, predictions)
         current_predictions = predictions[0]

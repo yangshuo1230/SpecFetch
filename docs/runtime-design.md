@@ -130,6 +130,10 @@ Active prediction leases are bucketed by `(layer, absolute-token consumer)`. Lay
 retirement directly removes only the current request buckets rather than filtering the
 entire future-layer/horizon lease list at every layer; request completion removes its
 owner buckets and cancels them as one batch.
+Serving runners identify their causally shifted prediction windows. With unbudgeted
+full-layer admission, the prior H2/H3/... leases are exactly the next H1/H2/... leases,
+so admission retains matching `(resource, absolute consumer)` pairs and submits only the
+new tail horizon. Budgeted, layer-windowed, and generic decode calls conservatively reset.
 
 Target router 的 GPU Top-K route IDs 每层只复制为一个很小的 CPU snapshot。unique expert
 发现和 request-consumer 构造使用该 snapshot，避免为每个实际 expert 分别执行 GPU

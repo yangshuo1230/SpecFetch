@@ -294,6 +294,7 @@ class ContinuousBatchRunner:
                 state,
                 predictions,
                 prefetch=self.prefetch,
+                reuse_prediction_window=True,
             )
             decode_cycles += 1
             for index, request_id in enumerate(active_ids):

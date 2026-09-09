@@ -437,6 +437,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     requests、仅切换 scalar/batch unqueue 的受控微基准为 14.744→13.850 ms/window，约降 6.1%。
 41. `prefetch_many` 不再把已有 PrefetchRequest window 复制成同规模五元 tuple list；residency
     通过只读 Protocol 直接消费原 intents，再仅为确需 queue 的资源构造 QueueUpdate。
+42. Release/continuous runner 显式标记 causally shifted prediction window；无 budget 且全层
+    admission 时保留上一 token H2/H3/... 与新 H1/H2/... 完全相同的 resource+absolute-consumer
+    leases，只 enqueue 新 tail horizon。Tiny 2-horizon trace 首步 12 candidates，次步由重复 12
+    降为仅新增 6；budget/layer-window/generic 调用仍保守 reset。
 
 ## Next actions
 

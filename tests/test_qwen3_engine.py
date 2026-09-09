@@ -324,6 +324,38 @@ def test_decode_retains_next_token_consumers_after_current_layer_retires():
     worker.close()
 
 
+def test_rolling_prediction_window_submits_only_new_tail_horizon():
+    engine, worker = build_engine(tiny_model())
+    state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
+    prediction = StepPredictions(
+        kv={
+            ("a", layer): {chunk: 1.0 for chunk in state.kv[("a", layer)].old} for layer in range(2)
+        },
+        experts={layer: torch.tensor([[0.7, 0.2, 0.1, 0.0]]) for layer in range(2)},
+    )
+
+    engine.decode(
+        torch.tensor([3]),
+        state,
+        [prediction, prediction],
+        reuse_prediction_window=True,
+    )
+    first_candidates = worker.metrics.prefetch_candidates
+    assert {consumer for _, consumer in state.speculative_consumers} == {"a@2"}
+    engine.decode(
+        torch.tensor([4]),
+        state,
+        [prediction, prediction],
+        reuse_prediction_window=True,
+    )
+
+    assert first_candidates == 12
+    assert worker.metrics.prefetch_candidates - first_candidates == 6
+    assert {consumer for _, consumer in state.speculative_consumers} == {"a@3"}
+    engine.remove_requests(state, ["a"])
+    worker.close()
+
+
 def test_decode_batches_guaranteed_kv_across_requests_per_layer():
     backend = BatchBackend()
     engine, worker = build_engine(tiny_model(), backend=backend)

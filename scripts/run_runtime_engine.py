@@ -425,6 +425,7 @@ def main() -> None:
                 output.state,
                 remaining_horizons[: args.prefetch_horizons],
                 prefetch=use_prediction_prefetch,
+                reuse_prediction_window=True,
                 shadow_attention=args.shadow_attention,
                 shadow_thresholds=shadow_thresholds,
             )
