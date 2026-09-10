@@ -488,6 +488,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     residency 临界区；完成前先验证整批均为 IN_FLIGHT，再原子更新 resident/LRU/layer counts 并
     只 notify 一次。32 resources×100 batches 的真实 ResidencyManager CPU 微基准由逐项路径
     8.19 ms 降至 2.46 ms，约 3.33x；标量 API 继续委托给批量实现。
+57. Prediction admission 在 Top-K 与 PrefetchRequest 构造前，以本次调用和现有状态的
+    `(layer, absolute consumer)` bucket 排除重复 items；预算后的 requests 因而天然唯一，不再
+    对完整窗口约 1,536 intents 做第二轮 tuple/set/bucket-list membership 过滤。该后置过滤的
+    release-shape CPU 隔离微基准为 0.587 ms/window，移除后候选数与 budget-dropped 指标仍按
+    真正的新请求结算。
 
 ## Next actions
 

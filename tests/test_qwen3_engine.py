@@ -246,6 +246,32 @@ def test_prediction_window_submits_expert_and_kv_requests_as_one_queue_batch():
     worker.close()
 
 
+def test_prediction_items_deduplicate_buckets_before_building_requests():
+    engine, worker = build_engine(
+        tiny_model(),
+        kv_storage="resident",
+        resident_kv_capacity_tokens=16,
+    )
+    state = engine.prefill(torch.tensor([[1] * 12]), ["a"]).state
+    prediction = StepPredictions(experts={0: torch.tensor([[0.7, 0.2, 0.1, 0.0]])})
+
+    with patch(
+        "src.runtime.qwen3_engine.expert_prediction_requests",
+        wraps=expert_prediction_requests,
+    ) as prediction_requests:
+        engine._enqueue_prediction_items(
+            state,
+            [(1, prediction, 0), (1, prediction, 0)],
+        )
+
+    assert prediction_requests.call_count == 1
+    assert worker.metrics.prefetch_candidates == 2
+    assert worker.metrics.prefetch_requests == 2
+    assert len(state.speculative_consumers) == 2
+    engine.remove_requests(state, ["a"])
+    worker.close()
+
+
 def test_resident_prediction_window_skips_kv_bookkeeping_but_submits_experts():
     engine, worker = build_engine(
         tiny_model(),

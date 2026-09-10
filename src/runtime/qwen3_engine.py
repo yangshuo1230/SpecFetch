@@ -701,6 +701,7 @@ class Qwen3SparseOffloadEngine:
     ) -> None:
         layers = len(self.model.model.layers)
         prefetch_requests: list[PrefetchRequest] = []
+        claimed_buckets: set[tuple[int, str]] = set()
         for horizon, prediction, layer_index in items:
             deadline = (state.step + horizon - 1) * layers + layer_index
             expert_probabilities = prediction.experts.get(layer_index)
@@ -709,8 +710,10 @@ class Qwen3SparseOffloadEngine:
             new_indices = [
                 index
                 for index, consumer in enumerate(consumers)
-                if not state.speculative_consumers.contains_bucket(layer_index, consumer)
+                if (layer_index, consumer) not in claimed_buckets
+                and not state.speculative_consumers.contains_bucket(layer_index, consumer)
             ]
+            claimed_buckets.update((layer_index, consumers[index]) for index in new_indices)
             if (expert_probabilities is not None or expert_scores is not None) and new_indices:
                 route_values = expert_scores if expert_scores is not None else expert_probabilities
                 selected_probabilities = (
@@ -745,22 +748,12 @@ class Qwen3SparseOffloadEngine:
                     prefetch_requests.extend(kv_requests)
         candidate_count = len(prefetch_requests)
         prefetch_requests = self._apply_prefetch_budget(prefetch_requests)
-        admitted_count = len(prefetch_requests)
-        unseen_requests = []
-        seen = set()
-        for request in prefetch_requests:
-            identity = (request.key, request.consumer)
-            if identity in seen or state.speculative_consumers.contains(*identity):
-                continue
-            seen.add(identity)
-            unseen_requests.append(request)
-        prefetch_requests = unseen_requests
         state.speculative_consumers.extend(
             (request.key, request.consumer) for request in prefetch_requests
         )
         self.runtime.prefetch_many(
             prefetch_requests,
-            candidate_count=candidate_count - (admitted_count - len(prefetch_requests)),
+            candidate_count=candidate_count,
         )
 
     def _enqueue_prediction_layers(
