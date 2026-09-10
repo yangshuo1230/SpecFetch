@@ -145,8 +145,8 @@ def test_resident_target_skips_draft_attentions_but_keeps_expert_features():
         "coef": torch.zeros(config.hidden_size, 2),
     }
     probe_bank = ExpertProbeBank({0: ProbeEntry(0, probe)})
-    batched_predict = probe_bank.predict_feature_batch
-    probe_bank.predict_feature_batch = Mock(wraps=batched_predict)
+    batched_score = probe_bank.score_feature_batch
+    probe_bank.score_feature_batch = Mock(wraps=batched_score)
     provider = DraftSignalProvider(model, probe_bank, lookahead=2)
     provider.initialize(torch.tensor([[1, 2, 3]]), ["r0"])
     state = BatchState(
@@ -159,13 +159,13 @@ def test_resident_target_skips_draft_attentions_but_keeps_expert_features():
 
     assert rollout_options == [(False, True), (False, True)]
     assert all(not prediction.kv for prediction in plan.horizons)
-    assert all(0 in prediction.experts for prediction in plan.horizons)
-    assert probe_bank.predict_feature_batch.call_count == 1
-    batched_features = probe_bank.predict_feature_batch.call_args.args[1]
+    assert all(0 in prediction.expert_scores for prediction in plan.horizons)
+    assert probe_bank.score_feature_batch.call_count == 1
+    batched_features = probe_bank.score_feature_batch.call_args.args[1]
     assert batched_features.shape == (1, 2, config.hidden_size)
-    expected = batched_predict([0], batched_features)[0]
+    expected = batched_score([0], batched_features)[0]
     for prediction, values in zip(plan.horizons, expected):
-        assert torch.equal(prediction.experts[0], values[None])
+        assert torch.equal(prediction.expert_scores[0], values[None])
 
 
 def test_sparse_target_still_requests_and_aggregates_draft_attention():

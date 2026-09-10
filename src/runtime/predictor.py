@@ -58,7 +58,15 @@ class ExpertProbeBank:
         target_layers: list[int],
         features: torch.Tensor,
     ) -> torch.Tensor:
-        """Evaluate aligned layers as one batched probe GEMM.
+        """Evaluate aligned layers as one batched probability prediction."""
+        return torch.sigmoid(self.score_feature_batch(target_layers, features))
+
+    def score_feature_batch(
+        self,
+        target_layers: list[int],
+        features: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate aligned layers as one batched raw-score GEMM.
 
         ``features`` has shape ``(target_layers, samples, hidden_size)``.
         """
@@ -80,7 +88,7 @@ class ExpertProbeBank:
             parameters = (torch.stack(coefficients), torch.stack(biases))
             self._parameter_batches[key] = parameters
         coefficients, biases = parameters
-        return torch.sigmoid(torch.bmm(features.float(), coefficients) + biases)
+        return torch.bmm(features.float(), coefficients) + biases
 
     def save(self, path: str | Path) -> None:
         payload = {
@@ -294,11 +302,11 @@ class DraftSignalProvider:
                     for feature_layer in target_feature_layers
                 ]
             )
-            probabilities = self.probe_bank.predict_feature_batch(
+            scores = self.probe_bank.score_feature_batch(
                 list(range(target_layers)),
                 target_features,
             ).unflatten(1, (len(outputs), len(self.request_ids)))
-            for target_layer, layer_probabilities in enumerate(probabilities):
-                for horizon, values in zip(horizons, layer_probabilities):
-                    horizon.experts[target_layer] = values
+            for target_layer, layer_scores in enumerate(scores):
+                for horizon, values in zip(horizons, layer_scores):
+                    horizon.expert_scores[target_layer] = values
         return DraftPredictionPlan(horizons, torch.stack(proposed, dim=1).detach().cpu())

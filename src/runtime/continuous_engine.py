@@ -62,6 +62,10 @@ def _split_predictions(
                         layer: probabilities[index : index + 1]
                         for layer, probabilities in prediction.experts.items()
                     },
+                    expert_scores={
+                        layer: scores[index : index + 1]
+                        for layer, scores in prediction.expert_scores.items()
+                    },
                 )
             )
     return split
@@ -94,6 +98,23 @@ def merge_predictions(
         if any(row is None for row in rows):
             raise ValueError("expert predictions must cover every active request")
         merged.experts[layer] = torch.cat(rows, dim=0)
+    score_layers = set().union(
+        *(
+            set(prediction.expert_scores)
+            for prediction in per_request.values()
+            if prediction is not None
+        )
+    )
+    for layer in score_layers:
+        rows = [
+            per_request[request_id].expert_scores.get(layer)
+            if per_request[request_id] is not None
+            else None
+            for request_id in request_ids
+        ]
+        if any(row is None for row in rows):
+            raise ValueError("expert scores must cover every active request")
+        merged.expert_scores[layer] = torch.cat(rows, dim=0)
     return merged
 
 

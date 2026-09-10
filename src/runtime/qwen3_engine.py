@@ -60,6 +60,7 @@ class ModuleExpertSource:
 class StepPredictions:
     kv: dict[tuple[str, int], dict[int, float]] = field(default_factory=dict)
     experts: dict[int, torch.Tensor] = field(default_factory=dict)
+    expert_scores: dict[int, torch.Tensor] = field(default_factory=dict)
 
 
 class SpeculativeConsumers:
@@ -629,17 +630,19 @@ class Qwen3SparseOffloadEngine:
         for horizon, prediction, layer_index in items:
             deadline = (state.step + horizon - 1) * layers + layer_index
             expert_probabilities = prediction.experts.get(layer_index)
+            expert_scores = prediction.expert_scores.get(layer_index)
             consumers = [f"{request_id}@{state.step + horizon}" for request_id in state.request_ids]
             new_indices = [
                 index
                 for index, consumer in enumerate(consumers)
                 if not state.speculative_consumers.contains_bucket(layer_index, consumer)
             ]
-            if expert_probabilities is not None and new_indices:
+            if (expert_probabilities is not None or expert_scores is not None) and new_indices:
+                route_values = expert_scores if expert_scores is not None else expert_probabilities
                 selected_probabilities = (
-                    expert_probabilities
+                    route_values
                     if len(new_indices) == len(consumers)
-                    else expert_probabilities[new_indices]
+                    else route_values[new_indices]
                 )
                 expert_requests, _ = expert_prediction_requests(
                     selected_probabilities,
@@ -649,6 +652,7 @@ class Qwen3SparseOffloadEngine:
                     deadline=deadline,
                     miss_cost_ms=0.5,
                     registry=self.expert_registry,
+                    logits=expert_scores is not None,
                 )
                 prefetch_requests.extend(expert_requests)
             if self.config.kv_storage != "resident":

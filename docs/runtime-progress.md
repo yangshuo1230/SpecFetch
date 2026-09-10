@@ -450,6 +450,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     相同 48 layers、16 samples、1024→128 微基准由 45.43 降至 27.69 ms，约减少 39.0%。
 45. Draft attention/features 的 signal snapshot 改为先按模型 dtype D2H，再在 CPU promote FP32；
     release BF16 下 PCIe payload 减半，aggregation/probe 数值仍与原 BF16→FP32 完全一致。
+46. Expert probe 改为传递 raw scores，admission 先 Top-K 再只对入选值 sigmoid；sigmoid 单调性
+    保证 IDs 与先全量 sigmoid 完全一致。48×4 horizons×batch4×128 的纯张量微基准为
+    10.99→2.43 ms，且 selected probabilities 逐值完全相等。
 
 ## Next actions
 

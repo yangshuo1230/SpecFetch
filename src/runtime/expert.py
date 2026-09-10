@@ -206,6 +206,7 @@ def expert_prediction_requests(
     deadline: int,
     miss_cost_ms: float,
     registry: ExpertRegistry,
+    logits: bool = False,
 ) -> tuple[list[PrefetchRequest], list[tuple[ResourceKey, str]]]:
     """构造专家预测请求，供调用方跨层合并提交。"""
     if probabilities.ndim != 2 or len(probabilities) != len(request_ids):
@@ -214,6 +215,8 @@ def expert_prediction_requests(
     requests = []
     keys: dict[int, ResourceKey] = {}
     values, experts = probabilities.topk(min(top_k, probabilities.shape[1]), dim=1)
+    if logits:
+        values = torch.sigmoid(values)
     for row_values, row_experts, request_id in zip(values.tolist(), experts.tolist(), request_ids):
         for probability, expert in zip(row_values, row_experts):
             key = keys.get(expert)

@@ -194,6 +194,9 @@ request row.
 Probe standardization is folded into cached linear parameters:
 `W'=W/x_scale` and `b'=y_mean-(x_mean/x_scale)W`. Refresh therefore performs only the
 batched GEMM plus bias and sigmoid, without materializing normalized feature tensors.
+The provider carries raw probe scores into prediction admission. Because sigmoid is
+strictly monotonic, admission selects Top-K on those scores and applies sigmoid only to
+the selected values used as queue probabilities, rather than all 128 experts.
 When resident KV is paired with demand-only expert loading (or no expert probes), decode
 has no consumer for any Draft signal. The release runner therefore does not load or run
 the Draft model for that policy and records the resolved signal/prefetch state explicitly.

@@ -162,6 +162,7 @@ def test_split_draft_predictions_round_trip_in_request_order():
     prediction = StepPredictions(
         kv={("a", 0): {1: 0.75}, ("b", 0): {2: 0.5}},
         experts={0: torch.tensor([[0.1, 0.9], [0.8, 0.2]])},
+        expert_scores={0: torch.tensor([[-2.0, 2.0], [1.0, -1.0]])},
     )
     split = _split_predictions([prediction], ["a", "b"])
     executions = {
@@ -172,6 +173,7 @@ def test_split_draft_predictions_round_trip_in_request_order():
 
     assert merged.kv == prediction.kv
     assert torch.equal(merged.experts[0], prediction.experts[0].flip(0))
+    assert torch.equal(merged.expert_scores[0], prediction.expert_scores[0].flip(0))
 
 
 def test_continuous_runner_batches_compatible_draft_refreshes():

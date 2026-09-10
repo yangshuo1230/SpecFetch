@@ -10,6 +10,7 @@ from src.runtime.expert import (
     OffloadedExpertExecutor,
     enqueue_expert_predictions,
     expert_key,
+    expert_prediction_requests,
 )
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKind
 from src.runtime.residency import ResidencyManager
@@ -280,3 +281,27 @@ def test_predictions_merge_shared_expert_consumers():
     assert request.key == expert_key(0, 0)
     assert request.consumer_probabilities == {"a": 0.8999999761581421, "b": 0.800000011920929}
     assert registry.ensure.call_count == 1
+
+
+def test_prediction_logits_apply_sigmoid_only_after_topk():
+    experts = [make_expert(0), make_expert(1), make_expert(2)]
+    _, registry, worker = runtime_with(experts)
+    logits = torch.tensor([[-3.0, 2.0, 1.0], [4.0, -2.0, 0.5]])
+
+    requests, _ = expert_prediction_requests(
+        logits,
+        layer=0,
+        request_ids=["a", "b"],
+        top_k=2,
+        deadline=3,
+        miss_cost_ms=0.5,
+        registry=registry,
+        logits=True,
+    )
+
+    selected = logits.topk(2, dim=1)
+    assert [request.key.object_id for request in requests] == selected.indices.flatten().tolist()
+    assert [request.probability for request in requests] == torch.sigmoid(
+        selected.values
+    ).flatten().tolist()
+    worker.close()
