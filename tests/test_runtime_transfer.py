@@ -197,6 +197,19 @@ def test_packed_expert_slots_reuse_released_storage():
     assert torch.equal(replaced.gate, second.gate)
 
 
+def test_packed_expert_storage_initializes_without_consuming_slot():
+    from src.runtime.expert import ExpertWeights
+
+    slots = PackedExpertSlots(2, "cpu")
+    weights = ExpertWeights(torch.ones(2, 3), torch.ones(2, 3), torch.ones(3, 2))
+
+    slots.initialize(weights)
+
+    assert slots.allocated
+    assert len(slots._free) == 2
+    assert not slots._assigned
+
+
 def test_packed_gate_up_source_uses_two_copies_per_expert():
     from src.runtime.expert import pack_expert_weights
 

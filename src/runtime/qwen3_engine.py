@@ -530,6 +530,14 @@ class Qwen3SparseOffloadEngine:
             expert_map(layer, self.model.config.num_experts)
         return True
 
+    def initialize_expert_storage(self) -> bool:
+        """Allocate packed expert cache buffers before request timing."""
+        initialize = getattr(self.runtime.worker.backend, "initialize_expert_storage", None)
+        if not callable(initialize):
+            return False
+        payload = self.expert_registry.source.get(0, 0)
+        return bool(initialize(payload))
+
     @torch.inference_mode()
     def warmup_resident_attention(self, batch_size: int, context_tokens: int) -> bool:
         """Warm the exact FlashAttention KV-cache decode shape without request state."""

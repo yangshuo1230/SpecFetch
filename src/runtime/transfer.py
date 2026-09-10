@@ -54,6 +54,11 @@ class PackedExpertSlots:
     def allocated(self) -> bool:
         return self._buffers is not None
 
+    def initialize(self, payload: Any) -> None:
+        """Allocate fixed storage without consuming a logical slot."""
+        if self._buffers is None:
+            self._initialize(payload)
+
     def _initialize(self, payload: Any) -> None:
         if not is_dataclass(payload):
             raise TypeError("packed expert payload must be a dataclass")
@@ -336,6 +341,12 @@ class CudaTransferBackend:
         if self.expert_slots is None:
             raise RuntimeError("fixed expert slots are disabled")
         return self.expert_slots.slot_for(key)
+
+    def initialize_expert_storage(self, payload: Any) -> bool:
+        if self.expert_slots is None:
+            return False
+        self.expert_slots.initialize(payload)
+        return True
 
     def packed_expert_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self.expert_slots is None:

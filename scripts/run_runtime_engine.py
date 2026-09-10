@@ -305,13 +305,17 @@ def main() -> None:
     expert_map_start = time.perf_counter()
     expert_maps_initialized = engine.initialize_expert_maps()
     expert_map_initialization_seconds = time.perf_counter() - expert_map_start
+    expert_storage_start = time.perf_counter()
+    expert_storage_initialized = engine.initialize_expert_storage()
+    expert_storage_initialization_seconds = time.perf_counter() - expert_storage_start
     base_gpu_allocated_gib = torch.cuda.memory_allocated(cuda_device) / 2**30
     base_gpu_reserved_gib = torch.cuda.memory_reserved(cuda_device) / 2**30
     expert_slot_allocation_gib = engine.expert_slot_allocation_bytes() / 2**30
     resident_kv_allocation_gib = engine.resident_kv_allocation_bytes(args.batch_size) / 2**30
-    persistent_payload_lower_bound_gib = (
-        base_gpu_allocated_gib + expert_slot_allocation_gib + resident_kv_allocation_gib
-    )
+    expert_slots_allocated_at_base = bool(backend.expert_slots and backend.expert_slots.allocated)
+    persistent_payload_lower_bound_gib = base_gpu_allocated_gib + resident_kv_allocation_gib
+    if not expert_slots_allocated_at_base:
+        persistent_payload_lower_bound_gib += expert_slot_allocation_gib
     if args.gpu_memory_limit_gib is not None:
         if base_gpu_reserved_gib > args.gpu_memory_limit_gib:
             worker.close()
@@ -534,6 +538,7 @@ def main() -> None:
             "expert_preload_seconds": expert_preload_seconds,
             "moe_warmup_seconds": moe_warmup_seconds,
             "expert_map_initialization_seconds": expert_map_initialization_seconds,
+            "expert_storage_initialization_seconds": expert_storage_initialization_seconds,
             "attention_warmup_seconds": attention_warmup_seconds,
             "shadow_attention_seconds": shadow_seconds,
             "latency_valid": not (args.shadow_attention or shadow_thresholds),
@@ -558,6 +563,8 @@ def main() -> None:
             ),
             "allocator_limit_enforced": args.gpu_memory_limit_gib is not None,
             "expert_maps_initialized_before_timing": expert_maps_initialized,
+            "expert_storage_initialized_before_timing": expert_storage_initialized,
+            "expert_slots_allocated_at_base_measurement": expert_slots_allocated_at_base,
             "attention_backend_warmed_before_timing": attention_warmed,
             "limit_satisfied": memory_limit_satisfied,
         },

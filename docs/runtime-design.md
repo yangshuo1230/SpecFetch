@@ -226,3 +226,7 @@ The opt-in cache maximizer fills the remaining matched cap with whole expert slo
 an explicit workspace reserve, capped at the model's complete expert set. It records the
 resolved slot count; the fixed 64-slot default remains until matched GPU validation chooses
 a safe reserve for both release contexts.
+The fixed slot tensors themselves are allocated before the base memory measurement for
+every compute backend, independently of MoE kernel warmup and lazy CPU registration. This
+prevents the first timed demand from allocating the entire cache and avoids double-counting
+the payload in preflight once storage is already materialized.

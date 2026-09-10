@@ -6,7 +6,7 @@ from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import apply_rotary_pos_emb
 
 from src.runtime.config import RuntimeConfig
-from src.runtime.expert import expert_prediction_requests
+from src.runtime.expert import ExpertWeights, expert_prediction_requests
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKind
 from src.runtime.qwen3_engine import Qwen3SparseOffloadEngine, StepPredictions
 from src.runtime.residency import ResidencyManager
@@ -121,6 +121,18 @@ def test_expert_maps_are_preinitialized_for_every_vllm_layer():
 
     assert engine.initialize_expert_maps()
     assert maps.call_args_list == [call(0, 4), call(1, 4)]
+    worker.close()
+
+
+def test_engine_preallocates_expert_storage_for_any_compute_backend():
+    engine, worker = build_engine(tiny_model())
+    initialize = Mock(return_value=True)
+    engine.runtime.worker.backend.initialize_expert_storage = initialize
+
+    assert engine.initialize_expert_storage()
+    payload = initialize.call_args.args[0]
+    assert isinstance(payload, ExpertWeights)
+    assert payload.gate.shape == (8, 16)
     worker.close()
 
 

@@ -465,6 +465,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 50. Resident FlashAttention KV-cache kernel 新增独立 pre-timing warmup：dummy cache 使用正式
     batch/context/capacity、Q/KV heads、dtype 和单 decode-token shape，不修改请求 cache；结果
     记录 warmup seconds/enabled，避免首 decode token 承担 backend 初始化或 JIT。
+51. Packed expert slot tensors 从 vLLM MoE warmup 中解耦，任何 backend/lazy/warmup 配置都在
+    base memory measurement 前独立分配完整 cache；默认约 576 MiB（maximize 可更大）不再落入
+    首次 timed demand。Preflight 对已分配 storage 不重复加 payload，JSON 记录阶段与状态。
 
 ## Next actions
 
