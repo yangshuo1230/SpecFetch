@@ -534,6 +534,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     785→100 us（约 7.84x）。500 次交替 32-expert 全 miss 的方法级实测中，admission
     403.96→192.01 us/batch，总 orchestration 690.98→508.34 us/batch，分别减少约 52.5% 和
     26.4%。
+67. Demand admission 清空 consumer leases 后直接写入最终 aggregate（lease priority/deadline
+    为零、resource priority 为 inf、deadline 为零），不再调用面向 speculative dict 的
+    `_refresh_priority`；`protected` set 也只在实际需要逐项 victim scan 时构造。无淘汰的
+    32-resource×100 batches admission 由 6.872 降至 5.178 ms，约减少 24.7%；交替满缓存
+    全 miss orchestration 由 508.34 降至 447.87 us/batch，再减少约 11.9%。
 
 ## Next actions
 

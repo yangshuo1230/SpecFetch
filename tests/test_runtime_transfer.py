@@ -721,6 +721,10 @@ def test_begin_transfers_preserves_ordered_speculative_and_demand_semantics():
     assert residency.state(demand) == ResourceState.IN_FLIGHT
     assert residency.record(demand).consumer_leases == {}
     assert residency.record(demand).demand_active
+    assert residency.record(demand).priority == float("inf")
+    assert residency.record(demand).deadline == 0
+    assert residency.record(demand).lease_priority == 0.0
+    assert residency.record(demand).lease_deadline == 0
 
 
 def test_batched_demand_plans_same_layer_balanced_victims_as_repeated_selection():

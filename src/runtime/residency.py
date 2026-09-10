@@ -401,10 +401,10 @@ class ResidencyManager:
             priority = sum(value for value, _ in effective_consumer_leases.values())
             deadline = min(value for _, value in effective_consumer_leases.values())
         kind = key.kind
-        protected = protected or set()
         used = len(self._resident[kind]) + len(self._reserved[kind])
         if used >= self.capacities[kind]:
-            victim = self._eviction_candidate(kind, protected | {key})
+            effective_protected = {key} if protected is None else protected | {key}
+            victim = self._eviction_candidate(kind, effective_protected)
             if victim is None:
                 raise CacheFullError(f"no evictable {kind.value} cache slot")
             if not demand and self._records[victim].priority >= priority:
@@ -420,11 +420,16 @@ class ResidencyManager:
         record.demand_active = demand
         if demand:
             record.consumer_leases = {}
+            record.lease_priority = 0.0
+            record.lease_deadline = 0
+            record.priority = float("inf")
+            record.deadline = 0
         elif effective_consumer_leases is None:
             record.consumer_leases = {"__transfer__": (priority, deadline)}
+            self._refresh_priority(record)
         else:
             record.consumer_leases = dict(effective_consumer_leases)
-        self._refresh_priority(record)
+            self._refresh_priority(record)
         return True, True
 
     def begin_transfer(
