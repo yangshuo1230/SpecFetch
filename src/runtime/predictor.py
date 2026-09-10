@@ -15,6 +15,33 @@ def to_cpu_float(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.detach().cpu().float()
 
 
+class CpuFeatureBuffer:
+    """Reusable compact D2H staging and FP32 probe workspace."""
+
+    def __init__(self) -> None:
+        self.compact: torch.Tensor | None = None
+        self.floating: torch.Tensor | None = None
+
+    def copy(self, tensor: torch.Tensor) -> torch.Tensor:
+        source = tensor.detach()
+        if source.is_cuda:
+            if (
+                self.compact is None
+                or self.compact.shape != source.shape
+                or self.compact.dtype != source.dtype
+            ):
+                self.compact = torch.empty_like(source, device="cpu", pin_memory=True)
+            self.compact.copy_(source, non_blocking=True)
+            torch.cuda.current_stream(source.device).synchronize()
+            source = self.compact
+        else:
+            source = source.cpu()
+        if self.floating is None or self.floating.shape != source.shape:
+            self.floating = torch.empty(source.shape, dtype=torch.float32, device="cpu")
+        self.floating.copy_(source)
+        return self.floating
+
+
 def aggregate_old_chunk_mass(
     attention: torch.Tensor, ranges: dict[int, tuple[int, int]]
 ) -> dict[int, float]:
@@ -126,6 +153,7 @@ class DraftSignalProvider:
         self.cache = None
         self.next_logits = None
         self.request_ids: list[str] = []
+        self.feature_buffer = CpuFeatureBuffer()
 
     @property
     def device(self) -> torch.device:
@@ -283,7 +311,7 @@ class DraftSignalProvider:
             feature_offsets = {layer: index for index, layer in enumerate(unique_feature_layers)}
             # Hidden rows are uniform across both horizons and layers. A single
             # snapshot amortizes D2H synchronization for the complete rollout.
-            cpu_features = to_cpu_float(
+            cpu_features = self.feature_buffer.copy(
                 torch.stack(
                     [
                         torch.stack(

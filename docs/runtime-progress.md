@@ -456,6 +456,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 47. Engine 的 expert intent builder 显式关闭未使用的 `(key,consumer)` compatibility 返回值，
     每个完整 H1 window 避免为 1,536 routes 额外构造 tuple/list entries；公共默认保持兼容。
     固定 raw-score route builder 微基准为 2.586→2.511 ms/window，约减少 2.9%。
+48. 每个 Draft provider 新增固定形状 expert-feature buffer：复用 pinned BF16 D2H staging 与
+    CPU FP32 probe workspace，避免每个 refresh 重分配；CUDA copy 使用 non-blocking 后单次
+    stream sync。随 context 变化的 attention 不缓存，防止多 refresh staging 内存累积。
 
 ## Next actions
 

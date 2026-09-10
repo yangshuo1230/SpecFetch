@@ -17,6 +17,7 @@ from src.runtime.expert import (
     optional_vllm_rotary_embedding,
 )
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
+from src.runtime.predictor import CpuFeatureBuffer
 from src.runtime.residency import ResidencyManager
 from src.runtime.transfer import CudaTransferBackend, OffloadRuntime, TransferWorker
 
@@ -214,3 +215,16 @@ def test_flash_attention_fuses_resident_kv_append_and_gqa_decode():
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
     assert torch.equal(key_cache[:, 7:8], key)
     assert torch.equal(value_cache[:, 7:8], value)
+
+
+def test_feature_signal_uses_reusable_pinned_staging():
+    buffer = CpuFeatureBuffer()
+    first = buffer.copy(torch.randn(4, 28, 1024, dtype=torch.bfloat16, device="cuda:0"))
+    compact_pointer = buffer.compact.data_ptr()
+    float_pointer = first.data_ptr()
+    second = buffer.copy(torch.randn(4, 28, 1024, dtype=torch.bfloat16, device="cuda:0"))
+
+    assert buffer.compact.is_pinned()
+    assert buffer.compact.data_ptr() == compact_pointer
+    assert second.data_ptr() == float_pointer
+    assert second.dtype == torch.float32

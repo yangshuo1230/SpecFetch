@@ -188,6 +188,9 @@ features once per complete rollout, rather than one D2H synchronization per draf
 Draft signals cross D2H in their compact model dtype (BF16 for release runs) and promote
 to FP32 only on CPU for aggregation/probes, halving signal-transfer bytes versus GPU-side
 promotion before the copy.
+The fixed-shape expert feature snapshot reuses one pinned compact staging buffer and one
+CPU FP32 probe workspace per provider. Variable-length attention snapshots deliberately
+remain uncached so growing context lengths cannot accumulate staging allocations.
 All target-layer expert probes evaluate every horizon with one cached-parameter batched
 CPU GEMM. Predicted routes use one matrix Top-K per target layer rather than one call per
 request row.

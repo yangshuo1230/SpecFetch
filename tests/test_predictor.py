@@ -6,6 +6,7 @@ import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.runtime.predictor import (
+    CpuFeatureBuffer,
     DraftSignalProvider,
     ExpertProbeBank,
     ProbeEntry,
@@ -28,6 +29,16 @@ def test_signal_transfer_promotes_only_after_compact_cpu_copy():
     assert result.device.type == "cpu"
     assert result.dtype == torch.float32
     assert torch.equal(result, source.float())
+
+
+def test_feature_buffer_reuses_fp32_workspace():
+    buffer = CpuFeatureBuffer()
+    first = buffer.copy(torch.tensor([[1.5, -2.25]], dtype=torch.bfloat16))
+    pointer = first.data_ptr()
+    second = buffer.copy(torch.tensor([[3.0, 4.5]], dtype=torch.bfloat16))
+
+    assert second.data_ptr() == pointer
+    assert torch.equal(second, torch.tensor([[3.0, 4.5]]))
 
 
 def test_attention_aggregation_uses_target_chunk_ranges():
