@@ -552,6 +552,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     该层 entry，不再对所有层重复 max/min 扫描。200 个随机 expert 状态逐项等价；32/12/32、
     64/24/32、96/24/48、160/48/32（resident/layers/victims）四组规划分别快约
     2.13x、1.92x、1.98x、1.62x，96/24/48 为 158.20→80.00 us。
+71. Demand victim plan 成功后，专用 admission 直接执行已保证容量的 QUEUED/CPU_ONLY→
+    IN_FLIGHT 状态转换，不再逐项回到包含容量、speculative lease 和 rejection 分支的通用 helper；
+    consumer-leases dict 改为原位 `clear`，避免每次全 miss 分配新空 dict。32 resources×100
+    batches 无淘汰 admission 由 4.521 降至 3.378 ms，约减少 25.3%；plan 不完整时仍走原
+    scalar fallback。
 
 ## Next actions
 

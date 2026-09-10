@@ -419,7 +419,7 @@ class ResidencyManager:
         record.used = demand
         record.demand_active = demand
         if demand:
-            record.consumer_leases = {}
+            record.consumer_leases.clear()
             record.lease_priority = 0.0
             record.lease_deadline = 0
             record.priority = float("inf")
@@ -490,10 +490,31 @@ class ResidencyManager:
                 planned_change = self._prepare_demand_evictions_locked(keys)
                 if planned_change is not None:
                     changed = planned_change
-                for key in keys:
-                    accepted, item_changed = self._begin_transfer_locked(key, demand=True)
-                    changed = changed or item_changed
-                    results.append(accepted)
+                    for key in keys:
+                        record = self._records[key]
+                        if record.state in (
+                            ResourceState.GPU_RESIDENT,
+                            ResourceState.IN_FLIGHT,
+                        ):
+                            results.append(False)
+                            continue
+                        self._reserved[key.kind].add(key)
+                        record.state = ResourceState.IN_FLIGHT
+                        record.speculative = False
+                        record.used = True
+                        record.demand_active = True
+                        record.consumer_leases.clear()
+                        record.lease_priority = 0.0
+                        record.lease_deadline = 0
+                        record.priority = float("inf")
+                        record.deadline = 0
+                        changed = True
+                        results.append(True)
+                else:
+                    for key in keys:
+                        accepted, item_changed = self._begin_transfer_locked(key, demand=True)
+                        changed = changed or item_changed
+                        results.append(accepted)
             finally:
                 if changed:
                     self._condition.notify_all()

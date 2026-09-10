@@ -734,6 +734,16 @@ def test_begin_transfers_preserves_ordered_speculative_and_demand_semantics():
     assert residency.record(demand).lease_priority == 0.0
     assert residency.record(demand).lease_deadline == 0
 
+    residency.complete_transfer(speculative, "gpu:0")
+    residency.release(speculative)
+    assert residency.evict(speculative)
+    assert residency.mark_queued(speculative)
+    residency.update_lease(speculative, 3.0, 7, "next")
+    reused_leases = residency.record(speculative).consumer_leases
+    assert residency.begin_demand_transfers([speculative]) == [True]
+    assert residency.record(speculative).consumer_leases is reused_leases
+    assert reused_leases == {}
+
 
 def test_batched_demand_plans_same_layer_balanced_victims_as_repeated_selection():
     def populated():
