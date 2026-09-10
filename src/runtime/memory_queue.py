@@ -5,6 +5,7 @@ import math
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import NamedTuple
 
 
 class ResourceKind(str, Enum):
@@ -68,6 +69,14 @@ class QueueUpdate:
     size_bytes: int
     miss_cost_ms: float
     demand: bool = False
+
+
+class DemandQueueUpdate(NamedTuple):
+    """Minimal queue fields needed by an unconditional demand miss."""
+
+    key: ResourceKey
+    size_bytes: int
+    miss_cost_ms: float
 
 
 class MemoryRequestQueue:
@@ -207,6 +216,48 @@ class MemoryRequestQueue:
             self._condition.notify()
             return requests
 
+    def upsert_demands(self, updates: list[DemandQueueUpdate]) -> list[MemoryRequest]:
+        """Atomically promote demands without unused speculative consumer maps."""
+        if not updates:
+            return []
+        for update in updates:
+            if update.size_bytes <= 0 or update.miss_cost_ms < 0:
+                raise ValueError("size_bytes must be positive and miss_cost_ms non-negative")
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("queue is closed")
+            sizes: dict[ResourceKey, int] = {}
+            for update in updates:
+                expected_size = sizes.setdefault(update.key, update.size_bytes)
+                existing = self._requests.get(update.key)
+                if expected_size != update.size_bytes or (
+                    existing is not None and existing.size_bytes != update.size_bytes
+                ):
+                    raise ValueError(f"size changed for existing resource {update.key}")
+            requests = []
+            unique: dict[ResourceKey, MemoryRequest] = {}
+            for update in updates:
+                request = self._requests.get(update.key)
+                if request is None:
+                    request = MemoryRequest(
+                        update.key,
+                        update.size_bytes,
+                        update.miss_cost_ms,
+                        self._step,
+                        demand=True,
+                    )
+                    self._requests[update.key] = request
+                else:
+                    request.miss_cost_ms = max(request.miss_cost_ms, update.miss_cost_ms)
+                    request.deadline = min(request.deadline, self._step)
+                    request.demand = True
+                requests.append(request)
+                unique[request.key] = request
+            for request in unique.values():
+                self._push(request)
+            self._condition.notify()
+            return requests
+
     def promote_demand(
         self,
         key: ResourceKey,
@@ -215,15 +266,8 @@ class MemoryRequestQueue:
         size_bytes: int,
         miss_cost_ms: float,
     ) -> MemoryRequest:
-        return self.upsert(
-            key,
-            consumer=consumer,
-            probability=1.0,
-            deadline=self._step,
-            size_bytes=size_bytes,
-            miss_cost_ms=miss_cost_ms,
-            demand=True,
-        )
+        del consumer
+        return self.upsert_demands([DemandQueueUpdate(key, size_bytes, miss_cost_ms)])[0]
 
     def set_step(self, step: int) -> None:
         """Advance logical time; the transfer worker rebuilds urgency lazily."""
@@ -245,6 +289,8 @@ class MemoryRequestQueue:
             else:
                 request.consumer_probabilities.pop(consumer, None)
                 request.consumer_deadlines.pop(consumer, None)
+                if request.demand:
+                    return True
                 if request.consumer_probabilities:
                     request.expected_uses = sum(request.consumer_probabilities.values())
                     request.deadline = min(request.consumer_deadlines.values())
@@ -267,6 +313,8 @@ class MemoryRequestQueue:
                 for consumer in consumers:
                     request.consumer_probabilities.pop(consumer, None)
                     request.consumer_deadlines.pop(consumer, None)
+                if request.demand:
+                    continue
                 if request.consumer_probabilities:
                     request.expected_uses = sum(request.consumer_probabilities.values())
                     request.deadline = min(request.consumer_deadlines.values())

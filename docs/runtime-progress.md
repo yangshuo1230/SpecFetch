@@ -510,6 +510,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     48 层后处理微基准由 0.513 降至 0.478 ms/window，约减少 6.8%。尝试把 values/IDs 合并后只
     调一次 `.tolist()` 反而增至 0.681 ms（dtype conversion 与 cat 开销更大），因此保持两次
     独立转换，不采用该方案。
+62. Demand miss 使用三字段 `DemandQueueUpdate` 和专用原子 `upsert_demands`：队列锁内采用最新
+    logical step，不再读取 step 锁、创建无用 consumer probability/deadline dict 或聚合 expected
+    uses；已有 speculative 项原位晋升。consumer cancellation 显式保留已晋升 demand，避免预测
+    lease 撤销把同步等待的请求删掉。32 demands×100 batches 的构造+真实 queue 入队微基准由
+    11.997 降至 6.551 ms，约减少 45.4%。
 
 ## Next actions
 

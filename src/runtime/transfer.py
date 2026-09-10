@@ -7,7 +7,12 @@ from typing import Any, NamedTuple, Protocol
 
 import torch
 
-from src.runtime.memory_queue import MemoryRequestQueue, QueueUpdate, ResourceKey, ResourceKind
+from src.runtime.memory_queue import (
+    DemandQueueUpdate,
+    MemoryRequestQueue,
+    ResourceKey,
+    ResourceKind,
+)
 from src.runtime.residency import ResidencyManager, ResourceState
 
 
@@ -753,23 +758,18 @@ class OffloadRuntime:
             self.worker.check()
             return values
         if queue_sizes:
-            current_step = self.queue.current_step
             updates = []
             for request in requests:
                 size_bytes = queue_sizes.get(request.key)
                 if size_bytes is not None:
                     updates.append(
-                        QueueUpdate(
+                        DemandQueueUpdate(
                             request.key,
-                            request.consumer,
-                            1.0,
-                            current_step,
                             size_bytes,
                             request.miss_cost_ms,
-                            demand=True,
                         )
                     )
-            self.queue.upsert_many(updates)
+            self.queue.upsert_demands(updates)
         start = time.perf_counter()
         completed = self.residency.wait_resident_many(pending, timeout)
         self.worker.check()

@@ -1,6 +1,12 @@
 import pytest
 
-from src.runtime.memory_queue import MemoryRequestQueue, QueueUpdate, ResourceKey, ResourceKind
+from src.runtime.memory_queue import (
+    DemandQueueUpdate,
+    MemoryRequestQueue,
+    QueueUpdate,
+    ResourceKey,
+    ResourceKind,
+)
 
 
 def key(object_id, kind=ResourceKind.KV):
@@ -33,6 +39,44 @@ def test_demand_miss_jumps_to_front():
     request = queue.pop()
     assert request.key == key(2)
     assert request.demand
+
+
+def test_demand_batch_uses_minimal_records_and_preserves_atomic_validation():
+    queue = MemoryRequestQueue()
+    existing = key(0)
+    queue.upsert(
+        existing,
+        consumer="forecast",
+        probability=0.4,
+        deadline=8,
+        size_bytes=1024,
+        miss_cost_ms=0.5,
+    )
+
+    promoted, fresh = queue.upsert_demands(
+        [
+            DemandQueueUpdate(existing, 1024, 1.0),
+            DemandQueueUpdate(key(1), 1024, 2.0),
+        ]
+    )
+
+    assert promoted.demand and fresh.demand
+    assert promoted.consumer_probabilities == {"forecast": 0.4}
+    assert fresh.consumer_probabilities == {}
+    assert fresh.consumer_deadlines == {}
+    with pytest.raises(ValueError, match="size changed"):
+        queue.upsert_demands(
+            [
+                DemandQueueUpdate(key(2), 1024, 1.0),
+                DemandQueueUpdate(existing, 2048, 1.0),
+            ]
+        )
+    assert not queue.contains(key(2))
+    assert queue.cancel(existing, "forecast")
+    assert queue.cancel_many([(fresh.key, "unrelated-forecast")]) == set()
+    popped = queue.pop_many(2)
+    assert {request.key for request in popped} == {existing, fresh.key}
+    assert all(request.demand for request in popped)
 
 
 def test_duplicate_resource_merges_consumers_and_reorders():

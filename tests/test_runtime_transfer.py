@@ -4,7 +4,12 @@ import time
 import pytest
 import torch
 
-from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
+from src.runtime.memory_queue import (
+    DemandQueueUpdate,
+    MemoryRequestQueue,
+    ResourceKey,
+    ResourceKind,
+)
 from src.runtime.residency import ResidencyManager, ResourceState
 from src.runtime.transfer import (
     CudaTransferBackend,
@@ -646,6 +651,36 @@ def test_transfer_worker_skips_unused_consumer_leases_for_demand_batch(monkeypat
     runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(2)])
 
     assert consumer_leases == [None, None]
+    worker.close()
+
+
+def test_demand_many_uses_minimal_queue_updates(monkeypatch):
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    worker = TransferWorker(queue, residency, FakeBackend(), max_batch_size=2)
+    runtime = OffloadRuntime(queue, residency, worker)
+    for index in range(2):
+        residency.register_cpu(resource(index), f"cpu:{index}", 1024)
+    demand_batches = []
+    upsert_demands = queue.upsert_demands
+
+    def capture_demands(updates):
+        demand_batches.append(list(updates))
+        return upsert_demands(updates)
+
+    monkeypatch.setattr(queue, "upsert_demands", capture_demands)
+    monkeypatch.setattr(
+        queue,
+        "upsert_many",
+        lambda updates: (_ for _ in ()).throw(
+            AssertionError(f"demand used speculative updates: {updates}")
+        ),
+    )
+    worker.start()
+
+    runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(2)])
+
+    assert demand_batches == [[DemandQueueUpdate(resource(index), 1024, 1.0) for index in range(2)]]
     worker.close()
 
 
