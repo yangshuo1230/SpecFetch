@@ -278,24 +278,35 @@ class OffloadedExpertExecutor:
         self.fused_topk = fused_topk
         self.route_buffer = CpuRouteBuffer()
 
+    @staticmethod
+    def _route_request_rows(selected_cpu: torch.Tensor) -> dict[int, list[int]]:
+        if selected_cpu.device.type != "cpu":
+            raise ValueError("expert demand planning requires CPU route IDs")
+        request_rows: dict[int, list[int]] = {}
+        for request_index, experts in enumerate(selected_cpu.tolist()):
+            for expert in experts:
+                request_rows.setdefault(expert, []).append(request_index)
+        return request_rows
+
     def _load(
         self,
         selected_cpu: torch.Tensor,
         layer: int,
         request_ids: list[str],
         expert_ids: list[int] | None = None,
+        request_rows: dict[int, list[int]] | None = None,
     ) -> dict[int, tuple[ResourceKey, ExpertWeights]]:
-        if selected_cpu.device.type != "cpu":
-            raise ValueError("expert demand planning requires CPU route IDs")
+        if request_rows is None:
+            request_rows = self._route_request_rows(selected_cpu)
         dependencies = {}
-        for expert in expert_ids if expert_ids is not None else selected_cpu.unique().tolist():
-            token_indices = torch.where(selected_cpu == expert)[0].tolist()
+        for expert in expert_ids if expert_ids is not None else sorted(request_rows):
             key = self.registry.ensure(layer, expert)
             dependencies[expert] = (
                 key,
                 DemandRequest(
                     key,
-                    "demand:" + ",".join(request_ids[index] for index in token_indices),
+                    "demand:"
+                    + ",".join(request_ids[index] for index in request_rows.get(expert, ())),
                     self.miss_cost_ms,
                 ),
             )
@@ -377,6 +388,7 @@ class OffloadedExpertExecutor:
         expert_ids: list[int],
         global_num_experts: int,
         selected_cpu: torch.Tensor,
+        request_rows: dict[int, list[int]],
     ) -> torch.Tensor:
         """Batch H2D within the slot bound, then compute each routed expert."""
         result = torch.zeros_like(hidden_states)
@@ -387,6 +399,7 @@ class OffloadedExpertExecutor:
                 layer,
                 request_ids,
                 expert_ids=expert_ids[offset : offset + capacity],
+                request_rows=request_rows,
             )
             backend = self.runtime.worker.backend
             packed = (
@@ -446,7 +459,8 @@ class OffloadedExpertExecutor:
         # CPU instead of synchronizing once for unique() and again for every
         # expert's torch.where indices.
         selected_cpu = self.route_buffer.copy(selected)
-        unique_experts = selected_cpu.unique().tolist()
+        request_rows = self._route_request_rows(selected_cpu)
+        unique_experts = sorted(request_rows)
         capacity = self.runtime.residency.capacities[ResourceKind.EXPERT]
         backend = self.runtime.worker.backend
         fused_packed = (
@@ -459,7 +473,13 @@ class OffloadedExpertExecutor:
         if len(unique_experts) <= capacity and (
             len(hidden_states) <= self.vectorized_token_limit or fused_packed
         ):
-            loaded = self._load(selected_cpu, layer, request_ids, expert_ids=unique_experts)
+            loaded = self._load(
+                selected_cpu,
+                layer,
+                request_ids,
+                expert_ids=unique_experts,
+                request_rows=request_rows,
+            )
             if fused_packed:
                 result = self._fused(
                     hidden_states,
@@ -482,6 +502,7 @@ class OffloadedExpertExecutor:
                 unique_experts,
                 router_logits.shape[-1],
                 selected_cpu,
+                request_rows,
             )
         return result
 

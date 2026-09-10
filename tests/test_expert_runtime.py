@@ -144,6 +144,14 @@ def test_expert_demand_planning_requires_cpu_route_ids():
     worker.close()
 
 
+def test_expert_demand_planning_discovers_all_request_rows_in_one_pass():
+    selected = torch.tensor([[4, 2], [3, 4], [2, 1], [4, 3]])
+
+    request_rows = OffloadedExpertExecutor._route_request_rows(selected)
+
+    assert request_rows == {4: [0, 1, 3], 2: [0, 2], 3: [1, 3], 1: [2]}
+
+
 def test_actual_route_buffer_reuses_host_storage():
     buffer = CpuRouteBuffer()
     first = buffer.copy(torch.tensor([[1, 2], [3, 4]]))

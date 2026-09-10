@@ -480,6 +480,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     重录。compute/worker 两线程以独立锁保护映射和池，transfer batch 同步后再解除 waited 标记；
     steady decode 不再无条件每层、每 token 构造新 event，同时保留淘汰前等待最新 compute use
     的正确性。
+55. Actual Top-K route 的 demand consumer 发现从“每层一次 `unique` 加每个唯一 expert 一次
+    `torch.where`”改为单次 `.tolist()` 后一遍构建 expert→request rows，并在普通与 capacity-split
+    加载间复用。batch4/top8/128 experts 的 48 层 CPU 隔离微基准为 10.58→0.84 ms/token，约
+    12.6x；排序后的 expert 加载顺序及重复 route 的 consumer 语义保持不变。
 
 ## Next actions
 
