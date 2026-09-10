@@ -182,6 +182,9 @@ GQA, avoiding old-chunk concatenation and per-chunk target-marginal synchronizat
 With the vLLM backend, FlashAttention's contiguous-KV decode kernel replaces the fallback:
 it appends the new K/V rows in place and performs GQA attention in one launch per group
 and layer. The result records `flash_kvcache` versus `sdpa` explicitly.
+Before request timing, the release runner invokes that kernel on an isolated dummy cache
+with the declared batch, context, capacity, Q/KV head counts, dtype, and decode-token
+shape. This warms backend/JIT state without mutating real prefix KV and records its cost.
 The Draft rollout independently disables attention outputs and CPU attention aggregation
 for resident Target KV, while retaining hidden-state output when expert probes need it.
 Prediction admission likewise bypasses per-request KV retain/prefetch bookkeeping in this

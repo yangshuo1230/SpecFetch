@@ -462,6 +462,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 49. vLLM backend 在 request timing 前预创建全部 48 层 logical-to-slot expert maps，并将其计入
     base allocator measurement；decode 不再每层首次 `_fused` 时 lazy `torch.full(128)`。JSON
     记录初始化耗时与 before-timing 状态，torch backend 明确返回未启用。
+50. Resident FlashAttention KV-cache kernel 新增独立 pre-timing warmup：dummy cache 使用正式
+    batch/context/capacity、Q/KV heads、dtype 和单 decode-token shape，不修改请求 cache；结果
+    记录 warmup seconds/enabled，避免首 decode token 承担 backend 初始化或 JIT。
 
 ## Next actions
 

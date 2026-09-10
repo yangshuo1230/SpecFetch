@@ -531,6 +531,61 @@ class Qwen3SparseOffloadEngine:
         return True
 
     @torch.inference_mode()
+    def warmup_resident_attention(self, batch_size: int, context_tokens: int) -> bool:
+        """Warm the exact FlashAttention KV-cache decode shape without request state."""
+        if self.attention_backend != "flash_kvcache":
+            return False
+        if batch_size <= 0 or context_tokens <= 0:
+            raise ValueError("attention warmup batch and context must be positive")
+        capacity = self.config.resident_kv_capacity_tokens
+        assert capacity is not None
+        if context_tokens >= capacity:
+            raise ValueError("attention warmup context must leave one decode cache slot")
+        attention = self.model.model.layers[0].self_attn
+        dtype = self.model.model.embed_tokens.weight.dtype
+        query_heads = attention.q_proj.out_features // attention.head_dim
+        kv_heads = attention.k_proj.out_features // attention.head_dim
+        query = torch.zeros(
+            batch_size,
+            1,
+            query_heads,
+            attention.head_dim,
+            dtype=dtype,
+            device=self.device,
+        )
+        key = torch.zeros(
+            batch_size,
+            1,
+            kv_heads,
+            attention.head_dim,
+            dtype=dtype,
+            device=self.device,
+        )
+        value = torch.zeros_like(key)
+        key_cache = torch.zeros(
+            batch_size,
+            capacity,
+            kv_heads,
+            attention.head_dim,
+            dtype=dtype,
+            device=self.device,
+        )
+        value_cache = torch.zeros_like(key_cache)
+        self._flash_attention(
+            query,
+            key_cache,
+            value_cache,
+            k=key,
+            v=value,
+            cache_seqlens=context_tokens,
+            softmax_scale=attention.scaling,
+            causal=True,
+        )
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        return True
+
+    @torch.inference_mode()
     def prefill(
         self,
         input_ids: torch.Tensor,

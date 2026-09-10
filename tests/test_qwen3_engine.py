@@ -124,6 +124,31 @@ def test_expert_maps_are_preinitialized_for_every_vllm_layer():
     worker.close()
 
 
+def test_resident_flash_attention_warmup_uses_declared_decode_shape():
+    engine, worker = build_engine(
+        tiny_model(),
+        kv_storage="resident",
+        resident_kv_capacity_tokens=16,
+    )
+    calls = []
+
+    def fake_flash(query, key_cache, value_cache, **kwargs):
+        calls.append((query.shape, key_cache.shape, value_cache.shape, kwargs))
+        return query
+
+    engine._flash_attention = fake_flash
+    engine.attention_backend = "flash_kvcache"
+
+    assert engine.warmup_resident_attention(2, 12)
+    query_shape, key_shape, value_shape, kwargs = calls[0]
+    assert query_shape == (2, 1, 4, 4)
+    assert key_shape == value_shape == (2, 16, 2, 4)
+    assert kwargs["k"].shape == kwargs["v"].shape == (2, 1, 2, 4)
+    assert kwargs["cache_seqlens"] == 12
+    assert kwargs["causal"] is True
+    worker.close()
+
+
 def test_engine_routes_every_norm_through_resolved_kernel():
     engine, worker = build_engine(tiny_model())
     calls = []

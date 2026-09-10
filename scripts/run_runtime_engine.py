@@ -340,6 +340,9 @@ def main() -> None:
         if not (args.disable_moe_warmup or args.lazy_expert_store):
             engine.warmup_moe([args.batch_size * args.context_tokens, args.batch_size])
         moe_warmup_seconds = time.perf_counter() - moe_warmup_start
+        attention_warmup_start = time.perf_counter()
+        attention_warmed = engine.warmup_resident_attention(args.batch_size, args.context_tokens)
+        attention_warmup_seconds = time.perf_counter() - attention_warmup_start
     except BaseException:
         worker.close()
         raise
@@ -531,6 +534,7 @@ def main() -> None:
             "expert_preload_seconds": expert_preload_seconds,
             "moe_warmup_seconds": moe_warmup_seconds,
             "expert_map_initialization_seconds": expert_map_initialization_seconds,
+            "attention_warmup_seconds": attention_warmup_seconds,
             "shadow_attention_seconds": shadow_seconds,
             "latency_valid": not (args.shadow_attention or shadow_thresholds),
         },
@@ -554,6 +558,7 @@ def main() -> None:
             ),
             "allocator_limit_enforced": args.gpu_memory_limit_gib is not None,
             "expert_maps_initialized_before_timing": expert_maps_initialized,
+            "attention_backend_warmed_before_timing": attention_warmed,
             "limit_satisfied": memory_limit_satisfied,
         },
         "sparse_kv": {

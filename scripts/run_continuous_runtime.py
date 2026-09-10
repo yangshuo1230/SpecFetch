@@ -186,6 +186,8 @@ def main() -> None:
             warmup_batch = min(args.request_count, args.max_batch_size)
             engine.warmup_moe([warmup_batch * args.context_tokens, warmup_batch])
         moe_warmup_seconds = time.perf_counter() - moe_warmup_start
+        attention_warmup_seconds = 0.0
+        attention_warmed = False
     except BaseException:
         worker.close()
         raise
@@ -221,11 +223,13 @@ def main() -> None:
             "policy": "demand_only" if args.disable_prefetch else "speculative",
             "resolved_moe_backend": engine.moe_backend,
             "expert_maps_initialized_before_timing": expert_maps_initialized,
+            "attention_backend_warmed_before_timing": attention_warmed,
         },
         "performance": {
             "initialization_seconds": initialization_seconds,
             "moe_warmup_seconds": moe_warmup_seconds,
             "expert_map_initialization_seconds": expert_map_initialization_seconds,
+            "attention_warmup_seconds": attention_warmup_seconds,
             "request_seconds": request_seconds,
             "throughput_tokens_per_second": token_count / request_seconds,
             "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(args.device)) / 2**30,
