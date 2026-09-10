@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, fields, is_dataclass, replace
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import torch
 
@@ -478,8 +478,7 @@ class TransferMetrics:
         )
 
 
-@dataclass(frozen=True)
-class PrefetchRequest:
+class PrefetchRequest(NamedTuple):
     key: ResourceKey
     consumer: str
     probability: float
@@ -487,8 +486,7 @@ class PrefetchRequest:
     miss_cost_ms: float
 
 
-@dataclass(frozen=True)
-class DemandRequest:
+class DemandRequest(NamedTuple):
     key: ResourceKey
     consumer: str
     miss_cost_ms: float

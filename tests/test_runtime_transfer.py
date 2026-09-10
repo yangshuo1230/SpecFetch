@@ -467,6 +467,20 @@ def test_prefetch_many_updates_resident_shared_leases_in_one_batch():
     assert len(queue) == 0
 
 
+def test_request_intents_keep_named_immutable_fields():
+    prefetch = PrefetchRequest(resource(0), "a", 0.5, 2, 4.0)
+    demand = DemandRequest(resource(1), "b", 3.0)
+
+    assert prefetch.key == resource(0)
+    assert prefetch.consumer == "a"
+    assert prefetch.probability == 0.5
+    assert prefetch.deadline == 2
+    assert prefetch.miss_cost_ms == 4.0
+    assert demand == (resource(1), "b", 3.0)
+    with pytest.raises(AttributeError):
+        prefetch.deadline = 3
+
+
 def test_prefetch_many_queues_each_consumer_and_marks_resource_once():
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})

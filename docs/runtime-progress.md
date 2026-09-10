@@ -502,6 +502,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     在 worker error check 后直接返回，不再进入空 queue upsert 与 condition wait。32-expert
     `demand_many+release_many` 实测由 43.40 降至 36.39 us/layer，约减少 16.2%；半命中纯扫描
     隔离基准由 34.25 降至 30.05 us/batch，约减少 12.3%。
+60. 仅作为不可变属性载体的 `PrefetchRequest`/`DemandRequest` 从 frozen dataclass 改为
+    NamedTuple；所有字段名、位置构造、相等性和不可变性保持，residency 的 structural Protocol
+    接口不变。完整 prediction window 的 1,536 个五字段 intent 构造微基准为 1.689→0.862 ms，
+    约减少 49.0%，同时避免每个普通 dataclass 实例的属性 dict。
 
 ## Next actions
 
