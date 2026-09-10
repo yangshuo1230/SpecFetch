@@ -305,3 +305,23 @@ def test_prediction_logits_apply_sigmoid_only_after_topk():
         selected.values
     ).flatten().tolist()
     worker.close()
+
+
+def test_prediction_request_builder_can_skip_unused_queued_pairs():
+    experts = [make_expert(0), make_expert(1)]
+    _, registry, worker = runtime_with(experts)
+
+    requests, queued = expert_prediction_requests(
+        torch.tensor([[0.8, 0.2]]),
+        layer=0,
+        request_ids=["a"],
+        top_k=1,
+        deadline=2,
+        miss_cost_ms=0.5,
+        registry=registry,
+        collect_queued=False,
+    )
+
+    assert len(requests) == 1
+    assert queued == []
+    worker.close()

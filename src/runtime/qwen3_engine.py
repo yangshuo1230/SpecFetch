@@ -653,6 +653,7 @@ class Qwen3SparseOffloadEngine:
                     miss_cost_ms=0.5,
                     registry=self.expert_registry,
                     logits=expert_scores is not None,
+                    collect_queued=False,
                 )
                 prefetch_requests.extend(expert_requests)
             if self.config.kv_storage != "resident":

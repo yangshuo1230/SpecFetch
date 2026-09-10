@@ -207,6 +207,7 @@ def expert_prediction_requests(
     miss_cost_ms: float,
     registry: ExpertRegistry,
     logits: bool = False,
+    collect_queued: bool = True,
 ) -> tuple[list[PrefetchRequest], list[tuple[ResourceKey, str]]]:
     """构造专家预测请求，供调用方跨层合并提交。"""
     if probabilities.ndim != 2 or len(probabilities) != len(request_ids):
@@ -226,7 +227,8 @@ def expert_prediction_requests(
             requests.append(
                 PrefetchRequest(key, request_id, float(probability), deadline, miss_cost_ms)
             )
-            queued.append((key, request_id))
+            if collect_queued:
+                queued.append((key, request_id))
     return requests, queued
 
 
