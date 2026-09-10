@@ -513,7 +513,7 @@ def test_prefetch_many_queues_each_consumer_and_marks_resource_once():
     }
 
 
-def test_transfer_worker_reads_current_step_once_per_popped_batch():
+def test_transfer_worker_uses_step_snapshot_from_popped_batch():
     class CountingQueue(MemoryRequestQueue):
         def __init__(self):
             super().__init__()
@@ -544,7 +544,7 @@ def test_transfer_worker_reads_current_step_once_per_popped_batch():
     worker.start()
     worker.close(drain=True)
 
-    assert queue.current_step_reads == 1
+    assert queue.current_step_reads == 0
     assert set(backend.copies) == {resource(index) for index in range(3)}
 
 

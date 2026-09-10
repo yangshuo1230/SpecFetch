@@ -255,6 +255,17 @@ def test_pop_many_batches_demands_without_delaying_them_for_speculation():
     assert queue.pop().key == key(1)
 
 
+def test_pop_many_can_return_the_same_lock_step_snapshot():
+    queue = MemoryRequestQueue()
+    add(queue, 1, 0.9, 4)
+    queue.set_step(3)
+
+    requests, step = queue.pop_many_with_step(1)
+
+    assert [request.key for request in requests] == [key(1)]
+    assert step == 3
+
+
 def test_pop_many_bounds_only_speculative_microbatch():
     speculative = MemoryRequestQueue()
     for index in range(10):

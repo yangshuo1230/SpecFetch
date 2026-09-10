@@ -524,6 +524,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     layer-balanced eviction 与 reserve 转换，但整批最多 notify 一次。32 resources×100 batches
     的真实 demand admission CPU 微基准由 8.787 降至 6.872 ms，约减少 21.8%；标量 API 复用
     同一个锁内实现。
+65. Queue 新增 `pop_many_with_step`，在完成 heap rebuild/pop 的同一 condition 临界区返回对应
+    logical-step 快照；TransferWorker 不再刚释放 queue lock 就再次获取它读取 step。公共
+    `pop_many` 仍返回原 list API。32 demands×100 batches 的 pop 基准由独立 step 读取的
+    4.115 降至 4.046 ms，约减少 1.7%；绝对 CPU 收益较小，但消除 compute/worker 争用窗口。
 
 ## Next actions
 

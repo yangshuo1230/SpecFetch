@@ -539,7 +539,7 @@ class TransferWorker:
 
     def _run(self) -> None:
         while True:
-            requests = self.queue.pop_many(
+            requests, current_step = self.queue.pop_many_with_step(
                 self.max_batch_size,
                 block=True,
                 speculative_maximum=self.max_speculative_batch_size,
@@ -547,7 +547,6 @@ class TransferWorker:
             )
             if not requests:
                 return
-            current_step = self.queue.current_step
             admissions = []
             for request in requests:
                 consumer_leases = None

@@ -354,6 +354,22 @@ class MemoryRequestQueue:
         speculative_maximum: int | None = None,
         speculative_maximum_bytes: int | None = None,
     ) -> list[MemoryRequest]:
+        requests, _ = self.pop_many_with_step(
+            maximum,
+            block,
+            speculative_maximum=speculative_maximum,
+            speculative_maximum_bytes=speculative_maximum_bytes,
+        )
+        return requests
+
+    def pop_many_with_step(
+        self,
+        maximum: int,
+        block: bool = False,
+        *,
+        speculative_maximum: int | None = None,
+        speculative_maximum_bytes: int | None = None,
+    ) -> tuple[list[MemoryRequest], int]:
         """Pop one same-class transfer batch without mixing demand and speculation."""
         if maximum <= 0:
             raise ValueError("maximum batch size must be positive")
@@ -384,9 +400,9 @@ class MemoryRequestQueue:
                             break
                         requests.append(self._pop_valid_locked())
                         batch_bytes += next_request.size_bytes
-                    return requests
+                    return requests, self._step
                 if not block or self._closed:
-                    return []
+                    return [], self._step
                 self._condition.wait()
 
     def snapshot(self) -> list[MemoryRequest]:
