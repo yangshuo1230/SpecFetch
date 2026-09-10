@@ -144,6 +144,9 @@ mixed continuous batches construct only newly admitted request rows plus the tai
 Target router 的 GPU Top-K route IDs 每层只复制为一个很小的 CPU snapshot。unique expert
 发现和 request-consumer 构造使用该 snapshot，避免为每个实际 expert 分别执行 GPU
 `where` 和逐标量同步；原始 GPU selected/routing tensor 仍直接进入 fused MoE。
+That snapshot reuses one pinned host tensor in the expert executor. Each layer performs a
+non-blocking D2H copy followed by one compute-stream synchronization; only batch/Top-K or
+ID dtype changes replace the buffer, eliminating 48 host allocations per steady token.
 Preloaded expert registry entries use a read-only lock-free lookup. Within one predicted
 layer/horizon, overlapping routes across requests also share one registry resolution.
 The lookup returns a canonical cached `ResourceKey` per `(layer, expert)` rather than

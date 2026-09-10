@@ -172,6 +172,30 @@ class ExpertRegistry:
                 self.ensure(layer, expert)
 
 
+class CpuRouteBuffer:
+    """Reusable host snapshot for one layer's actual Top-K route IDs."""
+
+    def __init__(self) -> None:
+        self.storage: torch.Tensor | None = None
+
+    def copy(self, routes: torch.Tensor) -> torch.Tensor:
+        source = routes.detach()
+        if (
+            self.storage is None
+            or self.storage.shape != source.shape
+            or self.storage.dtype != source.dtype
+        ):
+            self.storage = torch.empty_like(
+                source,
+                device="cpu",
+                pin_memory=source.is_cuda,
+            )
+        self.storage.copy_(source, non_blocking=source.is_cuda)
+        if source.is_cuda:
+            torch.cuda.current_stream(source.device).synchronize()
+        return self.storage
+
+
 def enqueue_expert_predictions(
     probabilities: torch.Tensor,
     *,
@@ -252,6 +276,7 @@ class OffloadedExpertExecutor:
         self.vectorized_token_limit = vectorized_token_limit
         self.fused_moe = fused_moe
         self.fused_topk = fused_topk
+        self.route_buffer = CpuRouteBuffer()
 
     def _load(
         self,
@@ -420,7 +445,7 @@ class OffloadedExpertExecutor:
         # Top-K matrix once per layer, then perform unique/consumer discovery on
         # CPU instead of synchronizing once for unique() and again for every
         # expert's torch.where indices.
-        selected_cpu = selected.detach().to(device="cpu")
+        selected_cpu = self.route_buffer.copy(selected)
         unique_experts = selected_cpu.unique().tolist()
         capacity = self.runtime.residency.capacities[ResourceKind.EXPERT]
         backend = self.runtime.worker.backend

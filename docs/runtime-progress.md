@@ -468,6 +468,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 51. Packed expert slot tensors 从 vLLM MoE warmup 中解耦，任何 backend/lazy/warmup 配置都在
     base memory measurement 前独立分配完整 cache；默认约 576 MiB（maximize 可更大）不再落入
     首次 timed demand。Preflight 对已分配 storage 不重复加 payload，JSON 记录阶段与状态。
+52. Actual router Top-K IDs 的逐层 `.to(cpu)` 改为 executor 内复用 pinned host buffer；每层
+    non-blocking D2H 后一次 compute-stream sync，只有 batch/Top-K/dtype 改变才重分配，steady
+    batch 每 token 避免 48 次 route snapshot host allocation。
 
 ## Next actions
 

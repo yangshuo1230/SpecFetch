@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from src.gpu_guard import require_idle_gpus
 from src.runtime.expert import (
+    CpuRouteBuffer,
     ExpertRegistry,
     ExpertWeights,
     OffloadedExpertExecutor,
@@ -228,3 +229,14 @@ def test_feature_signal_uses_reusable_pinned_staging():
     assert buffer.compact.data_ptr() == compact_pointer
     assert second.data_ptr() == float_pointer
     assert second.dtype == torch.float32
+
+
+def test_actual_routes_use_reusable_pinned_snapshot():
+    buffer = CpuRouteBuffer()
+    first = buffer.copy(torch.tensor([[1, 2], [3, 4]], dtype=torch.int32, device="cuda:0"))
+    pointer = first.data_ptr()
+    second = buffer.copy(torch.tensor([[5, 6], [7, 8]], dtype=torch.int32, device="cuda:0"))
+
+    assert second.is_pinned()
+    assert second.data_ptr() == pointer
+    assert torch.equal(second, torch.tensor([[5, 6], [7, 8]], dtype=torch.int32))

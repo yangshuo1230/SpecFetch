@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from src.runtime.expert import (
+    CpuRouteBuffer,
     ExpertRegistry,
     ExpertWeights,
     OffloadedExpertExecutor,
@@ -141,6 +142,16 @@ def test_expert_demand_planning_requires_cpu_route_ids():
     for key, _ in loaded.values():
         runtime.release(key)
     worker.close()
+
+
+def test_actual_route_buffer_reuses_host_storage():
+    buffer = CpuRouteBuffer()
+    first = buffer.copy(torch.tensor([[1, 2], [3, 4]]))
+    pointer = first.data_ptr()
+    second = buffer.copy(torch.tensor([[5, 6], [7, 8]]))
+
+    assert second.data_ptr() == pointer
+    assert torch.equal(second, torch.tensor([[5, 6], [7, 8]]))
 
 
 def test_registry_reuses_canonical_preloaded_resource_key():
