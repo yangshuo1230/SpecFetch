@@ -58,8 +58,7 @@ class MemoryRequest:
         return self.miss_cost_ms * self.expected_uses * urgency / mib
 
 
-@dataclass(frozen=True)
-class QueueUpdate:
+class QueueUpdate(NamedTuple):
     """One consumer's contribution to a queued resource request."""
 
     key: ResourceKey

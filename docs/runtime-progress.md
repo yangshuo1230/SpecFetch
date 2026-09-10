@@ -515,6 +515,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     uses；已有 speculative 项原位晋升。consumer cancellation 显式保留已晋升 demand，避免预测
     lease 撤销把同步等待的请求删掉。32 demands×100 batches 的构造+真实 queue 入队微基准由
     11.997 降至 6.551 ms，约减少 45.4%。
+63. Residency 补入 `size_bytes` 后生成的七字段 `QueueUpdate` 也从 frozen dataclass 改为
+    NamedTuple；字段名、默认 `demand=False`、位置构造和不可变性保持，queue merge/validation
+    接口不变。完整 prediction window 的 1,536 个 QueueUpdate 构造微基准为 2.395→1.117 ms，
+    约减少 53.4%，并移除普通 dataclass 属性 dict。
 
 ## Next actions
 
