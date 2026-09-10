@@ -506,6 +506,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     NamedTuple；所有字段名、位置构造、相等性和不可变性保持，residency 的 structural Protocol
     接口不变。完整 prediction window 的 1,536 个五字段 intent 构造微基准为 1.689→0.862 ms，
     约减少 49.0%，同时避免每个普通 dataclass 实例的属性 dict。
+61. Raw-score Top-K 返回的新 values tensor 直接原位 sigmoid，不再为每层分配另一结果 tensor；
+    48 层后处理微基准由 0.513 降至 0.478 ms/window，约减少 6.8%。尝试把 values/IDs 合并后只
+    调一次 `.tolist()` 反而增至 0.681 ms（dtype conversion 与 cat 开销更大），因此保持两次
+    独立转换，不采用该方案。
 
 ## Next actions
 
