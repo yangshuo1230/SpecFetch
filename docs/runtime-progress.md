@@ -547,6 +547,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 69. Expert victim planner 的最大 layer-count 筛选改用生成器传给 `min`，不再为每个 victim
     分配临时 candidate-layer dict；KV 仍遍历全部 layer buckets。100 个随机状态逐项等价，
     96 residents/48 victims 的规划中位数由 160.35 降至 144.34 us，约减少 10.0%。
+70. 每个 primary `(priority,-deadline)` group 进一步建立 layer heap；expert entry 以动态
+    `(-layer_count, demand_count, LRU)` 排序，KV 的 balance 固定为零。每选一个 victim 只更新
+    该层 entry，不再对所有层重复 max/min 扫描。200 个随机 expert 状态逐项等价；32/12/32、
+    64/24/32、96/24/48、160/48/32（resident/layers/victims）四组规划分别快约
+    2.13x、1.92x、1.98x、1.62x，96/24/48 为 158.20→80.00 us。
 
 ## Next actions
 

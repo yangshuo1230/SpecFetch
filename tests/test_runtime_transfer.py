@@ -763,6 +763,34 @@ def test_batched_demand_plans_same_layer_balanced_victims_as_repeated_selection(
     assert planned == repeated
 
 
+def test_batched_kv_victim_plan_matches_repeated_selection():
+    def populated():
+        residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 8})
+        for index in range(8):
+            key = ResourceKey(ResourceKind.KV, layer=index % 3, object_id=index, request_id="r")
+            residency.register_cpu(key, index, 1)
+            assert residency.begin_transfer(key, demand=True)
+            residency.complete_transfer(key, index)
+            residency.release(key)
+            record = residency.record(key)
+            record.priority = float(index % 2)
+            record.deadline = index % 4
+            record.demand_count = index % 3
+        return residency
+
+    planned_residency = populated()
+    repeated_residency = populated()
+    planned = planned_residency._eviction_candidates(ResourceKind.KV, set(), 6)
+    repeated = []
+    for _ in range(6):
+        victim = repeated_residency._eviction_candidate(ResourceKind.KV, set())
+        assert victim is not None
+        repeated.append(victim)
+        repeated_residency._evict_victim(ResourceKind.KV, victim)
+
+    assert planned == repeated
+
+
 def test_batched_demand_capacity_avoids_repeated_victim_scans(monkeypatch):
     residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
     resident = [resource(0), resource(1)]
