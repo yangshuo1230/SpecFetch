@@ -455,6 +455,50 @@ class ResidencyManager:
                 self._condition.notify_all()
             return accepted
 
+    def _prepare_demand_evictions_locked(self, keys: list[ResourceKey]) -> bool | None:
+        """Apply a complete victim plan, or return None to request scalar fallback."""
+        eligible_by_kind: dict[ResourceKind, set[ResourceKey]] = {}
+        try:
+            for key in keys:
+                if self._records[key].state not in (
+                    ResourceState.GPU_RESIDENT,
+                    ResourceState.IN_FLIGHT,
+                ):
+                    eligible_by_kind.setdefault(key.kind, set()).add(key)
+        except KeyError:
+            return None
+        victim_plan = []
+        for kind, eligible in eligible_by_kind.items():
+            used = len(self._resident[kind]) + len(self._reserved[kind])
+            required = max(0, used + len(eligible) - self.capacities[kind])
+            victims = self._eviction_candidates(kind, set(), required)
+            if len(victims) != required:
+                return None
+            victim_plan.extend((kind, victim) for victim in victims)
+        for kind, victim in victim_plan:
+            self._evict_victim(kind, victim)
+        return bool(victim_plan)
+
+    def begin_demand_transfers(self, keys: list[ResourceKey]) -> list[bool]:
+        """Admit one unconditional demand batch without generic admission tuples."""
+        if not keys:
+            return []
+        changed = False
+        results = []
+        with self._condition:
+            try:
+                planned_change = self._prepare_demand_evictions_locked(keys)
+                if planned_change is not None:
+                    changed = planned_change
+                for key in keys:
+                    accepted, item_changed = self._begin_transfer_locked(key, demand=True)
+                    changed = changed or item_changed
+                    results.append(accepted)
+            finally:
+                if changed:
+                    self._condition.notify_all()
+        return results
+
     def begin_transfers(
         self,
         admissions: list[
@@ -474,31 +518,12 @@ class ResidencyManager:
         results = []
         with self._condition:
             try:
-                victim_plan = []
                 if all(demand for _, _, _, demand, _ in admissions):
-                    eligible_by_kind: dict[ResourceKind, set[ResourceKey]] = {}
-                    try:
-                        for key, _, _, _, _ in admissions:
-                            if self._records[key].state not in (
-                                ResourceState.GPU_RESIDENT,
-                                ResourceState.IN_FLIGHT,
-                            ):
-                                eligible_by_kind.setdefault(key.kind, set()).add(key)
-                    except KeyError:
-                        eligible_by_kind = {}
-                    complete_plan = bool(eligible_by_kind)
-                    for kind, keys in eligible_by_kind.items():
-                        used = len(self._resident[kind]) + len(self._reserved[kind])
-                        required = max(0, used + len(keys) - self.capacities[kind])
-                        victims = self._eviction_candidates(kind, set(), required)
-                        if len(victims) != required:
-                            complete_plan = False
-                            break
-                        victim_plan.extend((kind, victim) for victim in victims)
-                    if complete_plan:
-                        for kind, victim in victim_plan:
-                            self._evict_victim(kind, victim)
-                        changed = bool(victim_plan)
+                    planned_change = self._prepare_demand_evictions_locked(
+                        [key for key, _, _, _, _ in admissions]
+                    )
+                    if planned_change is not None:
+                        changed = planned_change
                 for key, priority, deadline, demand, consumer_leases in admissions:
                     accepted, item_changed = self._begin_transfer_locked(
                         key,

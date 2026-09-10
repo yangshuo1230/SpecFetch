@@ -539,6 +539,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     `_refresh_priority`；`protected` set 也只在实际需要逐项 victim scan 时构造。无淘汰的
     32-resource×100 batches admission 由 6.872 降至 5.178 ms，约减少 24.7%；交替满缓存
     全 miss orchestration 由 508.34 降至 447.87 us/batch，再减少约 11.9%。
+68. Worker 利用 `pop_many` 不混合 demand/speculative 的不变量，让 demand batch 直接调用
+    key-only `begin_demand_transfers`，不再为每个资源构造五字段通用 admission tuple、调用恒返
+    inf 的 `MemoryRequest.priority` 或扫描 `all(demand)`；victim 预规划与标量 fallback 复用同一
+    helper。32-resource×100 batches 无淘汰 admission 对照为 5.121→4.521 ms，约减少 11.7%。
+    跨线程总 wall time 受共享主机调度抖动较大，本项不据此声明额外端到端比例。
 
 ## Next actions
 

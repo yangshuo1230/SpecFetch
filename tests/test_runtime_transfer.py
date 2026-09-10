@@ -623,6 +623,7 @@ def test_transfer_worker_publishes_residency_batch_without_scalar_calls(monkeypa
 
     monkeypatch.setattr(residency, "record", reject_scalar)
     monkeypatch.setattr(residency, "begin_transfer", reject_scalar)
+    monkeypatch.setattr(residency, "begin_transfers", reject_scalar)
     monkeypatch.setattr(residency, "complete_transfer", reject_scalar)
     worker.start()
 
@@ -632,26 +633,33 @@ def test_transfer_worker_publishes_residency_batch_without_scalar_calls(monkeypa
     worker.close()
 
 
-def test_transfer_worker_skips_unused_consumer_leases_for_demand_batch(monkeypatch):
+def test_transfer_worker_uses_key_only_demand_admission(monkeypatch):
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
     worker = TransferWorker(queue, residency, FakeBackend(), max_batch_size=2)
     runtime = OffloadRuntime(queue, residency, worker)
     for index in range(2):
         residency.register_cpu(resource(index), f"cpu:{index}", 1024)
-    consumer_leases = []
-    begin_transfers = residency.begin_transfers
+    demand_batches = []
+    begin_demand_transfers = residency.begin_demand_transfers
 
-    def capture_leases(admissions):
-        consumer_leases.extend(admission[4] for admission in admissions)
-        return begin_transfers(admissions)
+    def capture_demands(keys):
+        demand_batches.append(list(keys))
+        return begin_demand_transfers(keys)
 
-    monkeypatch.setattr(residency, "begin_transfers", capture_leases)
+    monkeypatch.setattr(residency, "begin_demand_transfers", capture_demands)
+    monkeypatch.setattr(
+        residency,
+        "begin_transfers",
+        lambda admissions: (_ for _ in ()).throw(
+            AssertionError(f"demand used generic admissions: {admissions}")
+        ),
+    )
     worker.start()
 
     runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(2)])
 
-    assert consumer_leases == [None, None]
+    assert demand_batches == [[resource(0), resource(1)]]
     worker.close()
 
 

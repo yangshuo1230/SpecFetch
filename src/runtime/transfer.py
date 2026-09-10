@@ -547,10 +547,13 @@ class TransferWorker:
             )
             if not requests:
                 return
-            admissions = []
-            for request in requests:
-                consumer_leases = None
-                if not request.demand:
+            if requests[0].demand:
+                admitted_requests = self.residency.begin_demand_transfers(
+                    [request.key for request in requests]
+                )
+            else:
+                admissions = []
+                for request in requests:
                     mib = max(request.size_bytes / 2**20, 1e-6)
                     consumer_leases = {
                         consumer: (
@@ -565,17 +568,18 @@ class TransferWorker:
                         )
                         for consumer, probability in request.consumer_probabilities.items()
                     }
-                admissions.append(
-                    (
-                        request.key,
-                        request.priority(current_step),
-                        request.deadline,
-                        request.demand,
-                        consumer_leases,
+                    admissions.append(
+                        (
+                            request.key,
+                            request.priority(current_step),
+                            request.deadline,
+                            False,
+                            consumer_leases,
+                        )
                     )
-                )
+                admitted_requests = self.residency.begin_transfers(admissions)
             accepted = []
-            for request, admitted in zip(requests, self.residency.begin_transfers(admissions)):
+            for request, admitted in zip(requests, admitted_requests):
                 if admitted:
                     accepted.append(request)
                 elif not request.demand:
