@@ -326,6 +326,60 @@ class ResidencyManager:
         else:
             del counts[key.layer]
 
+    def _begin_transfer_locked(
+        self,
+        key: ResourceKey,
+        *,
+        priority: float = 0.0,
+        deadline: int = 0,
+        demand: bool = False,
+        consumer_leases: dict[str, tuple[float, int]] | None = None,
+        protected: set[ResourceKey] | None = None,
+    ) -> tuple[bool, bool]:
+        record = self._records[key]
+        if record.state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
+            return False, False
+        effective_consumer_leases = consumer_leases
+        if not demand and record.state == ResourceState.QUEUED:
+            if not record.consumer_leases:
+                record.state = ResourceState.CPU_ONLY
+                record.speculative = False
+                record.used = False
+                self._refresh_priority(record)
+                return False, True
+            effective_consumer_leases = dict(record.consumer_leases)
+            if consumer_leases is not None:
+                for consumer in effective_consumer_leases.keys() & consumer_leases.keys():
+                    effective_consumer_leases[consumer] = consumer_leases[consumer]
+            priority = sum(value for value, _ in effective_consumer_leases.values())
+            deadline = min(value for _, value in effective_consumer_leases.values())
+        kind = key.kind
+        protected = protected or set()
+        used = len(self._resident[kind]) + len(self._reserved[kind])
+        if used >= self.capacities[kind]:
+            victim = self._eviction_candidate(kind, protected | {key})
+            if victim is None:
+                raise CacheFullError(f"no evictable {kind.value} cache slot")
+            if not demand and self._records[victim].priority >= priority:
+                record.state = ResourceState.CPU_ONLY
+                return False, True
+            self._evict_victim(kind, victim)
+        self._reserved[kind].add(key)
+        record.state = ResourceState.IN_FLIGHT
+        record.priority = priority
+        record.deadline = deadline
+        record.speculative = not demand
+        record.used = demand
+        record.demand_active = demand
+        if demand:
+            record.consumer_leases = {}
+        elif effective_consumer_leases is None:
+            record.consumer_leases = {"__transfer__": (priority, deadline)}
+        else:
+            record.consumer_leases = dict(effective_consumer_leases)
+        self._refresh_priority(record)
+        return True, True
+
     def begin_transfer(
         self,
         key: ResourceKey,
@@ -337,52 +391,51 @@ class ResidencyManager:
         protected: set[ResourceKey] | None = None,
     ) -> bool:
         with self._condition:
-            record = self._records[key]
-            if record.state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
-                return False
-            effective_consumer_leases = consumer_leases
-            if not demand and record.state == ResourceState.QUEUED:
-                if not record.consumer_leases:
-                    record.state = ResourceState.CPU_ONLY
-                    record.speculative = False
-                    record.used = False
-                    self._refresh_priority(record)
+            accepted, changed = self._begin_transfer_locked(
+                key,
+                priority=priority,
+                deadline=deadline,
+                demand=demand,
+                consumer_leases=consumer_leases,
+                protected=protected,
+            )
+            if changed:
+                self._condition.notify_all()
+            return accepted
+
+    def begin_transfers(
+        self,
+        admissions: list[
+            tuple[
+                ResourceKey,
+                float,
+                int,
+                bool,
+                dict[str, tuple[float, int]] | None,
+            ]
+        ],
+    ) -> list[bool]:
+        """Apply one worker admission batch under one residency lock."""
+        if not admissions:
+            return []
+        changed = False
+        results = []
+        with self._condition:
+            try:
+                for key, priority, deadline, demand, consumer_leases in admissions:
+                    accepted, item_changed = self._begin_transfer_locked(
+                        key,
+                        priority=priority,
+                        deadline=deadline,
+                        demand=demand,
+                        consumer_leases=consumer_leases,
+                    )
+                    changed = changed or item_changed
+                    results.append(accepted)
+            finally:
+                if changed:
                     self._condition.notify_all()
-                    return False
-                effective_consumer_leases = dict(record.consumer_leases)
-                if consumer_leases is not None:
-                    for consumer in effective_consumer_leases.keys() & consumer_leases.keys():
-                        effective_consumer_leases[consumer] = consumer_leases[consumer]
-                priority = sum(value for value, _ in effective_consumer_leases.values())
-                deadline = min(value for _, value in effective_consumer_leases.values())
-            kind = key.kind
-            protected = protected or set()
-            used = len(self._resident[kind]) + len(self._reserved[kind])
-            if used >= self.capacities[kind]:
-                victim = self._eviction_candidate(kind, protected | {key})
-                if victim is None:
-                    raise CacheFullError(f"no evictable {kind.value} cache slot")
-                if not demand and self._records[victim].priority >= priority:
-                    record.state = ResourceState.CPU_ONLY
-                    self._condition.notify_all()
-                    return False
-                self._evict_victim(kind, victim)
-            self._reserved[kind].add(key)
-            record.state = ResourceState.IN_FLIGHT
-            record.priority = priority
-            record.deadline = deadline
-            record.speculative = not demand
-            record.used = demand
-            record.demand_active = demand
-            if demand:
-                record.consumer_leases = {}
-            elif effective_consumer_leases is None:
-                record.consumer_leases = {"__transfer__": (priority, deadline)}
-            else:
-                record.consumer_leases = dict(effective_consumer_leases)
-            self._refresh_priority(record)
-            self._condition.notify_all()
-            return True
+        return results
 
     def complete_transfer(self, key: ResourceKey, gpu_value: Any) -> None:
         self.complete_transfers([(key, gpu_value)])

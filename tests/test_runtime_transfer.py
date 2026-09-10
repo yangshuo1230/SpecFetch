@@ -622,6 +622,7 @@ def test_transfer_worker_publishes_residency_batch_without_scalar_calls(monkeypa
         raise AssertionError("worker must use batched residency operations")
 
     monkeypatch.setattr(residency, "record", reject_scalar)
+    monkeypatch.setattr(residency, "begin_transfer", reject_scalar)
     monkeypatch.setattr(residency, "complete_transfer", reject_scalar)
     worker.start()
 
@@ -639,13 +640,13 @@ def test_transfer_worker_skips_unused_consumer_leases_for_demand_batch(monkeypat
     for index in range(2):
         residency.register_cpu(resource(index), f"cpu:{index}", 1024)
     consumer_leases = []
-    begin_transfer = residency.begin_transfer
+    begin_transfers = residency.begin_transfers
 
-    def capture_leases(*args, **kwargs):
-        consumer_leases.append(kwargs.get("consumer_leases"))
-        return begin_transfer(*args, **kwargs)
+    def capture_leases(admissions):
+        consumer_leases.extend(admission[4] for admission in admissions)
+        return begin_transfers(admissions)
 
-    monkeypatch.setattr(residency, "begin_transfer", capture_leases)
+    monkeypatch.setattr(residency, "begin_transfers", capture_leases)
     worker.start()
 
     runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(2)])
@@ -696,6 +697,30 @@ def test_complete_transfers_validates_entire_batch_before_publishing():
 
     assert residency.state(first) == ResourceState.IN_FLIGHT
     assert residency.state(second) == ResourceState.CPU_ONLY
+
+
+def test_begin_transfers_preserves_ordered_speculative_and_demand_semantics():
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    speculative, demand = resource(0), resource(1)
+    for key in (speculative, demand):
+        residency.register_cpu(key, f"cpu:{key.object_id}", 1)
+        assert residency.mark_queued(key)
+    residency.update_lease(speculative, 1.0, 5, "forecast")
+
+    accepted = residency.begin_transfers(
+        [
+            (speculative, 2.0, 3, False, {"forecast": (2.0, 3)}),
+            (demand, float("inf"), 0, True, None),
+        ]
+    )
+
+    assert accepted == [True, True]
+    assert residency.state(speculative) == ResourceState.IN_FLIGHT
+    assert residency.record(speculative).consumer_leases == {"forecast": (2.0, 3)}
+    assert residency.record(speculative).priority == 2.0
+    assert residency.state(demand) == ResourceState.IN_FLIGHT
+    assert residency.record(demand).consumer_leases == {}
+    assert residency.record(demand).demand_active
 
 
 def test_demand_many_batches_resident_hit_and_miss_state_transitions(monkeypatch):

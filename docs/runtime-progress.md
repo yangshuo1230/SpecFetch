@@ -519,6 +519,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     NamedTuple；字段名、默认 `demand=False`、位置构造和不可变性保持，queue merge/validation
     接口不变。完整 prediction window 的 1,536 个 QueueUpdate 构造微基准为 2.395→1.117 ms，
     约减少 53.4%，并移除普通 dataclass 属性 dict。
+64. TransferWorker 的 residency admission 从每个 request 单独 `begin_transfer` 改为一次
+    `begin_transfers` 临界区；锁内仍按队列顺序逐项执行相同 lease refresh、priority rejection、
+    layer-balanced eviction 与 reserve 转换，但整批最多 notify 一次。32 resources×100 batches
+    的真实 demand admission CPU 微基准由 8.787 降至 6.872 ms，约减少 21.8%；标量 API 复用
+    同一个锁内实现。
 
 ## Next actions
 
