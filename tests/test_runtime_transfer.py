@@ -1,3 +1,4 @@
+import threading
 import time
 
 import torch
@@ -5,6 +6,7 @@ import torch
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
 from src.runtime.transfer import (
+    CudaTransferBackend,
     DemandRequest,
     ExpertSlotMap,
     OffloadRuntime,
@@ -280,6 +282,55 @@ def test_expert_map_reuses_preallocated_update_staging():
     assert other_mapping.tolist() == [-1, -1, 5, -1, -1, -1, -1, -1]
     assert slot_map._device_indices.data_ptr() == index_pointer
     assert slot_map._device_slots.data_ptr() == slot_pointer
+
+
+def test_cuda_backend_reuses_only_completed_unreferenced_use_events(monkeypatch):
+    class FakeEvent:
+        def __init__(self):
+            self.complete = False
+            self.records = 0
+
+        def query(self):
+            return self.complete
+
+        def record(self, stream):
+            del stream
+            self.complete = False
+            self.records += 1
+
+    created = []
+
+    def make_event():
+        event = FakeEvent()
+        created.append(event)
+        return event
+
+    monkeypatch.setattr(torch.cuda, "Event", make_event)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: device)
+    backend = object.__new__(CudaTransferBackend)
+    backend.device = torch.device("cpu")
+    backend.expert_slots = object()
+    backend._use_events = {}
+    backend._use_event_references = {}
+    backend._retired_use_events = []
+    backend._use_event_lock = threading.Lock()
+    backend._waited_use_events = set()
+    first, second = resource(0), resource(1)
+
+    backend.record_uses([first, second])
+    shared = created[0]
+    shared.complete = True
+    backend._waited_use_events.add(shared)
+    backend.record_uses([first, second])
+
+    assert len(created) == 2
+    assert backend._use_events[second] is created[1]
+    backend._waited_use_events.clear()
+    backend.record_uses([first, second])
+
+    assert len(created) == 2
+    assert backend._use_events[second] is shared
+    assert shared.records == 2
 
 
 def test_residency_eviction_returns_packed_expert_slot():

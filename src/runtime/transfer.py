@@ -319,7 +319,25 @@ class CudaTransferBackend:
             else None
         )
         self._use_events: dict[ResourceKey, torch.cuda.Event] = {}
+        self._use_event_references: dict[torch.cuda.Event, int] = {}
+        self._retired_use_events: list[torch.cuda.Event] = []
+        self._use_event_lock = threading.Lock()
         self._waited_use_events: set[torch.cuda.Event] = set()
+
+    def _retire_use_event_reference(self, event: torch.cuda.Event) -> None:
+        references = self._use_event_references[event] - 1
+        if references:
+            self._use_event_references[event] = references
+        else:
+            del self._use_event_references[event]
+            self._retired_use_events.append(event)
+
+    def _acquire_use_event(self) -> torch.cuda.Event:
+        for index, event in enumerate(self._retired_use_events):
+            if event not in self._waited_use_events and event.query():
+                self._retired_use_events.pop(index)
+                return event
+        return torch.cuda.Event()
 
     def _copy(self, value: Any) -> Any:
         if isinstance(value, torch.Tensor):
@@ -361,16 +379,20 @@ class CudaTransferBackend:
                         self.expert_slots.release(key)
                 raise
             finally:
-                self._waited_use_events.clear()
+                with self._use_event_lock:
+                    self._waited_use_events.clear()
         return values
 
     def release_gpu(self, key: ResourceKey, gpu_value: Any) -> None:
         del gpu_value
         if key.kind == ResourceKind.EXPERT and self.expert_slots is not None:
-            event = self._use_events.pop(key, None)
-            if event is not None and event not in self._waited_use_events:
-                self.stream.wait_event(event)
-                self._waited_use_events.add(event)
+            with self._use_event_lock:
+                event = self._use_events.pop(key, None)
+                if event is not None:
+                    if event not in self._waited_use_events:
+                        self.stream.wait_event(event)
+                        self._waited_use_events.add(event)
+                    self._retire_use_event_reference(event)
             assert self.expert_slot_maps is not None
             self.expert_slot_maps.remove(key, defer_device=True)
             self.expert_slots.release(key)
@@ -388,10 +410,16 @@ class CudaTransferBackend:
         ]
         if not experts:
             return
-        event = torch.cuda.Event()
-        event.record(torch.cuda.current_stream(self.device))
-        for key in experts:
-            self._use_events[key] = event
+        with self._use_event_lock:
+            for key in experts:
+                previous = self._use_events.pop(key, None)
+                if previous is not None:
+                    self._retire_use_event_reference(previous)
+            event = self._acquire_use_event()
+            event.record(torch.cuda.current_stream(self.device))
+            self._use_event_references[event] = len(experts)
+            for key in experts:
+                self._use_events[key] = event
 
     def expert_slot(self, key: ResourceKey) -> int:
         if self.expert_slots is None:

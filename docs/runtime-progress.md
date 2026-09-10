@@ -475,6 +475,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     transfer batch 的跨层更新使用不重叠切片，避免异步 H2D 时 host buffer 被提前覆盖，也避免
     steady-state 每批为 indices/slots 各创建一次临时 CUDA tensor。动态 fallback 只在实际更新数
     超过预备容量时扩容；release 配置按 `2 * expert_slots` 在计时前覆盖同批移除与新增上界。
+54. Expert compute-use CUDA event 改为安全回收池：共享 event 以引用计数追踪所有关联 resident
+    experts，只有引用归零、`Event.query()` 已完成且不再位于 transfer-stream waited 集合时才能
+    重录。compute/worker 两线程以独立锁保护映射和池，transfer batch 同步后再解除 waited 标记；
+    steady decode 不再无条件每层、每 token 构造新 event，同时保留淘汰前等待最新 compute use
+    的正确性。
 
 ## Next actions
 
