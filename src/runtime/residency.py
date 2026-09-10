@@ -286,14 +286,13 @@ class ResidencyManager:
         for primary_rank in sorted(groups):
             layers = groups[primary_rank]
             while layers and len(victims) < maximum:
-                candidate_layers = layers
                 if kind == ResourceKind.EXPERT:
                     largest_layer = max(layer_counts[layer] for layer in layers)
-                    candidate_layers = {
-                        layer: candidates
-                        for layer, candidates in layers.items()
-                        if layer_counts[layer] == largest_layer
-                    }
+                    candidate_layers = (
+                        layer for layer in layers if layer_counts[layer] == largest_layer
+                    )
+                else:
+                    candidate_layers = layers
                 layer = min(candidate_layers, key=lambda item: layers[item][0][:2])
                 _, _, victim = heapq.heappop(layers[layer])
                 victims.append(victim)

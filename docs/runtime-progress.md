@@ -544,6 +544,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     inf 的 `MemoryRequest.priority` 或扫描 `all(demand)`；victim 预规划与标量 fallback 复用同一
     helper。32-resource×100 batches 无淘汰 admission 对照为 5.121→4.521 ms，约减少 11.7%。
     跨线程总 wall time 受共享主机调度抖动较大，本项不据此声明额外端到端比例。
+69. Expert victim planner 的最大 layer-count 筛选改用生成器传给 `min`，不再为每个 victim
+    分配临时 candidate-layer dict；KV 仍遍历全部 layer buckets。100 个随机状态逐项等价，
+    96 residents/48 victims 的规划中位数由 160.35 降至 144.34 us，约减少 10.0%。
 
 ## Next actions
 
