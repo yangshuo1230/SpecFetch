@@ -497,6 +497,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     丢弃的 speculative consumer-leases dict；只有 speculative 请求才计算 probability、urgency
     与 MiB priority。32-resource demand batch 的隔离构造基准为 20.24→1.02 us，约 19.8x；
     48 层全 miss 的上界约减少 0.92 ms/token Python bookkeeping。
+59. `demand_many` 复用一次构造的 key list，并以一次 membership pass 同时统计 hit/miss；仅当
+    确有 CPU_ONLY/QUEUED miss 时才读取 queue step 和构造 demand QueueUpdate。全 resident batch
+    在 worker error check 后直接返回，不再进入空 queue upsert 与 condition wait。32-expert
+    `demand_many+release_many` 实测由 43.40 降至 36.39 us/layer，约减少 16.2%；半命中纯扫描
+    隔离基准由 34.25 降至 30.05 us/batch，约减少 12.3%。
 
 ## Next actions
 

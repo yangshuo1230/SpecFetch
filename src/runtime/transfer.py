@@ -741,32 +741,37 @@ class OffloadRuntime:
         """Promote all dependencies before waiting so H2D can form a batch."""
         if not requests:
             return {}
-        if any(request.miss_cost_ms < 0 for request in requests):
-            raise ValueError("miss_cost_ms must be non-negative")
-        self.worker.metrics.demand_requests += len(requests)
-        values, pending, queue_sizes = self.residency.prepare_demands(
-            [request.key for request in requests]
-        )
-        self.worker.metrics.demand_hits += sum(request.key in values for request in requests)
-        self.worker.metrics.demand_misses += sum(request.key not in values for request in requests)
-        updates = []
-        current_step = self.queue.current_step
+        keys = []
         for request in requests:
-            size_bytes = queue_sizes.get(request.key)
-            if size_bytes is None:
-                continue
-            updates.append(
-                QueueUpdate(
-                    request.key,
-                    request.consumer,
-                    1.0,
-                    current_step,
-                    size_bytes,
-                    request.miss_cost_ms,
-                    demand=True,
-                )
-            )
-        self.queue.upsert_many(updates)
+            if request.miss_cost_ms < 0:
+                raise ValueError("miss_cost_ms must be non-negative")
+            keys.append(request.key)
+        self.worker.metrics.demand_requests += len(requests)
+        values, pending, queue_sizes = self.residency.prepare_demands(keys)
+        demand_hits = sum(key in values for key in keys)
+        self.worker.metrics.demand_hits += demand_hits
+        self.worker.metrics.demand_misses += len(requests) - demand_hits
+        if not pending:
+            self.worker.check()
+            return values
+        if queue_sizes:
+            current_step = self.queue.current_step
+            updates = []
+            for request in requests:
+                size_bytes = queue_sizes.get(request.key)
+                if size_bytes is not None:
+                    updates.append(
+                        QueueUpdate(
+                            request.key,
+                            request.consumer,
+                            1.0,
+                            current_step,
+                            size_bytes,
+                            request.miss_cost_ms,
+                            demand=True,
+                        )
+                    )
+            self.queue.upsert_many(updates)
         start = time.perf_counter()
         completed = self.residency.wait_resident_many(pending, timeout)
         self.worker.check()

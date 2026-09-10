@@ -673,6 +673,26 @@ def test_demand_many_batches_resident_hit_and_miss_state_transitions(monkeypatch
     worker.close()
 
 
+def test_all_resident_demand_batch_skips_queue_and_wait(monkeypatch):
+    runtime, residency, worker, _ = build_runtime(capacity=2)
+    keys = [resource(0), resource(1)]
+    runtime.demand_many([DemandRequest(key, "warm", 1.0) for key in keys])
+    runtime.release_many(keys)
+
+    def reject_slow_path(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("resident demand batch must return before queue/wait")
+
+    monkeypatch.setattr(runtime.queue, "upsert_many", reject_slow_path)
+    monkeypatch.setattr(residency, "wait_resident_many", reject_slow_path)
+
+    values = runtime.demand_many([DemandRequest(key, "hit", 1.0) for key in keys])
+
+    assert values == {resource(index): f"gpu:cpu:{index}" for index in range(2)}
+    runtime.release_many(keys)
+    worker.close()
+
+
 def test_discarding_worker_close_unqueues_pending_resources():
     queue = MemoryRequestQueue()
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
