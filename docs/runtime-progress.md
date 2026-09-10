@@ -528,6 +528,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     logical-step 快照；TransferWorker 不再刚释放 queue lock 就再次获取它读取 step。公共
     `pop_many` 仍返回原 list API。32 demands×100 batches 的 pop 基准由独立 step 读取的
     4.115 降至 4.046 ms，约减少 1.7%；绝对 CPU 收益较小，但消除 compute/worker 争用窗口。
+66. 满容量 demand batch 在单次 LRU 扫描中按 `(priority,-deadline)` 分组，并以 per-layer heap
+    模拟动态 layer-count/demand-count/LRU tie-break，一次规划全部 victims；不足或异常输入回退
+    原逐项路径。原型在 100 个随机状态上与逐次 victim 序列完全一致，32 victims 规划为
+    785→100 us（约 7.84x）。500 次交替 32-expert 全 miss 的方法级实测中，admission
+    403.96→192.01 us/batch，总 orchestration 690.98→508.34 us/batch，分别减少约 52.5% 和
+    26.4%。
 
 ## Next actions
 

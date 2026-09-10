@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -257,6 +258,52 @@ class ResidencyManager:
                 victim_rank = rank
         return victim
 
+    def _eviction_candidates(
+        self,
+        kind: ResourceKind,
+        protected: set[ResourceKey],
+        maximum: int,
+    ) -> list[ResourceKey]:
+        """Plan sequentially equivalent victims without rescanning the LRU."""
+        if maximum <= 0:
+            return []
+        groups: dict[
+            tuple[float, int],
+            dict[int, list[tuple[int, int, ResourceKey]]],
+        ] = {}
+        layer_counts = dict(self._resident_layer_counts[kind])
+        for lru_order, key in enumerate(self._resident[kind]):
+            record = self._records[key]
+            if key in protected or record.pinned:
+                continue
+            primary_rank = (record.priority, -record.deadline)
+            layers = groups.setdefault(primary_rank, {})
+            heapq.heappush(
+                layers.setdefault(key.layer, []),
+                (record.demand_count, lru_order, key),
+            )
+        victims = []
+        for primary_rank in sorted(groups):
+            layers = groups[primary_rank]
+            while layers and len(victims) < maximum:
+                candidate_layers = layers
+                if kind == ResourceKind.EXPERT:
+                    largest_layer = max(layer_counts[layer] for layer in layers)
+                    candidate_layers = {
+                        layer: candidates
+                        for layer, candidates in layers.items()
+                        if layer_counts[layer] == largest_layer
+                    }
+                layer = min(candidate_layers, key=lambda item: layers[item][0][:2])
+                _, _, victim = heapq.heappop(layers[layer])
+                victims.append(victim)
+                layer_counts[layer] -= 1
+                if not layers[layer]:
+                    del layers[layer]
+            if len(victims) == maximum:
+                break
+        return victims
+
     @staticmethod
     def _refresh_priority(record: ResourceRecord) -> None:
         record.lease_priority = sum(priority for priority, _ in record.consumer_leases.values())
@@ -422,6 +469,31 @@ class ResidencyManager:
         results = []
         with self._condition:
             try:
+                victim_plan = []
+                if all(demand for _, _, _, demand, _ in admissions):
+                    eligible_by_kind: dict[ResourceKind, set[ResourceKey]] = {}
+                    try:
+                        for key, _, _, _, _ in admissions:
+                            if self._records[key].state not in (
+                                ResourceState.GPU_RESIDENT,
+                                ResourceState.IN_FLIGHT,
+                            ):
+                                eligible_by_kind.setdefault(key.kind, set()).add(key)
+                    except KeyError:
+                        eligible_by_kind = {}
+                    complete_plan = bool(eligible_by_kind)
+                    for kind, keys in eligible_by_kind.items():
+                        used = len(self._resident[kind]) + len(self._reserved[kind])
+                        required = max(0, used + len(keys) - self.capacities[kind])
+                        victims = self._eviction_candidates(kind, set(), required)
+                        if len(victims) != required:
+                            complete_plan = False
+                            break
+                        victim_plan.extend((kind, victim) for victim in victims)
+                    if complete_plan:
+                        for kind, victim in victim_plan:
+                            self._evict_victim(kind, victim)
+                        changed = bool(victim_plan)
                 for key, priority, deadline, demand, consumer_leases in admissions:
                     accepted, item_changed = self._begin_transfer_locked(
                         key,

@@ -723,6 +723,59 @@ def test_begin_transfers_preserves_ordered_speculative_and_demand_semantics():
     assert residency.record(demand).demand_active
 
 
+def test_batched_demand_plans_same_layer_balanced_victims_as_repeated_selection():
+    def populated():
+        residency = ResidencyManager({ResourceKind.EXPERT: 8, ResourceKind.KV: 1})
+        for index in range(8):
+            key = ResourceKey(ResourceKind.EXPERT, layer=index % 3, object_id=index)
+            residency.register_cpu(key, index, 1)
+            assert residency.begin_transfer(key, demand=True)
+            residency.complete_transfer(key, index)
+            residency.release(key)
+            record = residency.record(key)
+            record.priority = float(index % 2)
+            record.deadline = index % 4
+            record.demand_count = index % 3
+        return residency
+
+    planned_residency = populated()
+    repeated_residency = populated()
+    planned = planned_residency._eviction_candidates(ResourceKind.EXPERT, set(), 6)
+    repeated = []
+    for _ in range(6):
+        victim = repeated_residency._eviction_candidate(ResourceKind.EXPERT, set())
+        assert victim is not None
+        repeated.append(victim)
+        repeated_residency._evict_victim(ResourceKind.EXPERT, victim)
+
+    assert planned == repeated
+
+
+def test_batched_demand_capacity_avoids_repeated_victim_scans(monkeypatch):
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    resident = [resource(0), resource(1)]
+    incoming = [resource(2), resource(3)]
+    for key in resident + incoming:
+        residency.register_cpu(key, key.object_id, 1)
+    for key in resident:
+        assert residency.begin_transfer(key, demand=True)
+        residency.complete_transfer(key, key.object_id)
+        residency.release(key)
+
+    monkeypatch.setattr(
+        residency,
+        "_eviction_candidate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("demand batch repeated scalar victim scan")
+        ),
+    )
+    accepted = residency.begin_transfers([(key, float("inf"), 0, True, None) for key in incoming])
+
+    assert accepted == [True, True]
+    assert all(residency.state(key) == ResourceState.CPU_ONLY for key in resident)
+    assert all(residency.state(key) == ResourceState.IN_FLIGHT for key in incoming)
+
+
 def test_demand_many_batches_resident_hit_and_miss_state_transitions(monkeypatch):
     runtime, residency, worker, _ = build_runtime(capacity=2)
     assert runtime.demand(resource(0), consumer="warm", miss_cost_ms=1) == "gpu:cpu:0"
