@@ -547,20 +547,22 @@ class TransferWorker:
             current_step = self.queue.current_step
             accepted = []
             for request in requests:
-                mib = max(request.size_bytes / 2**20, 1e-6)
-                consumer_leases = {
-                    consumer: (
-                        request.miss_cost_ms
-                        * probability
-                        / max(
-                            1,
-                            request.consumer_deadlines[consumer] - current_step,
+                consumer_leases = None
+                if not request.demand:
+                    mib = max(request.size_bytes / 2**20, 1e-6)
+                    consumer_leases = {
+                        consumer: (
+                            request.miss_cost_ms
+                            * probability
+                            / max(
+                                1,
+                                request.consumer_deadlines[consumer] - current_step,
+                            )
+                            / mib,
+                            request.consumer_deadlines[consumer],
                         )
-                        / mib,
-                        request.consumer_deadlines[consumer],
-                    )
-                    for consumer, probability in request.consumer_probabilities.items()
-                }
+                        for consumer, probability in request.consumer_probabilities.items()
+                    }
                 if self.residency.begin_transfer(
                     request.key,
                     priority=request.priority(current_step),

@@ -493,6 +493,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     对完整窗口约 1,536 intents 做第二轮 tuple/set/bucket-list membership 过滤。该后置过滤的
     release-shape CPU 隔离微基准为 0.587 ms/window，移除后候选数与 budget-dropped 指标仍按
     真正的新请求结算。
+58. TransferWorker 不再为 demand MemoryRequest 构造随后必被 `begin_transfer(demand=True)`
+    丢弃的 speculative consumer-leases dict；只有 speculative 请求才计算 probability、urgency
+    与 MiB priority。32-resource demand batch 的隔离构造基准为 20.24→1.02 us，约 19.8x；
+    48 层全 miss 的上界约减少 0.92 ms/token Python bookkeeping。
 
 ## Next actions
 

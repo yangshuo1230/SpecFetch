@@ -612,6 +612,29 @@ def test_transfer_worker_publishes_residency_batch_without_scalar_calls(monkeypa
     worker.close()
 
 
+def test_transfer_worker_skips_unused_consumer_leases_for_demand_batch(monkeypatch):
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    worker = TransferWorker(queue, residency, FakeBackend(), max_batch_size=2)
+    runtime = OffloadRuntime(queue, residency, worker)
+    for index in range(2):
+        residency.register_cpu(resource(index), f"cpu:{index}", 1024)
+    consumer_leases = []
+    begin_transfer = residency.begin_transfer
+
+    def capture_leases(*args, **kwargs):
+        consumer_leases.append(kwargs.get("consumer_leases"))
+        return begin_transfer(*args, **kwargs)
+
+    monkeypatch.setattr(residency, "begin_transfer", capture_leases)
+    worker.start()
+
+    runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(2)])
+
+    assert consumer_leases == [None, None]
+    worker.close()
+
+
 def test_complete_transfers_validates_entire_batch_before_publishing():
     residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
     first, second = resource(0), resource(1)
