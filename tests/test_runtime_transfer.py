@@ -262,6 +262,26 @@ def test_deferred_expert_map_removals_merge_with_next_slot_batch():
     assert mapping.tolist() == [-1, -1, -1, -1, -1, -1, 7, -1]
 
 
+def test_expert_map_reuses_preallocated_update_staging():
+    slot_map = ExpertSlotMap("cpu", staging_capacity=4)
+    first = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=1)
+    second = ResourceKey(ResourceKind.EXPERT, layer=2, object_id=4)
+    other_layer = ResourceKey(ResourceKind.EXPERT, layer=3, object_id=2)
+    mapping = slot_map.get(2, 8)
+    other_mapping = slot_map.get(3, 8)
+    index_pointer = slot_map._device_indices.data_ptr()
+    slot_pointer = slot_map._device_slots.data_ptr()
+
+    slot_map.update([(first, 3)])
+    slot_map.remove(first, defer_device=True)
+    slot_map.update([(second, 7), (other_layer, 5)])
+
+    assert mapping.tolist() == [-1, -1, -1, -1, 7, -1, -1, -1]
+    assert other_mapping.tolist() == [-1, -1, 5, -1, -1, -1, -1, -1]
+    assert slot_map._device_indices.data_ptr() == index_pointer
+    assert slot_map._device_slots.data_ptr() == slot_pointer
+
+
 def test_residency_eviction_returns_packed_expert_slot():
     from src.runtime.expert import ExpertWeights
 

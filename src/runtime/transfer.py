@@ -164,13 +164,61 @@ class PackedExpertSlots:
 class ExpertSlotMap:
     """Persistent logical-to-physical expert maps, updated only on slot changes."""
 
-    def __init__(self, device: str | torch.device) -> None:
+    def __init__(
+        self,
+        device: str | torch.device,
+        *,
+        staging_capacity: int = 0,
+    ) -> None:
+        if staging_capacity < 0:
+            raise ValueError("expert map staging capacity must be non-negative")
         self.device = torch.device(device)
         self._assignments: dict[int, dict[int, int]] = {}
         self._maps: dict[int, torch.Tensor] = {}
         self._sizes: dict[int, int] = {}
         self._pending_removals: dict[int, set[int]] = {}
         self._lock = threading.Lock()
+        self._staging_capacity = 0
+        self._host_indices: torch.Tensor | None = None
+        self._host_slots: torch.Tensor | None = None
+        self._device_indices: torch.Tensor | None = None
+        self._device_slots: torch.Tensor | None = None
+        if staging_capacity:
+            self._allocate_staging(staging_capacity)
+
+    def _allocate_staging(self, capacity: int) -> None:
+        pin_memory = self.device.type == "cuda"
+        self._host_indices = torch.empty(capacity, dtype=torch.long, pin_memory=pin_memory)
+        self._host_slots = torch.empty(capacity, dtype=torch.int32, pin_memory=pin_memory)
+        if pin_memory:
+            self._device_indices = torch.empty(capacity, dtype=torch.long, device=self.device)
+            self._device_slots = torch.empty(capacity, dtype=torch.int32, device=self.device)
+        else:
+            self._device_indices = self._host_indices
+            self._device_slots = self._host_slots
+        self._staging_capacity = capacity
+
+    def _apply_staged_updates(
+        self,
+        mapping: torch.Tensor,
+        updates: dict[int, int],
+        offset: int,
+    ) -> None:
+        size = len(updates)
+        if offset + size > self._staging_capacity:
+            raise RuntimeError("expert map update exceeds prepared staging capacity")
+        assert self._host_indices is not None and self._host_slots is not None
+        assert self._device_indices is not None and self._device_slots is not None
+        end = offset + size
+        for position, (expert, slot) in enumerate(updates.items(), start=offset):
+            self._host_indices[position] = expert
+            self._host_slots[position] = slot
+        indices = self._device_indices[offset:end]
+        slots = self._device_slots[offset:end]
+        if self.device.type == "cuda":
+            indices.copy_(self._host_indices[offset:end], non_blocking=True)
+            slots.copy_(self._host_slots[offset:end], non_blocking=True)
+        mapping.index_copy_(0, indices, slots)
 
     @staticmethod
     def _validate_key(key: ResourceKey) -> None:
@@ -193,6 +241,7 @@ class ExpertSlotMap:
             for layer, updates in grouped.items():
                 logical = self._assignments.setdefault(layer, {})
                 logical.update(updates)
+            staged_updates: list[tuple[torch.Tensor, dict[int, int]]] = []
             for layer in changed_layers:
                 mapping = self._maps.get(layer)
                 if mapping is None:
@@ -201,11 +250,14 @@ class ExpertSlotMap:
                 device_updates.update(dict(grouped.get(layer, [])))
                 if not device_updates:
                     continue
-                indices = torch.tensor(list(device_updates), dtype=torch.long, device=self.device)
-                slots = torch.tensor(
-                    list(device_updates.values()), dtype=torch.int32, device=self.device
-                )
-                mapping.index_copy_(0, indices, slots)
+                staged_updates.append((mapping, device_updates))
+            total_updates = sum(len(updates) for _, updates in staged_updates)
+            if total_updates > self._staging_capacity:
+                self._allocate_staging(max(total_updates, max(1, self._staging_capacity * 2)))
+            offset = 0
+            for mapping, device_updates in staged_updates:
+                self._apply_staged_updates(mapping, device_updates, offset)
+                offset += len(device_updates)
             self._pending_removals.clear()
 
     def remove(self, key: ResourceKey, *, defer_device: bool = False) -> None:
@@ -261,7 +313,11 @@ class CudaTransferBackend:
         self.expert_slots = (
             PackedExpertSlots(expert_slots, self.device) if expert_slots is not None else None
         )
-        self.expert_slot_maps = ExpertSlotMap(self.device) if expert_slots is not None else None
+        self.expert_slot_maps = (
+            ExpertSlotMap(self.device, staging_capacity=expert_slots * 2)
+            if expert_slots is not None
+            else None
+        )
         self._use_events: dict[ResourceKey, torch.cuda.Event] = {}
         self._waited_use_events: set[torch.cuda.Event] = set()
 

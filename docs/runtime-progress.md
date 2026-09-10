@@ -471,10 +471,14 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 52. Actual router Top-K IDs 的逐层 `.to(cpu)` 改为 executor 内复用 pinned host buffer；每层
     non-blocking D2H 后一次 compute-stream sync，只有 batch/Top-K/dtype 改变才重分配，steady
     batch 每 token 避免 48 次 route snapshot host allocation。
+53. Expert logical-to-slot map 更新新增按槽容量预分配的 pinned host/device staging；同一
+    transfer batch 的跨层更新使用不重叠切片，避免异步 H2D 时 host buffer 被提前覆盖，也避免
+    steady-state 每批为 indices/slots 各创建一次临时 CUDA tensor。动态 fallback 只在实际更新数
+    超过预备容量时扩容；release 配置按 `2 * expert_slots` 在计时前覆盖同批移除与新增上界。
 
 ## Next actions
 
-1. GPU 空闲后先运行三项 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
+1. GPU 空闲后先运行 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
    GQA、跨请求 KV demand 和 layer lookahead 2，并建立相同显存约束的 vLLM decode-only
    baseline。
 2. c512 通过后重跑 batch-4/context-4K 的长输出 demand/speculative，并在同一 10 GiB cap
