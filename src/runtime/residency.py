@@ -385,16 +385,32 @@ class ResidencyManager:
             return True
 
     def complete_transfer(self, key: ResourceKey, gpu_value: Any) -> None:
+        self.complete_transfers([(key, gpu_value)])
+
+    def cpu_values(self, keys: list[ResourceKey]) -> list[Any]:
+        """Read one transfer batch's CPU payloads under one residency lock."""
         with self._condition:
-            record = self._records[key]
-            if record.state != ResourceState.IN_FLIGHT:
-                raise RuntimeError(f"transfer completed from invalid state {record.state}")
-            self._reserved[key.kind].remove(key)
-            record.gpu_value = gpu_value
-            record.state = ResourceState.GPU_RESIDENT
-            self._resident[key.kind][key] = None
-            counts = self._resident_layer_counts[key.kind]
-            counts[key.layer] = counts.get(key.layer, 0) + 1
+            return [self._records[key].cpu_value for key in keys]
+
+    def complete_transfers(self, items: list[tuple[ResourceKey, Any]]) -> None:
+        """Publish one completed transfer batch atomically and notify once."""
+        if not items:
+            return
+        with self._condition:
+            records = [self._records[key] for key, _ in items]
+            invalid = next(
+                (record.state for record in records if record.state != ResourceState.IN_FLIGHT),
+                None,
+            )
+            if invalid is not None:
+                raise RuntimeError(f"transfer completed from invalid state {invalid}")
+            for (key, gpu_value), record in zip(items, records):
+                self._reserved[key.kind].remove(key)
+                record.gpu_value = gpu_value
+                record.state = ResourceState.GPU_RESIDENT
+                self._resident[key.kind][key] = None
+                counts = self._resident_layer_counts[key.kind]
+                counts[key.layer] = counts.get(key.layer, 0) + 1
             self._condition.notify_all()
 
     def fail_transfer(self, key: ResourceKey) -> None:

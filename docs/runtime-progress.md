@@ -484,6 +484,10 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     `torch.where`”改为单次 `.tolist()` 后一遍构建 expert→request rows，并在普通与 capacity-split
     加载间复用。batch4/top8/128 experts 的 48 层 CPU 隔离微基准为 10.58→0.84 ms/token，约
     12.6x；排序后的 expert 加载顺序及重复 route 的 consumer 语义保持不变。
+56. TransferWorker 对 accepted batch 的 CPU payload 读取和 GPU resident 发布分别合并为一次
+    residency 临界区；完成前先验证整批均为 IN_FLIGHT，再原子更新 resident/LRU/layer counts 并
+    只 notify 一次。32 resources×100 batches 的真实 ResidencyManager CPU 微基准由逐项路径
+    8.19 ms 降至 2.46 ms，约 3.33x；标量 API 继续委托给批量实现。
 
 ## Next actions
 

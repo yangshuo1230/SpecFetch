@@ -583,10 +583,8 @@ class TransferWorker:
             )
             start = time.perf_counter()
             try:
-                items = [
-                    (request.key, self.residency.record(request.key).cpu_value)
-                    for request in accepted
-                ]
+                keys = [request.key for request in accepted]
+                items = list(zip(keys, self.residency.cpu_values(keys)))
                 copy_many = getattr(self.backend, "copy_many_to_gpu", None)
                 if callable(copy_many):
                     values = copy_many(items)
@@ -594,8 +592,8 @@ class TransferWorker:
                     values = [self.backend.copy_to_gpu(key, cpu_value) for key, cpu_value in items]
                 if len(values) != len(accepted):
                     raise RuntimeError("transfer backend returned the wrong batch length")
-                for request, value in zip(accepted, values):
-                    self.residency.complete_transfer(request.key, value)
+                self.residency.complete_transfers(list(zip(keys, values)))
+                for request in accepted:
                     self.metrics.completed += 1
                     self.metrics.bytes += request.size_bytes
                     if request.demand:

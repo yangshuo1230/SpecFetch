@@ -1,6 +1,7 @@
 import threading
 import time
 
+import pytest
 import torch
 
 from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
@@ -586,6 +587,43 @@ def test_demand_many_uses_one_backend_transfer_batch():
     assert worker.metrics.transfer_batches == 1
     assert worker.metrics.maximum_transfer_batch == 3
     worker.close()
+
+
+def test_transfer_worker_publishes_residency_batch_without_scalar_calls(monkeypatch):
+    queue = MemoryRequestQueue()
+    residency = ResidencyManager({ResourceKind.EXPERT: 3, ResourceKind.KV: 1})
+    backend = FakeBackend()
+    worker = TransferWorker(queue, residency, backend, max_batch_size=3)
+    runtime = OffloadRuntime(queue, residency, worker)
+    for index in range(3):
+        residency.register_cpu(resource(index), f"cpu:{index}", 1024)
+
+    def reject_scalar(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("worker must use batched residency operations")
+
+    monkeypatch.setattr(residency, "record", reject_scalar)
+    monkeypatch.setattr(residency, "complete_transfer", reject_scalar)
+    worker.start()
+
+    values = runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(3)])
+
+    assert values == {resource(index): f"gpu:cpu:{index}" for index in range(3)}
+    worker.close()
+
+
+def test_complete_transfers_validates_entire_batch_before_publishing():
+    residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
+    first, second = resource(0), resource(1)
+    for key in (first, second):
+        residency.register_cpu(key, f"cpu:{key.object_id}", 1)
+    assert residency.begin_transfer(first, demand=True)
+
+    with pytest.raises(RuntimeError, match="invalid state"):
+        residency.complete_transfers([(first, "gpu:0"), (second, "gpu:1")])
+
+    assert residency.state(first) == ResourceState.IN_FLIGHT
+    assert residency.state(second) == ResourceState.CPU_ONLY
 
 
 def test_demand_many_batches_resident_hit_and_miss_state_transitions(monkeypatch):
