@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 import torch
@@ -110,6 +110,17 @@ def test_torch_backend_moe_warmup_is_a_noop():
     engine, worker = build_engine(tiny_model())
     assert engine.warmup_moe([8, 2]) is False
     assert not engine.residency.resident_keys()
+    worker.close()
+
+
+def test_expert_maps_are_preinitialized_for_every_vllm_layer():
+    engine, worker = build_engine(tiny_model())
+    maps = Mock(return_value=torch.empty(4, dtype=torch.int32))
+    engine.moe_backend = "vllm"
+    engine.runtime.worker.backend.expert_map = maps
+
+    assert engine.initialize_expert_maps()
+    assert maps.call_args_list == [call(0, 4), call(1, 4)]
     worker.close()
 
 

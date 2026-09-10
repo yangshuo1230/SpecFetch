@@ -118,6 +118,9 @@ Expert evictions update host slot ownership immediately but batch device-map rem
 the next transfer's assignments into one indexed update per layer. Experts protected by
 the same compute completion event also enqueue only one transfer-stream wait for that
 event, removing per-expert scalar map kernels and duplicate event waits.
+All logical-to-physical expert maps are materialized for every Target layer during engine
+initialization and included in the base memory measurement. Speculative updates therefore
+target persistent tensors immediately, and timed decode never lazily allocates a layer map.
 
 同一预测窗口产生的 expert 与 KV 请求会先跨层、跨请求汇总，再通过一次队列事务完成
 upsert 和唤醒；这只合并提交开销，不改变每个对象的 probability、deadline 或最终堆顺序。

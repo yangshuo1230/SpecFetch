@@ -159,6 +159,9 @@ def main() -> None:
         config,
         moe_backend=args.moe_backend,
     )
+    expert_map_start = time.perf_counter()
+    expert_maps_initialized = engine.initialize_expert_maps()
+    expert_map_initialization_seconds = time.perf_counter() - expert_map_start
     if not args.lazy_expert_store:
         engine.expert_registry.preload(
             range(len(target.model.layers)), range(target.config.num_experts)
@@ -217,10 +220,12 @@ def main() -> None:
             "resolved_output_lengths": lengths,
             "policy": "demand_only" if args.disable_prefetch else "speculative",
             "resolved_moe_backend": engine.moe_backend,
+            "expert_maps_initialized_before_timing": expert_maps_initialized,
         },
         "performance": {
             "initialization_seconds": initialization_seconds,
             "moe_warmup_seconds": moe_warmup_seconds,
+            "expert_map_initialization_seconds": expert_map_initialization_seconds,
             "request_seconds": request_seconds,
             "throughput_tokens_per_second": token_count / request_seconds,
             "peak_gpu_gib": torch.cuda.max_memory_allocated(torch.device(args.device)) / 2**30,

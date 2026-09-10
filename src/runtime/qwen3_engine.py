@@ -519,6 +519,17 @@ class Qwen3SparseOffloadEngine:
             self.residency.evict(key)
         return True
 
+    def initialize_expert_maps(self) -> bool:
+        """Materialize every persistent logical-to-slot map before request timing."""
+        if self.moe_backend != "vllm":
+            return False
+        expert_map = getattr(self.runtime.worker.backend, "expert_map", None)
+        if not callable(expert_map):
+            return False
+        for layer in range(len(self.model.model.layers)):
+            expert_map(layer, self.model.config.num_experts)
+        return True
+
     @torch.inference_mode()
     def prefill(
         self,

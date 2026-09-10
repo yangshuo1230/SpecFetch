@@ -302,6 +302,9 @@ def main() -> None:
         config,
         moe_backend=args.moe_backend,
     )
+    expert_map_start = time.perf_counter()
+    expert_maps_initialized = engine.initialize_expert_maps()
+    expert_map_initialization_seconds = time.perf_counter() - expert_map_start
     base_gpu_allocated_gib = torch.cuda.memory_allocated(cuda_device) / 2**30
     base_gpu_reserved_gib = torch.cuda.memory_reserved(cuda_device) / 2**30
     expert_slot_allocation_gib = engine.expert_slot_allocation_bytes() / 2**30
@@ -527,6 +530,7 @@ def main() -> None:
             "initialization_seconds": initialization_seconds,
             "expert_preload_seconds": expert_preload_seconds,
             "moe_warmup_seconds": moe_warmup_seconds,
+            "expert_map_initialization_seconds": expert_map_initialization_seconds,
             "shadow_attention_seconds": shadow_seconds,
             "latency_valid": not (args.shadow_attention or shadow_thresholds),
         },
@@ -549,6 +553,7 @@ def main() -> None:
                 post_initialization_persistent_lower_bound_gib
             ),
             "allocator_limit_enforced": args.gpu_memory_limit_gib is not None,
+            "expert_maps_initialized_before_timing": expert_maps_initialized,
             "limit_satisfied": memory_limit_satisfied,
         },
         "sparse_kv": {

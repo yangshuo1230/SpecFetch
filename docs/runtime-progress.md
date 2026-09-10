@@ -459,6 +459,9 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
 48. 每个 Draft provider 新增固定形状 expert-feature buffer：复用 pinned BF16 D2H staging 与
     CPU FP32 probe workspace，避免每个 refresh 重分配；CUDA copy 使用 non-blocking 后单次
     stream sync。随 context 变化的 attention 不缓存，防止多 refresh staging 内存累积。
+49. vLLM backend 在 request timing 前预创建全部 48 层 logical-to-slot expert maps，并将其计入
+    base allocator measurement；decode 不再每层首次 `_fused` 时 lazy `torch.full(128)`。JSON
+    记录初始化耗时与 before-timing 状态，torch backend 明确返回未启用。
 
 ## Next actions
 
