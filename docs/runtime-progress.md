@@ -630,6 +630,14 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     inline A/B 由 41.19 降至 39.54 ms，再减少约 4.0%。另测试过以普通 dict+单调 epoch 替代
     OrderedDict LRU：尽管 scan 较快，32/128 项触碰比 `move_to_end` 慢约 20–25%，已否决，
     不应牺牲常见 resident-hit 路径。
+84. GitHub Actions 从首次加入 Qwen3 adapter 后持续失败的根因是依赖无上限：CI 已解析到
+    Transformers 5.17/Torch 2.14，而 runtime 依赖 Transformers 4.51 的逐 expert module 与
+    `DynamicCache.batch_split` API。隔离复现中 5.17 为 31 failed，最新 4.x 4.57.6 仍有 3 个
+    cache API failures；4.51.3 + Torch 2.8.0 + pytest 9.1.1 为 162 passed、9 skipped。因此
+    `pyproject.toml` 固定兼容窗口为 Transformers `>=4.51,<4.52`、Torch `>=2.4,<2.9`，
+    并将数值栈约束到已验证的 NumPy `>=1.26,<2`。
+    Workflow 同时升级到 Node 24 的 checkout/setup-python v7，并只在 main push 或 PR 运行，
+    避免 feature 分支同一提交产生 push/PR 两个重复任务；concurrency 会取消同 ref 的旧任务。
 
 ## Next actions
 
