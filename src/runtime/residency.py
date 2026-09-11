@@ -278,15 +278,13 @@ class ResidencyManager:
                 continue
             primary_rank = (record.priority, -record.deadline)
             layers = groups.setdefault(primary_rank, {})
-            heapq.heappush(
-                layers.setdefault(key.layer, []),
-                (record.demand_count, lru_order, key),
-            )
+            layers.setdefault(key.layer, []).append((record.demand_count, lru_order, key))
         victims = []
         for primary_rank in sorted(groups):
             layers = groups[primary_rank]
             layer_heap = []
             for layer, candidates in layers.items():
+                heapq.heapify(candidates)
                 top = candidates[0]
                 balance = -layer_counts[layer] if kind == ResourceKind.EXPERT else 0
                 layer_heap.append((balance, top[0], top[1], layer))

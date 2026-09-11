@@ -557,6 +557,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     consumer-leases dict 改为原位 `clear`，避免每次全 miss 分配新空 dict。32 resources×100
     batches 无淘汰 admission 由 4.521 降至 3.378 ms，约减少 25.3%；plan 不完整时仍走原
     scalar fallback。
+72. Victim planner 按 layer 收集候选时改为线性 `append`，每个完整 bucket 只做一次
+    `heapify`，不再为每个 resident 执行 `heappush`。候选 tuple 含唯一 LRU 序号，因而最终
+    弹出次序不变；400 个随机 expert/KV 状态与逐次 victim selection 完全一致。96 residents/
+    48 victims 的中位规划时间由改前 82.16/81.45 us（统一/混合 primary rank）降至
+    76.54/78.40 us，分别约减少 6.8%/3.7%。
 
 ## Next actions
 
