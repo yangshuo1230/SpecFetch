@@ -583,6 +583,13 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     5.501→4.364、7.238→7.169、8.940→8.449、10.591→9.749、17.267→14.998、
     30.175→24.963、55.862→44.834 us；所有测点均不回退，单 miss 与全 miss 分别约减少
     20.7% 和 19.7%。256/1,536 个全 miss 的初始原型分别约减少 20.4%/21.5%。
+76. Transfer worker 对全接收 demand batch 复用 queue 弹出的 request list 以及 admission 已构造
+    的 key list，不再生成 accepted list 后又二次提取 keys；若罕见地部分拒绝，仍按 flags 同步
+    筛选 request/key。Speculative 路径在同一循环内生成 accepted 与 keys 并保持 dropped 计数。
+    隔离的 admission-result bookkeeping 在 1/8/32/256 个全接收 demand 上由
+    0.467→0.175、0.739→0.311、1.690→0.813、10.709→5.644 us，约减少 47–63%；部分
+    demand 拒绝路径因额外 fast-path 检查较慢，但它不是正常单 worker demand queue 路径，且
+    仍保留正确回退语义。Speculative 全接收/部分拒绝均未见实质回退。
 
 ## Next actions
 

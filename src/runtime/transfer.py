@@ -546,10 +546,10 @@ class TransferWorker:
             )
             if not requests:
                 return
-            if requests[0].demand:
-                admitted_requests = self.residency.begin_demand_transfers(
-                    [request.key for request in requests]
-                )
+            demand_batch = requests[0].demand
+            if demand_batch:
+                keys = [request.key for request in requests]
+                admitted_requests = self.residency.begin_demand_transfers(keys)
             else:
                 admissions = []
                 for request in requests:
@@ -577,12 +577,18 @@ class TransferWorker:
                         )
                     )
                 admitted_requests = self.residency.begin_transfers(admissions)
-            accepted = []
-            for request, admitted in zip(requests, admitted_requests):
-                if admitted:
-                    accepted.append(request)
-                elif not request.demand:
-                    self.metrics.dropped_speculative += 1
+            if demand_batch and False not in admitted_requests:
+                accepted = requests
+            else:
+                accepted = []
+                accepted_keys = []
+                for request, admitted in zip(requests, admitted_requests):
+                    if admitted:
+                        accepted.append(request)
+                        accepted_keys.append(request.key)
+                    elif not demand_batch:
+                        self.metrics.dropped_speculative += 1
+                keys = accepted_keys
             if not accepted:
                 continue
             self.metrics.submitted += len(accepted)
@@ -595,7 +601,6 @@ class TransferWorker:
             )
             start = time.perf_counter()
             try:
-                keys = [request.key for request in accepted]
                 items = list(zip(keys, self.residency.cpu_values(keys)))
                 copy_many = getattr(self.backend, "copy_many_to_gpu", None)
                 if callable(copy_many):
