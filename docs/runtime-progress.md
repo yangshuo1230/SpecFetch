@@ -570,6 +570,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     intents 三档分别为 0.1316→0.1168、1.0179→0.8989、6.0697→5.2451 ms，约减少
     11.3%、11.7%、13.6%。曾测试统一 primary-rank victim 特判；统一场景只再快约 2.7%，
     混合场景却由 78.40 恶化到 83.33 us（约 6.3%），已撤销且不应重试。
+74. 专用 prefetch queue handoff 在批内 resource key 全唯一时，用增量 probability/deadline
+    aggregate 更新替代每资源一次 `sum`/`min`；若任何 key 重复则自动保留批后统一重算路径，
+    避免 shared-consumer 工作负载回退。测试覆盖已有多个 consumer 时最早 deadline 后移、
+    新 consumer deadline 前移和 expected uses 等价。相对第 73 项版本，32、256、1,536 intents
+    完整 handoff 又由 0.1168→0.1103、0.8989→0.8483、5.2451→4.9777 ms，再减少约
+    5.6%、5.6%、5.1%。
 
 ## Next actions
 

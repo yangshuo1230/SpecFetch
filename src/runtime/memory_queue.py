@@ -182,6 +182,7 @@ class MemoryRequestQueue:
         size_bytes: int,
         *,
         demand: bool = False,
+        update_aggregates: bool = False,
     ) -> MemoryRequest:
         """Merge fields that can be updated incrementally under the queue lock."""
         request = self._requests.get(update.key)
@@ -195,8 +196,24 @@ class MemoryRequestQueue:
             self._requests[update.key] = request
         elif request.size_bytes != size_bytes:
             raise ValueError(f"size changed for existing resource {update.key}")
+        previous_probability = request.consumer_probabilities.get(update.consumer)
+        previous_deadline = request.consumer_deadlines.get(update.consumer)
         request.consumer_probabilities[update.consumer] = update.probability
         request.consumer_deadlines[update.consumer] = update.deadline
+        if update_aggregates:
+            request.expected_uses += update.probability - (
+                previous_probability if previous_probability is not None else 0.0
+            )
+            if previous_deadline is None:
+                request.deadline = (
+                    update.deadline
+                    if len(request.consumer_deadlines) == 1
+                    else min(request.deadline, update.deadline)
+                )
+            elif update.deadline <= request.deadline:
+                request.deadline = update.deadline
+            elif previous_deadline == request.deadline:
+                request.deadline = min(request.consumer_deadlines.values())
         request.miss_cost_ms = max(request.miss_cost_ms, update.miss_cost_ms)
         request.demand = request.demand or demand
         return request
@@ -263,13 +280,20 @@ class MemoryRequestQueue:
                     raise ValueError(f"size changed for existing resource {intent.key}")
             requests = []
             unique: dict[ResourceKey, MemoryRequest] = {}
+            update_aggregates = len(sizes) == len(intents)
             for intent, size in zip(intents, size_bytes):
-                request = self._merge_locked(intent, size)
+                request = self._merge_locked(
+                    intent,
+                    size,
+                    update_aggregates=update_aggregates,
+                )
                 requests.append(request)
                 unique[request.key] = request
+            if not update_aggregates:
+                for request in unique.values():
+                    request.expected_uses = sum(request.consumer_probabilities.values())
+                    request.deadline = min(request.consumer_deadlines.values())
             for request in unique.values():
-                request.expected_uses = sum(request.consumer_probabilities.values())
-                request.deadline = min(request.consumer_deadlines.values())
                 self._push(request)
             self._condition.notify()
             return requests

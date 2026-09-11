@@ -206,6 +206,37 @@ def test_forwarded_prefetches_match_queue_updates_and_validate_atomically():
     assert not forwarded.contains(key(3))
 
 
+def test_unique_forwarded_prefetches_update_existing_aggregates_incrementally():
+    forwarded = MemoryRequestQueue()
+    reference = MemoryRequestQueue()
+    initial = [
+        QueueUpdate(key(1), "early", 0.2, 2, 1024, 1.0),
+        QueueUpdate(key(1), "late", 0.3, 5, 1024, 1.0),
+    ]
+    forwarded.upsert_many(initial)
+    reference.upsert_many(initial)
+    updates = [QueueUpdate(key(1), "early", 0.6, 8, 1024, 2.0)]
+
+    forwarded.upsert_prefetches(updates, [1024])
+    reference.upsert_many(updates)
+
+    left = forwarded.snapshot()[0]
+    right = reference.snapshot()[0]
+    assert left.consumer_probabilities == right.consumer_probabilities
+    assert left.consumer_deadlines == right.consumer_deadlines
+    assert left.expected_uses == pytest.approx(right.expected_uses)
+    assert left.deadline == right.deadline == 5
+    assert left.miss_cost_ms == right.miss_cost_ms
+
+    earlier = [QueueUpdate(key(1), "new", 0.4, 1, 1024, 1.0)]
+    forwarded.upsert_prefetches(earlier, [1024])
+    reference.upsert_many(earlier)
+    left = forwarded.snapshot()[0]
+    right = reference.snapshot()[0]
+    assert left.expected_uses == pytest.approx(right.expected_uses)
+    assert left.deadline == right.deadline == 1
+
+
 def test_step_rebuild_reuses_cached_expected_uses(monkeypatch):
     queue = MemoryRequestQueue()
     add(queue, 1, 0.5, 8, consumer="a")
