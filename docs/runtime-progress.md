@@ -613,6 +613,13 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     pending keys 时也跳过重复 list/dict 构造。默认公共路径仍去重，测试覆盖成功、重复输入、
     CPU_ONLY 立即失败和 IN_FLIGHT 超时。1/8/32/128 项已完成等待由 2.767→1.361、
     8.235→4.477、25.916→14.343、100.729→54.411 us，约减少 45–51%。
+81. Queue 新增兼容的 metadata pop，将形成 batch 时本来就为 byte cap 累加的 `batch_bytes`
+    传给 worker；同类批全部接收时 demand/speculative 都复用原 requests、keys 和 bytes，部分
+    拒绝则在已有筛选循环同步累加 accepted bytes。完成后 `completed/bytes/transfer-kind` metrics
+    各按批更新一次，测试锁定 demand 与 speculative 的 completed、bytes 和分类计数。隔离的
+    admission-filter+completion-metrics 在 1/8/32/256 项全接收 demand/speculative 上分别约由
+    0.47/1.31/4.04/29.5 us 降至 0.16/0.22/0.41/2.16 us；8/32/256 项部分拒绝 speculative
+    也约减少 26%/44%/51%。单项全拒绝只多约 0.02 us，且不会进入 transfer/completion 路径。
 
 ## Next actions
 

@@ -538,7 +538,7 @@ class TransferWorker:
 
     def _run(self) -> None:
         while True:
-            requests, current_step = self.queue.pop_many_with_step(
+            requests, current_step, batch_bytes = self.queue.pop_many_with_metadata(
                 self.max_batch_size,
                 block=True,
                 speculative_maximum=self.max_speculative_batch_size,
@@ -552,6 +552,7 @@ class TransferWorker:
                 admitted_requests = self.residency.begin_demand_transfers(keys)
             else:
                 admissions = []
+                keys = []
                 for request in requests:
                     mib = max(request.size_bytes / 2**20, 1e-6)
                     consumer_leases = {
@@ -576,16 +577,20 @@ class TransferWorker:
                             consumer_leases,
                         )
                     )
+                    keys.append(request.key)
                 admitted_requests = self.residency.begin_transfers(admissions)
-            if demand_batch and False not in admitted_requests:
+            if False not in admitted_requests:
                 accepted = requests
+                accepted_bytes = batch_bytes
             else:
                 accepted = []
                 accepted_keys = []
+                accepted_bytes = 0
                 for request, admitted in zip(requests, admitted_requests):
                     if admitted:
                         accepted.append(request)
                         accepted_keys.append(request.key)
+                        accepted_bytes += request.size_bytes
                     elif not demand_batch:
                         self.metrics.dropped_speculative += 1
                 keys = accepted_keys
@@ -610,13 +615,13 @@ class TransferWorker:
                 if len(values) != len(accepted):
                     raise RuntimeError("transfer backend returned the wrong batch length")
                 self.residency.complete_transfer_values(keys, values)
-                for request in accepted:
-                    self.metrics.completed += 1
-                    self.metrics.bytes += request.size_bytes
-                    if request.demand:
-                        self.metrics.demand_transfers += 1
-                    else:
-                        self.metrics.speculative_transfers += 1
+                accepted_count = len(accepted)
+                self.metrics.completed += accepted_count
+                self.metrics.bytes += accepted_bytes
+                if demand_batch:
+                    self.metrics.demand_transfers += accepted_count
+                else:
+                    self.metrics.speculative_transfers += accepted_count
             except Exception as error:  # noqa: BLE001 - surface backend failures to compute
                 self._error = error
                 release_gpu = getattr(self.backend, "release_gpu", None)

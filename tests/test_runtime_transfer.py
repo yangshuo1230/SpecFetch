@@ -541,6 +541,10 @@ def test_transfer_worker_uses_step_snapshot_from_popped_batch():
 
     assert queue.current_step_reads == 0
     assert set(backend.copies) == {resource(index) for index in range(3)}
+    assert worker.metrics.completed == 3
+    assert worker.metrics.bytes == 3 * 2**20
+    assert worker.metrics.demand_transfers == 0
+    assert worker.metrics.speculative_transfers == 3
 
 
 def test_cancel_after_queue_pop_prevents_stale_speculative_transfer():
@@ -600,6 +604,10 @@ def test_demand_many_uses_one_backend_transfer_batch():
     assert set(backend.batches[0]) == {resource(0), resource(1), resource(2)}
     assert worker.metrics.transfer_batches == 1
     assert worker.metrics.maximum_transfer_batch == 3
+    assert worker.metrics.completed == 3
+    assert worker.metrics.bytes == 3 * 1024
+    assert worker.metrics.demand_transfers == 3
+    assert worker.metrics.speculative_transfers == 0
     worker.close()
 
 
