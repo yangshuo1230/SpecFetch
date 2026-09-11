@@ -625,6 +625,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     因此中间不会有并发状态变化。测试锁定两项 batch 只调用两次 peek。32,000 requests/
     1,000 个 32-item batches 的同进程旧/新 drain 中位数由 47.37 降至 42.21 ms，约减少
     10.9%；profile 中合法 head 检查次数由 63,001 降至 32,001。
+83. 已验证 head 的 `heappop`/request 删除进一步在两个锁内调用点直接内联，移除每个 batch
+    后续元素一次 Python helper 调用。相同 32,000 requests/1,000 batches 的当前 helper 与
+    inline A/B 由 41.19 降至 39.54 ms，再减少约 4.0%。另测试过以普通 dict+单调 epoch 替代
+    OrderedDict LRU：尽管 scan 较快，32/128 项触碰比 `move_to_end` 慢约 20–25%，已否决，
+    不应牺牲常见 resident-hit 路径。
 
 ## Next actions
 
