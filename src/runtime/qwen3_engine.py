@@ -994,7 +994,7 @@ class Qwen3SparseOffloadEngine:
                     cache.guaranteed_demand_requests(layer_scores[request_id], miss_cost_ms=0.05)
                 )
             guaranteed_payloads = (
-                self.runtime.demand_many(guaranteed_requests)
+                self.runtime.demand_many(guaranteed_requests, keys_are_unique=True)
                 if len(guaranteed_requests) <= self.residency.capacities[ResourceKind.KV]
                 else None
             )

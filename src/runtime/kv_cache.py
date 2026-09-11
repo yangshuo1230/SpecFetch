@@ -332,7 +332,8 @@ class RequestLayerKV:
         guaranteed = self.guaranteed_chunks(draft_mass)
         if guaranteed_payloads is None:
             guaranteed_payloads = self.runtime.demand_many(
-                self.guaranteed_demand_requests(draft_mass, miss_cost_ms)
+                self.guaranteed_demand_requests(draft_mass, miss_cost_ms),
+                keys_are_unique=True,
             )
         guaranteed_values = [guaranteed_payloads[self.old[chunk]] for chunk in guaranteed]
         guaranteed_lses = [chunk_logsumexp(query, key) for key, _ in guaranteed_values]

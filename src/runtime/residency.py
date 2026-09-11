@@ -117,10 +117,13 @@ class ResidencyManager:
             return record.state == ResourceState.QUEUED
 
     def prepare_demands(
-        self, keys: list[ResourceKey]
+        self,
+        keys: list[ResourceKey],
+        *,
+        keys_are_unique: bool = False,
     ) -> tuple[dict[ResourceKey, Any], list[ResourceKey], dict[ResourceKey, int], int]:
         """Acquire resident hits and promote misses under one residency lock."""
-        unique_keys = dict.fromkeys(keys)
+        unique_keys = keys if keys_are_unique else dict.fromkeys(keys)
         values: dict[ResourceKey, Any] = {}
         pending: list[ResourceKey] = []
         queue_sizes: dict[ResourceKey, int] = {}
@@ -149,7 +152,9 @@ class ResidencyManager:
             if transitioned:
                 self._condition.notify_all()
         demand_hits = (
-            len(values) if len(unique_keys) == len(keys) else sum(key in values for key in keys)
+            len(values)
+            if keys_are_unique or len(unique_keys) == len(keys)
+            else sum(key in values for key in keys)
         )
         return values, pending, queue_sizes, demand_hits
 
@@ -669,12 +674,17 @@ class ResidencyManager:
             record.priority = float("inf")
 
     def release(self, key: ResourceKey) -> None:
-        self.release_many([key])
+        self.release_many([key], keys_are_unique=True)
 
-    def release_many(self, keys: list[ResourceKey]) -> None:
+    def release_many(
+        self,
+        keys: list[ResourceKey],
+        *,
+        keys_are_unique: bool = False,
+    ) -> None:
         """End one compute batch's demand scopes under one residency lock."""
         with self._condition:
-            for key in dict.fromkeys(keys):
+            for key in keys if keys_are_unique else dict.fromkeys(keys):
                 record = self._records[key]
                 record.demand_active = False
                 record.priority = record.lease_priority

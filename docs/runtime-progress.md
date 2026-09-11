@@ -602,6 +602,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     1.016→0.620、1.759→1.321、4.280→3.759、31.431→28.662 us（约减少 9–39%）；同规模
     completion 输入容器成本由 0.395→0.259、0.612→0.335、1.522→0.652、10.677→3.502 us
     （约减少 34–67%）。这些是 worker bookkeeping 隔离值，不代表 GPU copy 时间。
+79. Expert dependencies、guaranteed KV chunks 及 batch 跨请求 KV keys 都由上游 dict/唯一 chunk
+    结构保证唯一；这些内部调用现在显式传递 `keys_are_unique=True`，使 demand prepare 和 expert
+    release 跳过各自的 `dict.fromkeys`。公共 runtime/residency API 默认仍去重，重复请求的 hit
+    metrics 与 demand-count 语义不变。1/8/32/128 个全 resident demand+release 的生产形态 A/B
+    由 3.634→3.108、10.761→8.947、34.737→28.146、128.764→108.765 us，约减少
+    14.5%、16.9%、19.0%、15.5%。
 
 ## Next actions
 

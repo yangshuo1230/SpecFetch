@@ -745,13 +745,18 @@ class OffloadRuntime:
         miss_cost_ms: float,
         timeout: float | None = None,
     ) -> Any:
-        return self.demand_many([DemandRequest(key, consumer, miss_cost_ms)], timeout=timeout)[key]
+        return self.demand_many(
+            [DemandRequest(key, consumer, miss_cost_ms)],
+            timeout=timeout,
+            keys_are_unique=True,
+        )[key]
 
     def demand_many(
         self,
         requests: list[DemandRequest],
         *,
         timeout: float | None = None,
+        keys_are_unique: bool = False,
     ) -> dict[ResourceKey, Any]:
         """Promote all dependencies before waiting so H2D can form a batch."""
         if not requests:
@@ -762,7 +767,10 @@ class OffloadRuntime:
                 raise ValueError("miss_cost_ms must be non-negative")
             keys.append(request.key)
         self.worker.metrics.demand_requests += len(requests)
-        values, pending, queue_sizes, demand_hits = self.residency.prepare_demands(keys)
+        values, pending, queue_sizes, demand_hits = self.residency.prepare_demands(
+            keys,
+            keys_are_unique=keys_are_unique,
+        )
         self.worker.metrics.demand_hits += demand_hits
         self.worker.metrics.demand_misses += len(requests) - demand_hits
         if not pending:
@@ -806,9 +814,14 @@ class OffloadRuntime:
         self.residency.unqueue_many(depleted)
 
     def release(self, key: ResourceKey) -> None:
-        self.release_many([key])
+        self.release_many([key], keys_are_unique=True)
 
-    def release_many(self, keys: list[ResourceKey]) -> None:
+    def release_many(
+        self,
+        keys: list[ResourceKey],
+        *,
+        keys_are_unique: bool = False,
+    ) -> None:
         if not keys:
             return
         record_uses = getattr(self.worker.backend, "record_uses", None)
@@ -819,7 +832,7 @@ class OffloadRuntime:
             if callable(record_use):
                 for key in keys:
                     record_use(key)
-        self.residency.release_many(keys)
+        self.residency.release_many(keys, keys_are_unique=keys_are_unique)
 
     def drop(self, key: ResourceKey, timeout: float | None = None) -> None:
         """Cancel and free a request-private resource at request completion."""

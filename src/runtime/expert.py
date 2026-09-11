@@ -310,7 +310,10 @@ class OffloadedExpertExecutor:
                     self.miss_cost_ms,
                 ),
             )
-        values = self.runtime.demand_many([request for _, request in dependencies.values()])
+        values = self.runtime.demand_many(
+            [request for _, request in dependencies.values()],
+            keys_are_unique=True,
+        )
         return {expert: (key, values[key]) for expert, (key, _) in dependencies.items()}
 
     def _vectorized(
@@ -427,7 +430,10 @@ class OffloadedExpertExecutor:
                     outputs = F.linear(activated, weights.down)
                     outputs *= routing[token_indices, route_indices, None]
                     result.index_add_(0, token_indices, outputs.to(result.dtype))
-            self.runtime.release_many([key for key, _ in loaded.values()])
+            self.runtime.release_many(
+                [key for key, _ in loaded.values()],
+                keys_are_unique=True,
+            )
         return result
 
     def __call__(
@@ -491,7 +497,10 @@ class OffloadedExpertExecutor:
                 )
             else:
                 result = self._vectorized(hidden_states, selected, routing, loaded)
-            self.runtime.release_many([key for key, _ in loaded.values()])
+            self.runtime.release_many(
+                [key for key, _ in loaded.values()],
+                keys_are_unique=True,
+            )
         else:
             result = self._grouped_batched(
                 hidden_states,
