@@ -720,23 +720,34 @@ class ResidencyManager:
             )
 
     def wait_resident_many(
-        self, keys: list[ResourceKey], timeout: float | None = None
+        self,
+        keys: list[ResourceKey],
+        timeout: float | None = None,
+        *,
+        keys_are_unique: bool = False,
     ) -> dict[ResourceKey, Any] | None:
         """Wait once for a demand batch and acquire all completed GPU values."""
-        unique = list(dict.fromkeys(keys))
+        unique = keys if keys_are_unique else list(dict.fromkeys(keys))
         if not unique:
             return {}
         with self._condition:
-            ready = self._condition.wait_for(
-                lambda: (
-                    any(self._records[key].state == ResourceState.CPU_ONLY for key in unique)
-                    or all(self._records[key].state == ResourceState.GPU_RESIDENT for key in unique)
-                ),
-                timeout=timeout,
-            )
-            if not ready or any(
-                self._records[key].state != ResourceState.GPU_RESIDENT for key in unique
-            ):
+            failed = False
+
+            def terminal() -> bool:
+                nonlocal failed
+                failed = False
+                all_resident = True
+                for key in unique:
+                    state = self._records[key].state
+                    if state == ResourceState.CPU_ONLY:
+                        failed = True
+                        return True
+                    if state != ResourceState.GPU_RESIDENT:
+                        all_resident = False
+                return all_resident
+
+            ready = self._condition.wait_for(terminal, timeout=timeout)
+            if not ready or failed:
                 return None
             values = {}
             for key in unique:

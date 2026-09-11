@@ -608,6 +608,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     metrics 与 demand-count 语义不变。1/8/32/128 个全 resident demand+release 的生产形态 A/B
     由 3.634→3.108、10.761→8.947、34.737→28.146、128.764→108.765 us，约减少
     14.5%、16.9%、19.0%、15.5%。
+80. `wait_resident_many` 将“任一 CPU_ONLY 失败”和“全部 GPU_RESIDENT 成功”合并到一次终态
+    predicate 扫描，成功唤醒后不再第三次验证全部 records；runtime 传入 prepare 已去重的
+    pending keys 时也跳过重复 list/dict 构造。默认公共路径仍去重，测试覆盖成功、重复输入、
+    CPU_ONLY 立即失败和 IN_FLIGHT 超时。1/8/32/128 项已完成等待由 2.767→1.361、
+    8.235→4.477、25.916→14.343、100.729→54.411 us，约减少 45–51%。
 
 ## Next actions
 

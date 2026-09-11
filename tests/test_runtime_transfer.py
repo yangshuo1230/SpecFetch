@@ -714,6 +714,25 @@ def test_complete_transfers_validates_entire_batch_before_publishing():
     assert residency.state(second) == ResourceState.CPU_ONLY
 
 
+def test_wait_resident_many_combines_success_failure_timeout_and_deduplication():
+    residency = ResidencyManager({ResourceKind.EXPERT: 3, ResourceKind.KV: 1})
+    resident, failed, pending = (resource(index) for index in range(3))
+    for key in (resident, failed, pending):
+        residency.register_cpu(key, f"cpu:{key.object_id}", 1)
+    assert residency.begin_transfer(resident, demand=True)
+    residency.complete_transfer(resident, "gpu:0")
+    assert residency.begin_transfer(pending, demand=True)
+
+    assert residency.wait_resident_many(
+        [resident],
+        0,
+        keys_are_unique=True,
+    ) == {resident: "gpu:0"}
+    assert residency.wait_resident_many([resident, resident], 0) == {resident: "gpu:0"}
+    assert residency.wait_resident_many([resident, failed], 0) is None
+    assert residency.wait_resident_many([pending], 0, keys_are_unique=True) is None
+
+
 def test_begin_transfers_preserves_ordered_speculative_and_demand_semantics():
     residency = ResidencyManager({ResourceKind.EXPERT: 2, ResourceKind.KV: 1})
     speculative, demand = resource(0), resource(1)

@@ -789,7 +789,11 @@ class OffloadRuntime:
             else:
                 self.queue.upsert_demand_intents(queued, queued_sizes)
         start = time.perf_counter()
-        completed = self.residency.wait_resident_many(pending, timeout)
+        completed = self.residency.wait_resident_many(
+            pending,
+            timeout,
+            keys_are_unique=True,
+        )
         self.worker.check()
         if completed is None:
             missing = next((key for key in pending if key not in values), pending[0])
