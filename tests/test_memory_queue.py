@@ -367,16 +367,26 @@ def test_pop_many_can_return_the_same_lock_step_snapshot():
     assert step == 3
 
 
-def test_pop_many_metadata_reuses_accumulated_batch_bytes():
+def test_pop_many_metadata_reuses_batch_bytes_and_each_validated_head(monkeypatch):
     queue = MemoryRequestQueue()
     add(queue, 1, 0.9, 4)
     add(queue, 2, 0.8, 5)
+    peeks = 0
+    peek = queue._peek_valid_locked
+
+    def counted_peek():
+        nonlocal peeks
+        peeks += 1
+        return peek()
+
+    monkeypatch.setattr(queue, "_peek_valid_locked", counted_peek)
 
     requests, step, batch_bytes = queue.pop_many_with_metadata(2)
 
     assert [request.key for request in requests] == [key(1), key(2)]
     assert step == 0
     assert batch_bytes == 2048
+    assert peeks == 2
 
 
 def test_pop_many_bounds_only_speculative_microbatch():

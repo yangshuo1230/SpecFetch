@@ -511,9 +511,13 @@ class MemoryRequestQueue:
         request = self._peek_valid_locked()
         if request is None:
             return None
+        self._pop_peeked_locked(request)
+        return request
+
+    def _pop_peeked_locked(self, request: MemoryRequest) -> None:
+        """Remove the valid heap head already returned by `_peek_valid_locked`."""
         heapq.heappop(self._heap)
         del self._requests[request.key]
-        return request
 
     def pop_many(
         self,
@@ -583,7 +587,8 @@ class MemoryRequestQueue:
                             and batch_bytes + next_request.size_bytes > speculative_maximum_bytes
                         ):
                             break
-                        requests.append(self._pop_valid_locked())
+                        self._pop_peeked_locked(next_request)
+                        requests.append(next_request)
                         batch_bytes += next_request.size_bytes
                     return requests, self._step, batch_bytes
                 if not block or self._closed:

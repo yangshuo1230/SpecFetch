@@ -620,6 +620,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     admission-filter+completion-metrics 在 1/8/32/256 项全接收 demand/speculative 上分别约由
     0.47/1.31/4.04/29.5 us 降至 0.16/0.22/0.41/2.16 us；8/32/256 项部分拒绝 speculative
     也约减少 26%/44%/51%。单项全拒绝只多约 0.02 us，且不会进入 transfer/completion 路径。
+82. Batch pop 已通过 `_peek_valid_locked` 得到并验证下一个合法 heap head 后，直接用专用 helper
+    移除该项，不再调用会重复 peek 的 `_pop_valid_locked`；queue condition 锁在整个操作期间持有，
+    因此中间不会有并发状态变化。测试锁定两项 batch 只调用两次 peek。32,000 requests/
+    1,000 个 32-item batches 的同进程旧/新 drain 中位数由 47.37 降至 42.21 ms，约减少
+    10.9%；profile 中合法 head 检查次数由 63,001 降至 32,001。
 
 ## Next actions
 
