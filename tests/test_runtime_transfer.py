@@ -620,6 +620,8 @@ def test_transfer_worker_publishes_residency_batch_without_scalar_calls(monkeypa
     monkeypatch.setattr(residency, "begin_transfer", reject_scalar)
     monkeypatch.setattr(residency, "begin_transfers", reject_scalar)
     monkeypatch.setattr(residency, "complete_transfer", reject_scalar)
+    monkeypatch.setattr(residency, "cpu_values", reject_scalar)
+    monkeypatch.setattr(residency, "complete_transfers", reject_scalar)
     worker.start()
 
     values = runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(3)])
@@ -705,6 +707,8 @@ def test_complete_transfers_validates_entire_batch_before_publishing():
 
     with pytest.raises(RuntimeError, match="invalid state"):
         residency.complete_transfers([(first, "gpu:0"), (second, "gpu:1")])
+    with pytest.raises(RuntimeError, match="lengths do not match"):
+        residency.complete_transfer_values([first, second], ["gpu:0"])
 
     assert residency.state(first) == ResourceState.IN_FLIGHT
     assert residency.state(second) == ResourceState.CPU_ONLY

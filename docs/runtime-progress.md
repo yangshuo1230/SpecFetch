@@ -595,6 +595,13 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     输入仍回退原逐 request 计数，测试锁定两个相同 resident demand 记为两个 hits、但资源
     demand-count 只增加一次。1/8/32/128 个全 resident 唯一 key 的 prepare+hit-count 中位数由
     1.904→1.618、6.955→6.056、24.190→21.637、94.852→84.330 us，约减少 10–15%。
+78. Transfer worker 让 residency 在一次锁内直接生成 backend 所需 `(key,cpu_value)` items，
+    不再先分配 values list 再 zip；GPU copy 返回后以平行 keys/values 直接原子发布，不再为
+    completion 生成第二个 tuple list。旧 `cpu_values`/`complete_transfers` API 保留兼容包装，
+    新发布入口先验证批长且仍在任何状态修改前验证全部 records。1/8/32/256 项读取容器成本由
+    1.016→0.620、1.759→1.321、4.280→3.759、31.431→28.662 us（约减少 9–39%）；同规模
+    completion 输入容器成本由 0.395→0.259、0.612→0.335、1.522→0.652、10.677→3.502 us
+    （约减少 34–67%）。这些是 worker bookkeeping 隔离值，不代表 GPU copy 时间。
 
 ## Next actions
 

@@ -558,6 +558,11 @@ class ResidencyManager:
     def complete_transfer(self, key: ResourceKey, gpu_value: Any) -> None:
         self.complete_transfers([(key, gpu_value)])
 
+    def cpu_items(self, keys: list[ResourceKey]) -> list[tuple[ResourceKey, Any]]:
+        """Build one backend transfer batch under one residency lock."""
+        with self._condition:
+            return [(key, self._records[key].cpu_value) for key in keys]
+
     def cpu_values(self, keys: list[ResourceKey]) -> list[Any]:
         """Read one transfer batch's CPU payloads under one residency lock."""
         with self._condition:
@@ -567,15 +572,30 @@ class ResidencyManager:
         """Publish one completed transfer batch atomically and notify once."""
         if not items:
             return
+        self.complete_transfer_values(
+            [key for key, _ in items],
+            [gpu_value for _, gpu_value in items],
+        )
+
+    def complete_transfer_values(
+        self,
+        keys: list[ResourceKey],
+        gpu_values: list[Any],
+    ) -> None:
+        """Publish parallel key/value batches without forwarding tuples."""
+        if len(keys) != len(gpu_values):
+            raise RuntimeError("transfer completion batch lengths do not match")
+        if not keys:
+            return
         with self._condition:
-            records = [self._records[key] for key, _ in items]
+            records = [self._records[key] for key in keys]
             invalid = next(
                 (record.state for record in records if record.state != ResourceState.IN_FLIGHT),
                 None,
             )
             if invalid is not None:
                 raise RuntimeError(f"transfer completed from invalid state {invalid}")
-            for (key, gpu_value), record in zip(items, records):
+            for key, gpu_value, record in zip(keys, gpu_values, records):
                 self._reserved[key.kind].remove(key)
                 record.gpu_value = gpu_value
                 record.state = ResourceState.GPU_RESIDENT
