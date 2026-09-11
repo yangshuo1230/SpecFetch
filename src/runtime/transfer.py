@@ -762,8 +762,7 @@ class OffloadRuntime:
                 raise ValueError("miss_cost_ms must be non-negative")
             keys.append(request.key)
         self.worker.metrics.demand_requests += len(requests)
-        values, pending, queue_sizes = self.residency.prepare_demands(keys)
-        demand_hits = sum(key in values for key in keys)
+        values, pending, queue_sizes, demand_hits = self.residency.prepare_demands(keys)
         self.worker.metrics.demand_hits += demand_hits
         self.worker.metrics.demand_misses += len(requests) - demand_hits
         if not pending:

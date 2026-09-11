@@ -118,14 +118,15 @@ class ResidencyManager:
 
     def prepare_demands(
         self, keys: list[ResourceKey]
-    ) -> tuple[dict[ResourceKey, Any], list[ResourceKey], dict[ResourceKey, int]]:
+    ) -> tuple[dict[ResourceKey, Any], list[ResourceKey], dict[ResourceKey, int], int]:
         """Acquire resident hits and promote misses under one residency lock."""
+        unique_keys = dict.fromkeys(keys)
         values: dict[ResourceKey, Any] = {}
         pending: list[ResourceKey] = []
         queue_sizes: dict[ResourceKey, int] = {}
         transitioned = False
         with self._condition:
-            for key in dict.fromkeys(keys):
+            for key in unique_keys:
                 record = self._records[key]
                 record.demand_count += 1
                 if record.state == ResourceState.GPU_RESIDENT:
@@ -147,7 +148,10 @@ class ResidencyManager:
                 queue_sizes[key] = record.size_bytes
             if transitioned:
                 self._condition.notify_all()
-        return values, pending, queue_sizes
+        demand_hits = (
+            len(values) if len(unique_keys) == len(keys) else sum(key in values for key in keys)
+        )
+        return values, pending, queue_sizes, demand_hits
 
     def prepare_prefetches(
         self,

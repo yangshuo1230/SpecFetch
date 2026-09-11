@@ -590,6 +590,11 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     0.467→0.175、0.739→0.311、1.690→0.813、10.709→5.644 us，约减少 47–63%；部分
     demand 拒绝路径因额外 fast-path 检查较慢，但它不是正常单 worker demand queue 路径，且
     仍保留正确回退语义。Speculative 全接收/部分拒绝均未见实质回退。
+77. `prepare_demands` 保存原本即需构造的去重 key dict，并在常见的全唯一输入中直接以 resident
+    value 数量返回 hit count；runtime 不再对全部 key 做第二次哈希 membership 扫描。重复 key
+    输入仍回退原逐 request 计数，测试锁定两个相同 resident demand 记为两个 hits、但资源
+    demand-count 只增加一次。1/8/32/128 个全 resident 唯一 key 的 prepare+hit-count 中位数由
+    1.904→1.618、6.955→6.056、24.190→21.637、94.852→84.330 us，约减少 10–15%。
 
 ## Next actions
 

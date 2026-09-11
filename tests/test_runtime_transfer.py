@@ -113,7 +113,7 @@ def test_expert_eviction_retains_frequent_route_within_layer():
         residency.register_cpu(key, f"cpu:{key.object_id}", 1)
 
     def demand(key):
-        values, pending, _ = residency.prepare_demands([key])
+        values, pending, _, _ = residency.prepare_demands([key])
         if pending:
             assert residency.begin_transfer(key, demand=True)
             residency.complete_transfer(key, f"gpu:{key.object_id}")
@@ -870,6 +870,28 @@ def test_all_resident_demand_batch_skips_queue_and_wait(monkeypatch):
 
     assert values == {resource(index): f"gpu:cpu:{index}" for index in range(2)}
     runtime.release_many(keys)
+    worker.close()
+
+
+def test_duplicate_resident_demands_preserve_per_request_hit_metrics():
+    runtime, residency, worker, _ = build_runtime(capacity=1)
+    key = resource(0)
+    runtime.demand(key, consumer="warm", miss_cost_ms=1.0)
+    runtime.release(key)
+    earlier_count = residency.record(key).demand_count
+
+    values = runtime.demand_many(
+        [
+            DemandRequest(key, "a", 1.0),
+            DemandRequest(key, "b", 1.0),
+        ]
+    )
+
+    assert values == {key: "gpu:cpu:0"}
+    assert worker.metrics.demand_hits == 2
+    assert worker.metrics.demand_misses == 1
+    assert residency.record(key).demand_count == earlier_count + 1
+    runtime.release(key)
     worker.close()
 
 
