@@ -562,6 +562,14 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     弹出次序不变；400 个随机 expert/KV 状态与逐次 victim selection 完全一致。96 residents/
     48 victims 的中位规划时间由改前 82.16/81.45 us（统一/混合 primary rank）降至
     76.54/78.40 us，分别约减少 6.8%/3.7%。
+73. Prefetch residency-to-queue handoff 复用原 `PrefetchRequest` 引用，并另传平行的
+    `size_bytes` 列表；不再为每个已筛选 intent 分配字段几乎重复的 `QueueUpdate`。队列专用
+    入口仍先完成整批概率、大小与已有资源一致性验证，再原子合并，因此错误不会留下部分新
+    request；公共 `QueueUpdate/upsert_many` API 保持不变。1,536 intents 的 residency prepare
+    由 2.705 降至 2.021 ms，约减少 25.3%；同进程旧/新完整 handoff A/B 在 32、256、1,536
+    intents 三档分别为 0.1316→0.1168、1.0179→0.8989、6.0697→5.2451 ms，约减少
+    11.3%、11.7%、13.6%。曾测试统一 primary-rank victim 特判；统一场景只再快约 2.7%，
+    混合场景却由 78.40 恶化到 83.33 us（约 6.3%），已撤销且不应重试。
 
 ## Next actions
 

@@ -171,6 +171,41 @@ def test_batch_upsert_merges_consumers_before_worker_observes_queue():
     assert first.deadline == 2
 
 
+def test_forwarded_prefetches_match_queue_updates_and_validate_atomically():
+    updates = [
+        QueueUpdate(key(1), "r0", 0.2, 5, 1024, 1.0),
+        QueueUpdate(key(1), "r1", 0.7, 2, 1024, 3.0),
+        QueueUpdate(key(2), "r0", 0.5, 3, 2048, 2.0),
+    ]
+    forwarded = MemoryRequestQueue()
+    reference = MemoryRequestQueue()
+
+    returned = forwarded.upsert_prefetches(updates, [1024, 1024, 2048])
+    reference.upsert_many(updates)
+
+    assert returned[0] is returned[1]
+    actual = {request.key: request for request in forwarded.snapshot()}
+    expected = {request.key: request for request in reference.snapshot()}
+    assert actual.keys() == expected.keys()
+    for resource_key, left in actual.items():
+        right = expected[resource_key]
+        assert left.consumer_probabilities == right.consumer_probabilities
+        assert left.consumer_deadlines == right.consumer_deadlines
+        assert left.expected_uses == right.expected_uses
+        assert left.deadline == right.deadline
+        assert left.miss_cost_ms == right.miss_cost_ms
+
+    with pytest.raises(ValueError, match="size changed"):
+        forwarded.upsert_prefetches(
+            [
+                QueueUpdate(key(3), "r0", 0.5, 4, 1, 1.0),
+                QueueUpdate(key(1), "r2", 0.5, 4, 1, 1.0),
+            ],
+            [1024, 2048],
+        )
+    assert not forwarded.contains(key(3))
+
+
 def test_step_rebuild_reuses_cached_expected_uses(monkeypatch):
     queue = MemoryRequestQueue()
     add(queue, 1, 0.5, 8, consumer="a")

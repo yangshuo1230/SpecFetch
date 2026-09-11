@@ -5,7 +5,7 @@ import math
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 
 
 class ResourceKind(str, Enum):
@@ -68,6 +68,16 @@ class QueueUpdate(NamedTuple):
     size_bytes: int
     miss_cost_ms: float
     demand: bool = False
+
+
+class PrefetchQueueIntent(Protocol):
+    """Fields consumed when residency forwards an existing prefetch intent."""
+
+    key: ResourceKey
+    consumer: str
+    probability: float
+    deadline: int
+    miss_cost_ms: float
 
 
 class DemandQueueUpdate(NamedTuple):
@@ -166,23 +176,29 @@ class MemoryRequestQueue:
         if update.size_bytes <= 0 or update.miss_cost_ms < 0:
             raise ValueError("size_bytes must be positive and miss_cost_ms non-negative")
 
-    def _merge_locked(self, update: QueueUpdate) -> MemoryRequest:
+    def _merge_locked(
+        self,
+        update: PrefetchQueueIntent,
+        size_bytes: int,
+        *,
+        demand: bool = False,
+    ) -> MemoryRequest:
         """Merge fields that can be updated incrementally under the queue lock."""
         request = self._requests.get(update.key)
         if request is None:
             request = MemoryRequest(
                 update.key,
-                update.size_bytes,
+                size_bytes,
                 update.miss_cost_ms,
                 update.deadline,
             )
             self._requests[update.key] = request
-        elif request.size_bytes != update.size_bytes:
+        elif request.size_bytes != size_bytes:
             raise ValueError(f"size changed for existing resource {update.key}")
         request.consumer_probabilities[update.consumer] = update.probability
         request.consumer_deadlines[update.consumer] = update.deadline
         request.miss_cost_ms = max(request.miss_cost_ms, update.miss_cost_ms)
-        request.demand = request.demand or update.demand
+        request.demand = request.demand or demand
         return request
 
     def upsert_many(self, updates: list[QueueUpdate]) -> list[MemoryRequest]:
@@ -205,7 +221,50 @@ class MemoryRequestQueue:
             requests = []
             unique: dict[ResourceKey, MemoryRequest] = {}
             for update in updates:
-                request = self._merge_locked(update)
+                request = self._merge_locked(
+                    update,
+                    update.size_bytes,
+                    demand=update.demand,
+                )
+                requests.append(request)
+                unique[request.key] = request
+            for request in unique.values():
+                request.expected_uses = sum(request.consumer_probabilities.values())
+                request.deadline = min(request.consumer_deadlines.values())
+                self._push(request)
+            self._condition.notify()
+            return requests
+
+    def upsert_prefetches(
+        self,
+        intents: list[PrefetchQueueIntent],
+        size_bytes: list[int],
+    ) -> list[MemoryRequest]:
+        """Queue existing prefetch intents without allocating forwarding records."""
+        if not intents:
+            if size_bytes:
+                raise ValueError("prefetch intents and sizes must have equal lengths")
+            return []
+        if len(intents) != len(size_bytes):
+            raise ValueError("prefetch intents and sizes must have equal lengths")
+        for intent, size in zip(intents, size_bytes):
+            if not 0 <= intent.probability <= 1:
+                raise ValueError("probability must be in [0, 1]")
+            if size <= 0 or intent.miss_cost_ms < 0:
+                raise ValueError("size_bytes must be positive and miss_cost_ms non-negative")
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("queue is closed")
+            sizes: dict[ResourceKey, int] = {}
+            for intent, size in zip(intents, size_bytes):
+                expected_size = sizes.setdefault(intent.key, size)
+                existing = self._requests.get(intent.key)
+                if expected_size != size or (existing is not None and existing.size_bytes != size):
+                    raise ValueError(f"size changed for existing resource {intent.key}")
+            requests = []
+            unique: dict[ResourceKey, MemoryRequest] = {}
+            for intent, size in zip(intents, size_bytes):
+                request = self._merge_locked(intent, size)
                 requests.append(request)
                 unique[request.key] = request
             for request in unique.values():

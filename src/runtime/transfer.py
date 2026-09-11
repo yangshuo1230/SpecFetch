@@ -725,11 +725,11 @@ class OffloadRuntime:
             if request.miss_cost_ms < 0:
                 raise ValueError("miss_cost_ms must be non-negative")
         current_step = self.queue.current_step
-        queued = self.residency.prepare_prefetches(
+        queued, queue_sizes = self.residency.prepare_prefetches(
             requests,
             current_step=current_step,
         )
-        self.queue.upsert_many(queued)
+        self.queue.upsert_prefetches(queued, queue_sizes)
         self.worker.metrics.prefetch_enqueued += len(queued)
         self.worker.metrics.prefetch_enqueue_ms += (time.perf_counter() - start) * 1000
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
-from src.runtime.memory_queue import QueueUpdate, ResourceKey, ResourceKind
+from src.runtime.memory_queue import ResourceKey, ResourceKind
 
 
 class ResourceState(str, Enum):
@@ -154,14 +154,15 @@ class ResidencyManager:
         requests: list[PrefetchIntent],
         *,
         current_step: int,
-    ) -> list[QueueUpdate]:
+    ) -> tuple[list[PrefetchIntent], list[int]]:
         """Prepare one speculative batch under one residency lock.
 
         CPU-only resources become queued and are returned for queue admission.
         Queued, resident and in-flight records retain the current consumer leases so
         cancellation stays linearizable while a worker claims a popped request.
         """
-        queued: list[QueueUpdate] = []
+        queued: list[PrefetchIntent] = []
+        queue_sizes: list[int] = []
         transitioned = False
         with self._condition:
             for request in requests:
@@ -192,19 +193,11 @@ class ResidencyManager:
                     self._set_lease(record, request.consumer, priority, request.deadline)
                     record.speculative = True
                     record.used = False
-                queued.append(
-                    QueueUpdate(
-                        key,
-                        request.consumer,
-                        request.probability,
-                        request.deadline,
-                        record.size_bytes,
-                        request.miss_cost_ms,
-                    )
-                )
+                queued.append(request)
+                queue_sizes.append(record.size_bytes)
             if transitioned:
                 self._condition.notify_all()
-        return queued
+        return queued, queue_sizes
 
     def unqueue(self, key: ResourceKey) -> bool:
         return key in self.unqueue_many([key])
