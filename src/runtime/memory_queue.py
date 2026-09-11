@@ -88,6 +88,13 @@ class DemandQueueUpdate(NamedTuple):
     miss_cost_ms: float
 
 
+class DemandQueueIntent(Protocol):
+    """Fields consumed when demand admission forwards its existing intent."""
+
+    key: ResourceKey
+    miss_cost_ms: float
+
+
 class MemoryRequestQueue:
     """Thread-safe updatable priority queue shared by KV and expert requests."""
 
@@ -339,6 +346,85 @@ class MemoryRequestQueue:
                 self._push(request)
             self._condition.notify()
             return requests
+
+    def upsert_demand_intents(
+        self,
+        intents: list[DemandQueueIntent],
+        size_bytes: list[int],
+    ) -> list[MemoryRequest]:
+        """Promote existing demand intents without allocating forwarding records."""
+        if not intents:
+            if size_bytes:
+                raise ValueError("demand intents and sizes must have equal lengths")
+            return []
+        if len(intents) != len(size_bytes):
+            raise ValueError("demand intents and sizes must have equal lengths")
+        for intent, size in zip(intents, size_bytes):
+            if size <= 0 or intent.miss_cost_ms < 0:
+                raise ValueError("size_bytes must be positive and miss_cost_ms non-negative")
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("queue is closed")
+            sizes: dict[ResourceKey, int] = {}
+            for intent, size in zip(intents, size_bytes):
+                expected_size = sizes.setdefault(intent.key, size)
+                existing = self._requests.get(intent.key)
+                if expected_size != size or (existing is not None and existing.size_bytes != size):
+                    raise ValueError(f"size changed for existing resource {intent.key}")
+            requests = []
+            unique: dict[ResourceKey, MemoryRequest] = {}
+            for intent, size in zip(intents, size_bytes):
+                request = self._requests.get(intent.key)
+                if request is None:
+                    request = MemoryRequest(
+                        intent.key,
+                        size,
+                        intent.miss_cost_ms,
+                        self._step,
+                        demand=True,
+                    )
+                    self._requests[intent.key] = request
+                else:
+                    request.miss_cost_ms = max(request.miss_cost_ms, intent.miss_cost_ms)
+                    request.deadline = min(request.deadline, self._step)
+                    request.demand = True
+                requests.append(request)
+                unique[request.key] = request
+            for request in unique.values():
+                self._push(request)
+            self._condition.notify()
+            return requests
+
+    def upsert_demand_intent(
+        self,
+        intent: DemandQueueIntent,
+        size_bytes: int,
+    ) -> MemoryRequest:
+        """Promote one existing demand intent without batch bookkeeping."""
+        if size_bytes <= 0 or intent.miss_cost_ms < 0:
+            raise ValueError("size_bytes must be positive and miss_cost_ms non-negative")
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("queue is closed")
+            request = self._requests.get(intent.key)
+            if request is None:
+                request = MemoryRequest(
+                    intent.key,
+                    size_bytes,
+                    intent.miss_cost_ms,
+                    self._step,
+                    demand=True,
+                )
+                self._requests[intent.key] = request
+            elif request.size_bytes != size_bytes:
+                raise ValueError(f"size changed for existing resource {intent.key}")
+            else:
+                request.miss_cost_ms = max(request.miss_cost_ms, intent.miss_cost_ms)
+                request.deadline = min(request.deadline, self._step)
+                request.demand = True
+            self._push(request)
+            self._condition.notify()
+            return request
 
     def promote_demand(
         self,

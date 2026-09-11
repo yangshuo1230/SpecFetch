@@ -8,7 +8,6 @@ from typing import Any, NamedTuple, Protocol
 import torch
 
 from src.runtime.memory_queue import (
-    DemandQueueUpdate,
     MemoryRequestQueue,
     ResourceKey,
     ResourceKind,
@@ -766,18 +765,17 @@ class OffloadRuntime:
             self.worker.check()
             return values
         if queue_sizes:
-            updates = []
+            queued = []
+            queued_sizes = []
             for request in requests:
                 size_bytes = queue_sizes.get(request.key)
                 if size_bytes is not None:
-                    updates.append(
-                        DemandQueueUpdate(
-                            request.key,
-                            size_bytes,
-                            request.miss_cost_ms,
-                        )
-                    )
-            self.queue.upsert_demands(updates)
+                    queued.append(request)
+                    queued_sizes.append(size_bytes)
+            if len(queued) == 1:
+                self.queue.upsert_demand_intent(queued[0], queued_sizes[0])
+            else:
+                self.queue.upsert_demand_intents(queued, queued_sizes)
         start = time.perf_counter()
         completed = self.residency.wait_resident_many(pending, timeout)
         self.worker.check()

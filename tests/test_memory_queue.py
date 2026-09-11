@@ -79,6 +79,41 @@ def test_demand_batch_uses_minimal_records_and_preserves_atomic_validation():
     assert all(request.demand for request in popped)
 
 
+def test_forwarded_demand_intents_match_minimal_updates_and_scalar_path():
+    intents = [
+        DemandQueueUpdate(key(1), 1024, 1.0),
+        DemandQueueUpdate(key(2), 2048, 2.0),
+    ]
+    forwarded = MemoryRequestQueue()
+    reference = MemoryRequestQueue()
+
+    actual = forwarded.upsert_demand_intents(intents, [1024, 2048])
+    expected = reference.upsert_demands(intents)
+
+    assert [request.key for request in actual] == [request.key for request in expected]
+    assert all(request.demand for request in actual)
+    assert [request.size_bytes for request in actual] == [1024, 2048]
+    with pytest.raises(ValueError, match="size changed"):
+        forwarded.upsert_demand_intents(
+            [
+                DemandQueueUpdate(key(3), 1024, 1.0),
+                DemandQueueUpdate(key(1), 2048, 1.0),
+            ],
+            [1024, 2048],
+        )
+    assert not forwarded.contains(key(3))
+
+    speculative = MemoryRequestQueue()
+    add(speculative, 4, probability=0.5, deadline=8)
+    promoted = speculative.upsert_demand_intent(
+        DemandQueueUpdate(key(4), 1024, 3.0),
+        1024,
+    )
+    assert promoted.demand
+    assert promoted.miss_cost_ms == 3.0
+    assert promoted.consumer_probabilities == {"r0": 0.5}
+
+
 def test_duplicate_resource_merges_consumers_and_reorders():
     queue = MemoryRequestQueue()
     add(queue, 1, probability=0.2, deadline=5)

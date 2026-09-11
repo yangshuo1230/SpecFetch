@@ -576,6 +576,13 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     新 consumer deadline 前移和 expected uses 等价。相对第 73 项版本，32、256、1,536 intents
     完整 handoff 又由 0.1168→0.1103、0.8989→0.8483、5.2451→4.9777 ms，再减少约
     5.6%、5.6%、5.1%。
+75. Demand runtime 同样复用原 `DemandRequest` 引用与平行 size 列表，不再为每个 CPU_ONLY
+    miss 分配 `DemandQueueUpdate`；单 miss 走无批量 dict/去重成本的标量入口，两个及以上 miss
+    走批量入口。两条入口都保持整批 size 一致性检查、demand promotion、最大 miss cost 和已有
+    speculative consumer map。32 个请求中 1/2/3/4/8/16/32 个 miss 的旧→新 handoff 分别为
+    5.501→4.364、7.238→7.169、8.940→8.449、10.591→9.749、17.267→14.998、
+    30.175→24.963、55.862→44.834 us；所有测点均不回退，单 miss 与全 miss 分别约减少
+    20.7% 和 19.7%。256/1,536 个全 miss 的初始原型分别约减少 20.4%/21.5%。
 
 ## Next actions
 

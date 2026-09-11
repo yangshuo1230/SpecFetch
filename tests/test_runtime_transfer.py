@@ -4,12 +4,7 @@ import time
 import pytest
 import torch
 
-from src.runtime.memory_queue import (
-    DemandQueueUpdate,
-    MemoryRequestQueue,
-    ResourceKey,
-    ResourceKind,
-)
+from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
 from src.runtime.transfer import (
     CudaTransferBackend,
@@ -671,13 +666,20 @@ def test_demand_many_uses_minimal_queue_updates(monkeypatch):
     for index in range(2):
         residency.register_cpu(resource(index), f"cpu:{index}", 1024)
     demand_batches = []
-    upsert_demands = queue.upsert_demands
+    upsert_demand_intents = queue.upsert_demand_intents
 
-    def capture_demands(updates):
-        demand_batches.append(list(updates))
-        return upsert_demands(updates)
+    def capture_demands(requests, sizes):
+        demand_batches.append((list(requests), list(sizes)))
+        return upsert_demand_intents(requests, sizes)
 
-    monkeypatch.setattr(queue, "upsert_demands", capture_demands)
+    monkeypatch.setattr(queue, "upsert_demand_intents", capture_demands)
+    monkeypatch.setattr(
+        queue,
+        "upsert_demands",
+        lambda updates: (_ for _ in ()).throw(
+            AssertionError(f"demand allocated forwarding updates: {updates}")
+        ),
+    )
     monkeypatch.setattr(
         queue,
         "upsert_many",
@@ -687,9 +689,10 @@ def test_demand_many_uses_minimal_queue_updates(monkeypatch):
     )
     worker.start()
 
-    runtime.demand_many([DemandRequest(resource(index), "r0", 1.0) for index in range(2)])
+    requests = [DemandRequest(resource(index), "r0", 1.0) for index in range(2)]
+    runtime.demand_many(requests)
 
-    assert demand_batches == [[DemandQueueUpdate(resource(index), 1024, 1.0) for index in range(2)]]
+    assert demand_batches == [(requests, [1024, 1024])]
     worker.close()
 
 
