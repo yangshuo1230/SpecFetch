@@ -702,6 +702,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     CPU 4096-vocab、64 cycles 的 batch-4/16 选择结算由 3307/13234 降至 2539/8918 us，约减少
     23.2%/32.6%。同步后的 vector 直接 `.tolist()`，相对逐项 `int(tensor)` 在 batch 1/4/16/64
     为 1.612/5.649/23.425/85.695→0.289/0.303/0.539/1.218 us；CUDA 同步收益尚待实测。
+95. Draft refresh group 的 pending actual token rows 已由分组键保证等宽；现在把 request-major
+    scalars 一次 flat `torch.stack` 后 reshape，不再先对每个 request stack、再做一次外层 stack。
+    batch-4 且 pending width 1/2/4/8 的 CPU 中位由 8.947/10.494/12.967/18.811 降至
+    4.648/6.306/9.434/15.337 us，约减少 18.5–48.0%；batch-16 为 31.553/37.361/47.328/
+    71.385→9.816/16.008/28.489/53.416 us。GPU 路径同时从 batch+1 个 packing kernels 降到一个；
+    测试锁定单次 stack、request-major 次序、shape 和不等宽拒绝。
 
 ## Next actions
 

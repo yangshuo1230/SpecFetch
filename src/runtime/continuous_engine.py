@@ -20,6 +20,16 @@ class RequestExecution:
     pending_actual: list[torch.Tensor] = field(default_factory=list)
 
 
+def _stack_token_rows(rows: list[list[torch.Tensor]]) -> torch.Tensor:
+    """Pack equal-width device token rows with one stack operation."""
+    if not rows or not rows[0]:
+        raise ValueError("token rows must be non-empty")
+    width = len(rows[0])
+    if any(len(row) != width for row in rows):
+        raise ValueError("token rows must have equal widths")
+    return torch.stack([token for row in rows for token in row]).reshape(len(rows), width)
+
+
 @dataclass
 class ContinuousBatchResult:
     generated_token_ids: dict[str, list[int]]
@@ -176,11 +186,8 @@ class ContinuousBatchRunner:
             batch_provider = DraftSignalProvider.merge_requests(providers)
             pending_count = len(executions[grouped_ids[0]].pending_actual)
             if pending_count:
-                actual = torch.stack(
-                    [
-                        torch.stack(executions[request_id].pending_actual)
-                        for request_id in grouped_ids
-                    ]
+                actual = _stack_token_rows(
+                    [executions[request_id].pending_actual for request_id in grouped_ids]
                 )
                 batch_provider.advance(actual)
                 for request_id in grouped_ids:

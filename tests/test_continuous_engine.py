@@ -1,3 +1,4 @@
+import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
@@ -6,6 +7,7 @@ from src.runtime.continuous_engine import (
     ContinuousBatchRunner,
     RequestExecution,
     _split_predictions,
+    _stack_token_rows,
     merge_predictions,
 )
 from src.runtime.predictor import DraftSignalProvider
@@ -56,6 +58,23 @@ def tiny_draft():
     )
     config._attn_implementation = "eager"
     return Qwen3ForCausalLM(config).eval()
+
+
+def test_pending_token_rows_use_one_flat_stack(monkeypatch):
+    rows = [[torch.tensor(row * 2 + column) for column in range(2)] for row in range(4)]
+    stack = torch.stack
+    calls = []
+
+    def counted_stack(tensors, *args, **kwargs):
+        calls.append(list(tensors))
+        return stack(calls[-1], *args, **kwargs)
+
+    monkeypatch.setattr(torch, "stack", counted_stack)
+
+    assert torch.equal(_stack_token_rows(rows), torch.arange(8).reshape(4, 2))
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match="equal widths"):
+        _stack_token_rows([rows[0], rows[1][:1]])
 
 
 def test_continuous_runner_backfills_and_releases_qwen_states():
