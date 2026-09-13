@@ -335,11 +335,9 @@ class RequestLayerKV:
             )
         guaranteed_values = [guaranteed_payloads[self.old[chunk]] for chunk in guaranteed]
         known_values = always + guaranteed_values
-        known_widths = [len(key) for key, _ in known_values]
         known_keys = [key for key, _ in known_values]
         combined_key = known_keys[0] if len(known_keys) == 1 else torch.cat(known_keys)
         combined_logits = gqa_logits(query, combined_key)
-        known_logits = list(combined_logits.split(known_widths, dim=-1))
         known_value_tensors = [value for _, value in known_values]
         combined_value = (
             known_value_tensors[0]
@@ -348,17 +346,25 @@ class RequestLayerKV:
         )
         evaluated_logits = [combined_logits]
         evaluated_values = [combined_value]
-        always_logits = known_logits[: len(always)]
-        guaranteed_logits = known_logits[len(always) :]
-        partition = empty_partition(len(query), query.device)
-        for logits in always_logits:
-            partition = update_partition(partition, torch.logsumexp(logits, dim=-1))
-        guaranteed_lses = [torch.logsumexp(logits, dim=-1) for logits in guaranteed_logits]
+        always_tokens = sum(len(key) for key, _ in always)
+        partition = (
+            torch.logsumexp(combined_logits[:, :always_tokens], dim=-1)
+            if always_tokens
+            else empty_partition(len(query), query.device)
+        )
+        guaranteed_logits = combined_logits[:, always_tokens:]
+        if guaranteed:
+            guaranteed_logits = guaranteed_logits.unflatten(
+                -1,
+                (len(guaranteed), self.config.kv_chunk_tokens),
+            )
+            guaranteed_lses = list(torch.logsumexp(guaranteed_logits, dim=-1).unbind(-1))
+        else:
+            guaranteed_lses = []
         partition, guaranteed_marginals = sequence_target_marginals(partition, guaranteed_lses)
         stopped = False
-        for chunk, logits, marginal in zip(
+        for chunk, marginal in zip(
             guaranteed,
-            guaranteed_logits,
             guaranteed_marginals,
         ):
             selected.append(chunk)

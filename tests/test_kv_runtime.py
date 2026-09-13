@@ -132,7 +132,7 @@ def test_sparse_attention_matches_dense_when_all_old_chunks_selected():
     worker.close()
 
 
-def test_sparse_attention_batches_guaranteed_predicted_mass_prefix():
+def test_sparse_attention_batches_guaranteed_predicted_mass_prefix(monkeypatch):
     config = RuntimeConfig(
         sink_tokens=2,
         recent_tokens=2,
@@ -151,6 +151,14 @@ def test_sparse_attention_batches_guaranteed_predicted_mass_prefix():
     cache = RequestLayerKV("r0", 0, config, residency, runtime, pin_cpu=False)
     values = torch.randn(10, 1, 2)
     cache.initialize(values, values)
+    logsumexp = torch.logsumexp
+    reduction_shapes = []
+
+    def record_logsumexp(tensor, *args, **kwargs):
+        reduction_shapes.append(tensor.shape)
+        return logsumexp(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "logsumexp", record_logsumexp)
 
     result = cache.sparse_attention(
         torch.ones(2, 2),
@@ -159,6 +167,7 @@ def test_sparse_attention_batches_guaranteed_predicted_mass_prefix():
     )
 
     assert result.selected_old_chunks == [0, 1, 2]
+    assert reduction_shapes == [(2, 4), (2, 3, 2)]
     assert backend.batches == [[cache.old[0], cache.old[1], cache.old[2]]]
     assert worker.metrics.transfer_batches == 1
     worker.close()

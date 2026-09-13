@@ -714,6 +714,15 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     5.848/14.975/52.500 us，约减少 22.6%/31.9%/45.1%，CUDA packing launches 同样归一。
     `DraftPredictionPlan.token_ids` 也保留在 Draft device；continuous runtime 不消费该诊断字段，
     因而不再为它单独 D2H，同步只由真正需要的 attention/probe 信号触发。
+97. Sparse Target 已把 sink/recent 与 guaranteed old chunks 的 QK 合成连续 logits，但分区计算
+    仍先 split 后逐块调用 `logsumexp`。sink/recent 不参与逐块停止，现直接以全部 always tokens
+    一次建立初始分区；所有 old chunks 由 cache 不变量保证等宽，guaranteed 区域现 reshape 为
+    `(heads, chunks, chunk_tokens)` 并一次归约，随后仍按原顺序执行 marginal 更新与停止判断。
+    32 heads、64-token chunks 下，2/4/8/16/32 chunks 的分区阶段中位由 88.222/134.183/
+    230.305/417.029/768.377 us 降为 67.236/93.320/142.899/239.423/439.451 us，约减少
+    23.8%/30.5%/38.0%/42.6%/42.8%。相同 tiny continuous batch-4、20-cycle profile 中
+    `logsumexp` 调用由 1,200 降至 333，sparse attention 累计由 80 降至 61 ms，带 profiler
+    总时间由 214 降至 192 ms；这些仍是 CPU 证据，CUDA 净收益待空闲卡验证。
 
 ## Next actions
 
