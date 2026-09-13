@@ -690,6 +690,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     `(2,8)`、`(2,8,64,64)`、`(2,8,64,64,64,64)` token layouts 的输出阶段由
     20.735/29.434/42.481 降至 13.986/15.777/20.727 us，约减少 32.5%/46.4%/51.2%；
     同机并行 tiny batch-4 相对 `b01fe5f` 为 9.207→9.177 ms/step（约 0.3%）。
+93. `BatchState` 现在持有与 active request 行对齐的 device `int64` next-position tensor；prefill
+    初始化一次，steady decode 原位 `add_(1)`，不再每 token 从 Python `lengths` 新建 tensor 并
+    发起 H2D。continuous admission 会拼接新行，request removal 会 index-select 保留行，旧的手工
+    构造状态仍可惰性初始化；shape/device/dtype 均被校验。CPU 隔离的 batch 1/4/16/64 每步
+    tensor 重建为 5.716/6.274/8.325/16.449 us，原位更新稳定约 1.66 us；GPU memcpy/kernel
+    净收益仍须空闲卡验证。测试锁定 decode storage 复用、不同长度 admission 与逐行 removal。
 
 ## Next actions
 

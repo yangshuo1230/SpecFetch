@@ -685,10 +685,16 @@ def test_admitted_state_can_be_added_and_completed_state_removed():
     engine.add_state(first, second)
     assert first.request_ids == ["a", "b"]
     assert first.lengths == [3, 2]
+    assert first.positions.tolist() == [[3], [2]]
+    position_storage = first.positions.data_ptr()
     engine.decode(torch.tensor([6, 7]), first, StepPredictions())
+    assert first.positions.data_ptr() == position_storage
+    assert first.positions.tolist() == [[4], [3]]
     engine.remove_requests(first, ["a"])
     assert first.request_ids == ["b"]
+    assert first.positions.tolist() == [[3]]
     assert all(request_id == "b" for request_id, _ in first.kv)
     engine.remove_requests(first, ["b"])
     assert not first.request_ids
+    assert first.positions.shape == (0, 1)
     worker.close()

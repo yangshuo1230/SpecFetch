@@ -132,6 +132,7 @@ class BatchState:
     step: int = 0
     speculative_consumers: SpeculativeConsumers = field(default_factory=SpeculativeConsumers)
     resident_groups: list[ResidentKVGroup] = field(default_factory=list)
+    positions: torch.Tensor | None = None
 
 
 @dataclass
@@ -363,6 +364,20 @@ class Qwen3SparseOffloadEngine:
                     requires_grad=False,
                 )
         return packed
+
+    def _state_positions(self, state: BatchState) -> torch.Tensor:
+        positions = state.positions
+        expected_shape = (len(state.request_ids), 1)
+        if positions is None:
+            positions = torch.tensor(state.lengths, dtype=torch.long, device=self.device)[:, None]
+            state.positions = positions
+        elif (
+            positions.shape != expected_shape
+            or positions.device != self.device
+            or positions.dtype != torch.long
+        ):
+            raise RuntimeError("cached decode positions are not aligned with the batch")
+        return positions
 
     def _norm(self, module, hidden: torch.Tensor) -> torch.Tensor:
         if self._rms_norm is None:
@@ -681,7 +696,18 @@ class Qwen3SparseOffloadEngine:
         resident_groups = [resident_group] if resident_group is not None else []
         return EngineOutput(
             logits,
-            BatchState(request_ids, [tokens] * batch, caches, resident_groups=resident_groups),
+            BatchState(
+                request_ids,
+                [tokens] * batch,
+                caches,
+                resident_groups=resident_groups,
+                positions=torch.full(
+                    (batch, 1),
+                    tokens,
+                    dtype=torch.long,
+                    device=self.device,
+                ),
+            ),
             {},
         )
 
@@ -828,11 +854,18 @@ class Qwen3SparseOffloadEngine:
         overlap = set(state.request_ids) & set(admitted.request_ids)
         if overlap:
             raise ValueError(f"requests are already active: {sorted(overlap)}")
+        current_positions = self._state_positions(state) if state.request_ids else None
+        admitted_positions = self._state_positions(admitted)
         state.request_ids.extend(admitted.request_ids)
         state.lengths.extend(admitted.lengths)
         state.kv.update(admitted.kv)
         state.speculative_consumers.extend(admitted.speculative_consumers)
         state.resident_groups.extend(admitted.resident_groups)
+        state.positions = (
+            admitted_positions
+            if current_positions is None
+            else torch.cat((current_positions, admitted_positions))
+        )
 
     @torch.inference_mode()
     def remove_requests(self, state: BatchState, request_ids: list[str]) -> None:
@@ -848,12 +881,22 @@ class Qwen3SparseOffloadEngine:
             group.compact(removing, state.kv)
         state.resident_groups = [group for group in state.resident_groups if group.request_ids]
         retained = [
-            (request_id, length)
-            for request_id, length in zip(state.request_ids, state.lengths)
+            (index, request_id, length)
+            for index, (request_id, length) in enumerate(zip(state.request_ids, state.lengths))
             if request_id not in removing
         ]
-        state.request_ids = [item[0] for item in retained]
-        state.lengths = [item[1] for item in retained]
+        positions = self._state_positions(state)
+        if retained:
+            indices = torch.tensor(
+                [item[0] for item in retained],
+                dtype=torch.long,
+                device=positions.device,
+            )
+            state.positions = positions.index_select(0, indices)
+        else:
+            state.positions = positions[:0]
+        state.request_ids = [item[1] for item in retained]
+        state.lengths = [item[2] for item in retained]
 
     @torch.inference_mode()
     def decode(
@@ -883,7 +926,7 @@ class Qwen3SparseOffloadEngine:
         current_predictions = predictions[0]
         hidden = self.model.model.embed_tokens(token_ids[:, None].to(self.device))
         residual = None
-        positions = torch.tensor(state.lengths, device=self.device)[:, None]
+        positions = self._state_positions(state)
         position_embeddings = (
             None
             if self._rotary_embedding is not None
@@ -1031,6 +1074,7 @@ class Qwen3SparseOffloadEngine:
         for group in state.resident_groups:
             group.length += 1
         state.lengths = [length + 1 for length in state.lengths]
+        positions.add_(1)
         state.step += 1
         return EngineOutput(logits, state, traces)
 
