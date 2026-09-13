@@ -663,6 +663,13 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     路由均有回归覆盖。含 key/lease 构造与 admission 的 1/8/32-resource 中位数由
     6.581/42.134/163.662 降至 6.199/39.219/151.473 us，约减少 5.8%/6.9%/7.4%。曾原型化
     把 lease 重算整体移入 residency 锁，虽单线程略快但扩大临界区，已否决并撤销。
+89. Sparse Target attention 的 hybrid stopping 已为 always/guaranteed/按需 old chunks 计算 QK
+    logits；最终输出现在保留并拼接这些 logits，只执行一次全选中 token 的 softmax×V，不再拼接
+    keys 后重复整段 QK。新 helper 校验每个 logits/value chunk 的 token、KV-head 与 head-dim 对齐，
+    数值测试与原 grouped GQA 输出逐元素一致。单线程 CPU、32 Q heads/4 KV heads/head-dim 64、
+    每 chunk 64 tokens 的 2/4/8 chunks 旧/新中位数为 177.462→139.752、323.413→262.886、
+    656.269→532.884 us，约减少 21.3%/18.7%/18.8%。相同 tiny batch-4 的 20-step profile
+    由 10.460 降至 8.306 s，QK einsum 次数由 2,720 降至 2,400；这些仍是 CPU 证据。
 
 ## Next actions
 

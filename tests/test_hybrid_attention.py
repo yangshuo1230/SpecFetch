@@ -4,8 +4,10 @@ import torch
 from src.runtime.hybrid_attention import (
     HybridStopController,
     attention_output,
+    attention_output_from_logits,
     chunk_logsumexp,
     empty_partition,
+    gqa_logits,
     marginal_partition_mass,
     mean_target_marginal,
     sequence_target_marginals,
@@ -80,3 +82,28 @@ def test_grouped_attention_matches_explicit_kv_head_repetition():
     assert chunk_logsumexp(query, key, scale=0.5) == pytest.approx(
         torch.logsumexp(logits, dim=-1), abs=1e-6
     )
+
+
+def test_attention_reuses_per_chunk_logits_without_changing_output():
+    generator = torch.Generator().manual_seed(23)
+    query = torch.randn(6, 4, generator=generator)
+    chunks = [
+        (
+            torch.randn(tokens, 2, 4, generator=generator),
+            torch.randn(tokens, 2, 4, generator=generator),
+        )
+        for tokens in (2, 5, 3)
+    ]
+    logits = [gqa_logits(query, key, scale=0.5) for key, _ in chunks]
+
+    actual = attention_output_from_logits(logits, [value for _, value in chunks])
+    expected = attention_output(query, chunks, scale=0.5)
+
+    assert actual == pytest.approx(expected, abs=1e-6)
+    with pytest.raises(ValueError, match="aligned non-empty"):
+        attention_output_from_logits([], [])
+    with pytest.raises(ValueError, match="per-chunk"):
+        attention_output_from_logits(
+            logits,
+            [chunks[0][1], chunks[1][1], chunks[2][1][:-1]],
+        )

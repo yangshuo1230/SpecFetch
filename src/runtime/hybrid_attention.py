@@ -40,7 +40,7 @@ def marginal_partition_mass(previous_lse: torch.Tensor, chunk_lse: torch.Tensor)
     return torch.exp(chunk_lse - combined)
 
 
-def _gqa_logits(query: torch.Tensor, key: torch.Tensor, scale: float | None = None) -> torch.Tensor:
+def gqa_logits(query: torch.Tensor, key: torch.Tensor, scale: float | None = None) -> torch.Tensor:
     if query.ndim != 2 or key.ndim != 3:
         raise ValueError("query must be (heads, dim), key must be (tokens, kv_heads, dim)")
     heads, dimension = query.shape
@@ -57,7 +57,7 @@ def chunk_logsumexp(
     query: torch.Tensor, key: torch.Tensor, scale: float | None = None
 ) -> torch.Tensor:
     """Per-head log partition for one GQA KV chunk and one query token."""
-    return torch.logsumexp(_gqa_logits(query, key, scale), dim=-1)
+    return torch.logsumexp(gqa_logits(query, key, scale), dim=-1)
 
 
 def mean_target_marginal(previous_lse: torch.Tensor, chunk_lse: torch.Tensor) -> float:
@@ -110,6 +110,37 @@ def attention_output(
     if heads % kv_heads:
         raise ValueError("incompatible query, key, and value shapes")
     groups = heads // kv_heads
-    logits = _gqa_logits(query, keys, scale).reshape(kv_heads, groups, len(keys))
+    logits = gqa_logits(query, keys, scale).reshape(kv_heads, groups, len(keys))
     weights = torch.softmax(logits, dim=-1).to(values.dtype)
     return torch.einsum("kgt,tkd->kgd", weights, values).reshape(heads, dimension)
+
+
+def attention_output_from_logits(
+    logits: list[torch.Tensor],
+    values: list[torch.Tensor],
+) -> torch.Tensor:
+    """Finish GQA from per-chunk logits already evaluated for marginal stopping."""
+    if not logits or len(logits) != len(values):
+        raise ValueError("aligned non-empty logits and values are required")
+    heads = logits[0].shape[0]
+    dimension = values[0].shape[-1]
+    kv_heads = values[0].shape[1]
+    if heads % kv_heads:
+        raise ValueError("incompatible logits and value head shapes")
+    for chunk_logits, chunk_values in zip(logits, values):
+        if (
+            chunk_logits.ndim != 2
+            or chunk_values.ndim != 3
+            or chunk_logits.shape[0] != heads
+            or chunk_logits.shape[1] != len(chunk_values)
+            or chunk_values.shape[1:] != (kv_heads, dimension)
+        ):
+            raise ValueError("incompatible per-chunk logits and value shapes")
+    combined_logits = torch.cat(logits, dim=-1)
+    combined_values = torch.cat(values)
+    groups = heads // kv_heads
+    weights = torch.softmax(
+        combined_logits.reshape(kv_heads, groups, len(combined_values)),
+        dim=-1,
+    ).to(combined_values.dtype)
+    return torch.einsum("kgt,tkd->kgd", weights, combined_values).reshape(heads, dimension)

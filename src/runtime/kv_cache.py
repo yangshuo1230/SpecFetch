@@ -9,8 +9,10 @@ from src.runtime.config import RuntimeConfig
 from src.runtime.hybrid_attention import (
     HybridStopController,
     attention_output,
+    attention_output_from_logits,
     chunk_logsumexp,
     empty_partition,
+    gqa_logits,
     mean_target_marginal,
     sequence_target_marginals,
     update_partition,
@@ -317,8 +319,13 @@ class RequestLayerKV:
             return SparseAttentionResult(output, [], 1.0, [])
         always = [part for part in (self.sink, self.recent) if len(part[0])]
         partition = empty_partition(len(query), query.device)
-        for key, _ in always:
-            partition = update_partition(partition, chunk_logsumexp(query, key))
+        evaluated_logits = []
+        evaluated_values = []
+        for key, value in always:
+            logits = gqa_logits(query, key)
+            evaluated_logits.append(logits)
+            evaluated_values.append(value)
+            partition = update_partition(partition, torch.logsumexp(logits, dim=-1))
         controller = HybridStopController(
             self.config.predicted_mass_threshold,
             self.config.marginal_mass_threshold,
@@ -327,7 +334,6 @@ class RequestLayerKV:
         )
         selected = []
         marginals = []
-        selected_payloads: list[tuple[torch.Tensor, torch.Tensor]] = []
         ordered_chunks = self.ordered_old_chunks(draft_mass)
         guaranteed = self.guaranteed_chunks(draft_mass)
         if guaranteed_payloads is None:
@@ -336,13 +342,20 @@ class RequestLayerKV:
                 keys_are_unique=True,
             )
         guaranteed_values = [guaranteed_payloads[self.old[chunk]] for chunk in guaranteed]
-        guaranteed_lses = [chunk_logsumexp(query, key) for key, _ in guaranteed_values]
+        guaranteed_logits = [gqa_logits(query, key) for key, _ in guaranteed_values]
+        guaranteed_lses = [torch.logsumexp(logits, dim=-1) for logits in guaranteed_logits]
         partition, guaranteed_marginals = sequence_target_marginals(partition, guaranteed_lses)
         stopped = False
-        for chunk, payload, marginal in zip(guaranteed, guaranteed_values, guaranteed_marginals):
+        for chunk, payload, logits, marginal in zip(
+            guaranteed,
+            guaranteed_values,
+            guaranteed_logits,
+            guaranteed_marginals,
+        ):
             selected.append(chunk)
             marginals.append(marginal)
-            selected_payloads.append(payload)
+            evaluated_logits.append(logits)
+            evaluated_values.append(payload[1])
             stopped = controller.observe(draft_mass[chunk], marginal)
         for chunk in ordered_chunks[len(guaranteed) :]:
             if stopped:
@@ -353,14 +366,16 @@ class RequestLayerKV:
                 consumer=self.request_id,
                 miss_cost_ms=miss_cost_ms,
             )
-            chunk_lse = chunk_logsumexp(query, key)
+            logits = gqa_logits(query, key)
+            chunk_lse = torch.logsumexp(logits, dim=-1)
             marginal = mean_target_marginal(partition, chunk_lse)
             partition = update_partition(partition, chunk_lse)
             selected.append(chunk)
             marginals.append(marginal)
-            selected_payloads.append((key, value))
+            evaluated_logits.append(logits)
+            evaluated_values.append(value)
             stopped = controller.observe(draft_mass[chunk], marginal)
-        output = attention_output(query, always + selected_payloads)
+        output = attention_output_from_logits(evaluated_logits, evaluated_values)
         coverage = None
         relative_l2 = None
         cosine = None
