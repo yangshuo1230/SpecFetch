@@ -677,6 +677,13 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     64-token chunks 的低并发反例慢约 2.5%，故另以 `69c2609` 临时 worktree 做同机并行完整
     tiny batch-4 A/B。7 轮×40 decode 的中位为 11.942→10.008 ms/token-step，约减少 16.2%，
     同路径 20-step profile 的 QK einsum 调用由 2,080 降至 320。GPU 净收益仍须实测。
+91. Grouped GQA 的两处固定三维 contraction 从通用 `einsum` 改为显式 batched matmul：QK 使用
+    `(kv_heads,groups,dim) @ (kv_heads,dim,tokens)`，PV 使用
+    `(kv_heads,groups,tokens) @ (kv_heads,tokens,dim)`，布局仅用 view/permute。10/74/138/266/522
+    tokens 的单线程完整 QK+softmax×V 中位由 41.286/45.400/52.765/66.228/97.660 降至
+    18.776/21.946/28.314/41.598/70.976 us，约减少 27–55%，输出逐元素一致。同机并行、7 轮
+    ×40 steps 的 tiny batch-4 A/B 相对 `a99aa51` 为 9.947→9.743 ms/step，约减少 2.0%。
+    这些仍不是 release GPU workload 的吞吐证据。
 
 ## Next actions
 

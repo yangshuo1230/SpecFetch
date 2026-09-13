@@ -49,7 +49,7 @@ def gqa_logits(query: torch.Tensor, key: torch.Tensor, scale: float | None = Non
         raise ValueError("incompatible query and KV head shapes")
     groups = heads // kv_heads
     grouped_query = query.float().reshape(kv_heads, groups, dimension)
-    logits = torch.einsum("kgd,tkd->kgt", grouped_query, key.float())
+    logits = torch.bmm(grouped_query, key.float().permute(1, 2, 0))
     return logits.reshape(heads, len(key)) * (scale or dimension**-0.5)
 
 
@@ -112,7 +112,7 @@ def attention_output(
     groups = heads // kv_heads
     logits = gqa_logits(query, keys, scale).reshape(kv_heads, groups, len(keys))
     weights = torch.softmax(logits, dim=-1).to(values.dtype)
-    return torch.einsum("kgt,tkd->kgd", weights, values).reshape(heads, dimension)
+    return torch.bmm(weights, values.permute(1, 0, 2)).reshape(heads, dimension)
 
 
 def attention_output_from_logits(
@@ -143,4 +143,4 @@ def attention_output_from_logits(
         combined_logits.reshape(kv_heads, groups, len(combined_values)),
         dim=-1,
     ).to(combined_values.dtype)
-    return torch.einsum("kgt,tkd->kgd", weights, combined_values).reshape(heads, dimension)
+    return torch.bmm(weights, combined_values.permute(1, 0, 2)).reshape(heads, dimension)
