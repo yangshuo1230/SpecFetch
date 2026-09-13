@@ -644,6 +644,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     语义保持 `[True, False]`。32-key 两组交替填满 32-slot expert cache、3,000 batches、9 轮的
     同进程旧/新完整 admission+publish+release 中位数为 118.783→113.412 us/batch，约减少 4.5%；
     这是 CPU orchestration 隔离值，不代表 GPU H2D 或 decode throughput。
+86. Prefetch queue handoff 已在首轮 size/atomicity 检查中得到批内唯一 key 数；唯一-key 常见路径
+    现在于 merge 后直接 push，不再把每个 request 再插入临时 `unique` dict 后二次遍历。共享-key
+    batch 仍按每个唯一资源统一重算 aggregate 并只 push 一次，已有多 consumer 与原子失败测试
+    保持覆盖。预先创建空 queue、仅计 `upsert_prefetches` 的同进程旧/新 A/B 在 32、256、1,536
+    intents 分别为 142.118→122.201、1136.781→951.378、6771.422→6032.590 us，约减少
+    14.0%、16.3%、10.9%；完整 fresh admission 的独立采样也全部改善。
 
 ## Next actions
 

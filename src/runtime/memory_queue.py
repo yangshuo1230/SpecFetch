@@ -286,22 +286,26 @@ class MemoryRequestQueue:
                 if expected_size != size or (existing is not None and existing.size_bytes != size):
                     raise ValueError(f"size changed for existing resource {intent.key}")
             requests = []
-            unique: dict[ResourceKey, MemoryRequest] = {}
             update_aggregates = len(sizes) == len(intents)
-            for intent, size in zip(intents, size_bytes):
-                request = self._merge_locked(
-                    intent,
-                    size,
-                    update_aggregates=update_aggregates,
-                )
-                requests.append(request)
-                unique[request.key] = request
-            if not update_aggregates:
+            if update_aggregates:
+                for intent, size in zip(intents, size_bytes):
+                    request = self._merge_locked(
+                        intent,
+                        size,
+                        update_aggregates=True,
+                    )
+                    requests.append(request)
+                    self._push(request)
+            else:
+                unique: dict[ResourceKey, MemoryRequest] = {}
+                for intent, size in zip(intents, size_bytes):
+                    request = self._merge_locked(intent, size)
+                    requests.append(request)
+                    unique[request.key] = request
                 for request in unique.values():
                     request.expected_uses = sum(request.consumer_probabilities.values())
                     request.deadline = min(request.consumer_deadlines.values())
-            for request in unique.values():
-                self._push(request)
+                    self._push(request)
             self._condition.notify()
             return requests
 
