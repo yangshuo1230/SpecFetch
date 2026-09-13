@@ -723,6 +723,16 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     23.8%/30.5%/38.0%/42.6%/42.8%。相同 tiny continuous batch-4、20-cycle profile 中
     `logsumexp` 调用由 1,200 降至 333，sparse attention 累计由 80 降至 61 ms，带 profiler
     总时间由 214 降至 192 ms；这些仍是 CPU 证据，CUDA 净收益待空闲卡验证。
+98. Guaranteed chunks 的 ordered partition 仍逐块执行原 `logaddexp`，因此最终 partition 与
+    既有实现逐位一致；但每块独立的 `exp` 和 head mean 现改为把原 chunk LSE 与每一步精确
+    partition 分别 stack 后各执行一次。单 chunk 保留原快路径。32 heads 的 2/4/8/16/32/64
+    chunks 中位由 20.955/38.251/73.613/144.593/285.779/575.535 us 降为 15.259/18.459/
+    24.936/38.297/64.441/114.061 us，约减少 27.2%/51.7%/66.1%/73.5%/77.5%/80.2%；
+    测试锁定 partition、marginal 逐位相同且多 chunk 只有一次 `exp`。相同 tiny continuous
+    20-cycle profile 中该 helper 累计约 11→6 ms、sparse attention 61→54 ms、总 profile
+    192→182 ms，`torch.exp` 调用 880→173；无 profiler 总时长仍在约 115 ms 噪声带内。
+    曾测试一次 `logcumsumexp` 生成全部前缀，虽更快但 float32 partition 最大差约 3.8e-6，
+    可能在停止阈值边界改变选块，故未采用。
 
 ## Next actions
 

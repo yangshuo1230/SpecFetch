@@ -78,15 +78,18 @@ def sequence_target_marginals(
     """Update an ordered partition while synchronizing all marginal scalars once."""
     if not chunk_lses:
         return previous_lse, []
-    marginals = []
     partition = previous_lse
+    partitions = []
     for chunk_lse in chunk_lses:
         if partition.shape != chunk_lse.shape:
             raise ValueError("partition tensors must have the same shape")
-        combined = torch.logaddexp(partition, chunk_lse)
-        marginals.append(torch.exp(chunk_lse - combined).mean())
-        partition = combined
-    return partition, torch.stack(marginals).tolist()
+        partition = torch.logaddexp(partition, chunk_lse)
+        partitions.append(partition)
+    if len(chunk_lses) == 1:
+        marginals = torch.exp(chunk_lses[0] - partition).mean().reshape(1)
+    else:
+        marginals = torch.exp(torch.stack(chunk_lses) - torch.stack(partitions)).mean(dim=-1)
+    return partition, marginals.tolist()
 
 
 def empty_partition(heads: int, device: torch.device | str = "cpu") -> torch.Tensor:

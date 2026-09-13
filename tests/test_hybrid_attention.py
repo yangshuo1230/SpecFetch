@@ -50,7 +50,7 @@ def test_gqa_chunk_partition_and_marginal():
     assert marginal == pytest.approx(torch.full((4,), 0.25))
 
 
-def test_sequence_marginals_match_ordered_scalar_updates():
+def test_sequence_marginals_match_ordered_scalar_updates(monkeypatch):
     partition = torch.tensor([0.1, -0.2])
     chunks = [torch.tensor([0.4, 0.3]), torch.tensor([-0.1, 0.8])]
     expected_partition = partition
@@ -59,10 +59,19 @@ def test_sequence_marginals_match_ordered_scalar_updates():
         expected_marginals.append(mean_target_marginal(expected_partition, chunk))
         expected_partition = update_partition(expected_partition, chunk)
 
+    exp = torch.exp
+    exp_calls = []
+
+    def counted_exp(tensor, *args, **kwargs):
+        exp_calls.append(tensor.shape)
+        return exp(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "exp", counted_exp)
     actual_partition, actual_marginals = sequence_target_marginals(partition, chunks)
 
-    assert actual_partition == pytest.approx(expected_partition)
-    assert actual_marginals == pytest.approx(expected_marginals)
+    assert torch.equal(actual_partition, expected_partition)
+    assert actual_marginals == expected_marginals
+    assert exp_calls == [(2, 2)]
 
 
 def test_grouped_attention_matches_explicit_kv_head_repetition():
