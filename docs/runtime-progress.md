@@ -638,6 +638,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     并将数值栈约束到已验证的 NumPy `>=1.26,<2`。
     Workflow 同时升级到 Node 24 的 checkout/setup-python v7，并只在 main push 或 PR 运行，
     避免 feature 分支同一提交产生 push/PR 两个重复任务；concurrency 会取消同 ref 的旧任务。
+85. Demand worker 从 queue 的唯一资源映射弹出 batch，因此其 key 已由结构保证唯一；该不变量
+    现在显式传给 residency victim planner，使 planner 按 kind 直接累计 eligible 数量，不再为
+    每批构造一组相同 key 的 set。公共 `begin_demand_transfers` 默认仍去重，重复 key 的顺序返回
+    语义保持 `[True, False]`。32-key 两组交替填满 32-slot expert cache、3,000 batches、9 轮的
+    同进程旧/新完整 admission+publish+release 中位数为 118.783→113.412 us/batch，约减少 4.5%；
+    这是 CPU orchestration 隔离值，不代表 GPU H2D 或 decode throughput。
 
 ## Next actions
 

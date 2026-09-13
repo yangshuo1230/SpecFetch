@@ -455,22 +455,32 @@ class ResidencyManager:
                 self._condition.notify_all()
             return accepted
 
-    def _prepare_demand_evictions_locked(self, keys: list[ResourceKey]) -> bool | None:
+    def _prepare_demand_evictions_locked(
+        self,
+        keys: list[ResourceKey],
+        *,
+        keys_are_unique: bool = False,
+    ) -> bool | None:
         """Apply a complete victim plan, or return None to request scalar fallback."""
-        eligible_by_kind: dict[ResourceKind, set[ResourceKey]] = {}
+        eligible_counts: dict[ResourceKind, int] = {}
+        seen: set[ResourceKey] | None = None if keys_are_unique else set()
         try:
             for key in keys:
+                if seen is not None:
+                    if key in seen:
+                        continue
+                    seen.add(key)
                 if self._records[key].state not in (
                     ResourceState.GPU_RESIDENT,
                     ResourceState.IN_FLIGHT,
                 ):
-                    eligible_by_kind.setdefault(key.kind, set()).add(key)
+                    eligible_counts[key.kind] = eligible_counts.get(key.kind, 0) + 1
         except KeyError:
             return None
         victim_plan = []
-        for kind, eligible in eligible_by_kind.items():
+        for kind, eligible_count in eligible_counts.items():
             used = len(self._resident[kind]) + len(self._reserved[kind])
-            required = max(0, used + len(eligible) - self.capacities[kind])
+            required = max(0, used + eligible_count - self.capacities[kind])
             victims = self._eviction_candidates(kind, set(), required)
             if len(victims) != required:
                 return None
@@ -479,7 +489,12 @@ class ResidencyManager:
             self._evict_victim(kind, victim)
         return bool(victim_plan)
 
-    def begin_demand_transfers(self, keys: list[ResourceKey]) -> list[bool]:
+    def begin_demand_transfers(
+        self,
+        keys: list[ResourceKey],
+        *,
+        keys_are_unique: bool = False,
+    ) -> list[bool]:
         """Admit one unconditional demand batch without generic admission tuples."""
         if not keys:
             return []
@@ -487,7 +502,10 @@ class ResidencyManager:
         results = []
         with self._condition:
             try:
-                planned_change = self._prepare_demand_evictions_locked(keys)
+                planned_change = self._prepare_demand_evictions_locked(
+                    keys,
+                    keys_are_unique=keys_are_unique,
+                )
                 if planned_change is not None:
                     changed = planned_change
                     for key in keys:

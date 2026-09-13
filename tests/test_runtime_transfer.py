@@ -648,9 +648,10 @@ def test_transfer_worker_uses_key_only_demand_admission(monkeypatch):
     demand_batches = []
     begin_demand_transfers = residency.begin_demand_transfers
 
-    def capture_demands(keys):
+    def capture_demands(keys, *, keys_are_unique=False):
         demand_batches.append(list(keys))
-        return begin_demand_transfers(keys)
+        assert keys_are_unique
+        return begin_demand_transfers(keys, keys_are_unique=keys_are_unique)
 
     monkeypatch.setattr(residency, "begin_demand_transfers", capture_demands)
     monkeypatch.setattr(
@@ -777,6 +778,16 @@ def test_begin_transfers_preserves_ordered_speculative_and_demand_semantics():
     assert residency.begin_demand_transfers([speculative]) == [True]
     assert residency.record(speculative).consumer_leases is reused_leases
     assert reused_leases == {}
+
+
+def test_begin_demand_transfers_deduplicates_capacity_planning_by_default():
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    key = resource(0)
+    residency.register_cpu(key, "cpu:0", 1)
+    assert residency.mark_queued(key)
+
+    assert residency.begin_demand_transfers([key, key]) == [True, False]
+    assert residency.state(key) == ResourceState.IN_FLIGHT
 
 
 def test_batched_demand_plans_same_layer_balanced_victims_as_repeated_selection():

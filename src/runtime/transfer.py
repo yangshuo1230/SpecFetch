@@ -549,7 +549,10 @@ class TransferWorker:
             demand_batch = requests[0].demand
             if demand_batch:
                 keys = [request.key for request in requests]
-                admitted_requests = self.residency.begin_demand_transfers(keys)
+                admitted_requests = self.residency.begin_demand_transfers(
+                    keys,
+                    keys_are_unique=True,
+                )
             else:
                 admissions = []
                 keys = []
