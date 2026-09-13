@@ -696,6 +696,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     构造状态仍可惰性初始化；shape/device/dtype 均被校验。CPU 隔离的 batch 1/4/16/64 每步
     tensor 重建为 5.716/6.274/8.325/16.449 us，原位更新稳定约 1.66 us；GPU memcpy/kernel
     净收益仍须空闲卡验证。测试锁定 decode storage 复用、不同长度 admission 与逐行 removal。
+94. Continuous runner 的 greedy selection 从逐 request `argmax().cpu()` 改为每 cycle 一次 batched
+    argmax 与一次整批 D2H；D2H 仍发生在阶段时间戳之前，保持 TTFT/completion 的真实同步口径，
+    同时 device token views 直接复用于下一轮 Target input 和 Draft `advance`，不再 CPU→GPU 往返。
+    CPU 4096-vocab、64 cycles 的 batch-4/16 选择结算由 3307/13234 降至 2539/8918 us，约减少
+    23.2%/32.6%。同步后的 vector 直接 `.tolist()`，相对逐项 `int(tensor)` 在 batch 1/4/16/64
+    为 1.612/5.649/23.425/85.695→0.289/0.303/0.539/1.218 us；CUDA 同步收益尚待实测。
 
 ## Next actions
 

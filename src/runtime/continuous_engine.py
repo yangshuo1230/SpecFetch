@@ -254,15 +254,15 @@ class ContinuousBatchRunner:
                     [request.prompt_token_ids for request in group], dtype=torch.long
                 )
                 output = self.engine.prefill(input_ids, group_ids)
-                tokens = output.logits[:, -1].argmax(dim=-1).detach().cpu()
+                tokens = output.logits[:, -1].argmax(dim=-1).detach()
+                token_values = tokens.cpu().tolist()
                 first_token_at = time.perf_counter() - run_start
                 self.engine.add_state(state, output.state)
                 finished_ids = []
                 continuing = []
                 for index, request in enumerate(group):
                     request_id = request.request_id
-                    token = tokens[index]
-                    generated[request_id].append(int(token))
+                    generated[request_id].append(token_values[index])
                     request_timings[request_id]["time_to_first_token_seconds"] = first_token_at
                     request_timings[request_id]["prefill_seconds"] = first_token_at - admitted_at
                     first_token_finished = scheduler.record_decode([request_id])
@@ -318,12 +318,14 @@ class ContinuousBatchRunner:
                 reuse_prediction_window=True,
             )
             decode_cycles += 1
+            next_token_ids = output.logits[:, -1].argmax(dim=-1).detach()
+            next_token_values = next_token_ids.cpu().tolist()
             for index, request_id in enumerate(active_ids):
                 execution = executions[request_id]
                 execution.pending_actual.append(execution.token_id)
                 execution.horizons.pop(0)
-                execution.token_id = output.logits[index, -1].argmax().detach().cpu()
-                execution.generated_token_ids.append(int(execution.token_id))
+                execution.token_id = next_token_ids[index]
+                execution.generated_token_ids.append(next_token_values[index])
 
             finished = scheduler.record_decode(active_ids)
             if finished:
