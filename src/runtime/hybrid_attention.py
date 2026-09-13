@@ -136,8 +136,8 @@ def attention_output_from_logits(
             or chunk_values.shape[1:] != (kv_heads, dimension)
         ):
             raise ValueError("incompatible per-chunk logits and value shapes")
-    combined_logits = torch.cat(logits, dim=-1)
-    combined_values = torch.cat(values)
+    combined_logits = logits[0] if len(logits) == 1 else torch.cat(logits, dim=-1)
+    combined_values = values[0] if len(values) == 1 else torch.cat(values)
     groups = heads // kv_heads
     weights = torch.softmax(
         combined_logits.reshape(kv_heads, groups, len(combined_values)),

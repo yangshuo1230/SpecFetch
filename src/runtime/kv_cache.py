@@ -340,8 +340,14 @@ class RequestLayerKV:
         combined_key = known_keys[0] if len(known_keys) == 1 else torch.cat(known_keys)
         combined_logits = gqa_logits(query, combined_key)
         known_logits = list(combined_logits.split(known_widths, dim=-1))
-        evaluated_logits = list(known_logits)
-        evaluated_values = [value for _, value in known_values]
+        known_value_tensors = [value for _, value in known_values]
+        combined_value = (
+            known_value_tensors[0]
+            if len(known_value_tensors) == 1
+            else torch.cat(known_value_tensors)
+        )
+        evaluated_logits = [combined_logits]
+        evaluated_values = [combined_value]
         always_logits = known_logits[: len(always)]
         guaranteed_logits = known_logits[len(always) :]
         partition = empty_partition(len(query), query.device)

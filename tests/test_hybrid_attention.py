@@ -107,3 +107,20 @@ def test_attention_reuses_per_chunk_logits_without_changing_output():
             logits,
             [chunks[0][1], chunks[1][1], chunks[2][1][:-1]],
         )
+
+
+def test_attention_does_not_recopy_single_contiguous_logits(monkeypatch):
+    query = torch.ones(4, 2)
+    key = torch.ones(3, 2, 2)
+    value = torch.ones(3, 2, 2)
+    logits = gqa_logits(query, key)
+
+    monkeypatch.setattr(
+        torch,
+        "cat",
+        lambda tensors, *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"single tensor was recopied: {tensors}, {args}, {kwargs}")
+        ),
+    )
+
+    assert attention_output_from_logits([logits], [value]).shape == query.shape

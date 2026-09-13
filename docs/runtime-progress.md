@@ -684,6 +684,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     18.776/21.946/28.314/41.598/70.976 us，约减少 27–55%，输出逐元素一致。同机并行、7 轮
     ×40 steps 的 tiny batch-4 A/B 相对 `a99aa51` 为 9.947→9.743 ms/step，约减少 2.0%。
     这些仍不是 release GPU workload 的吞吐证据。
+92. Batched known-QK 的连续 `combined_logits` 只为 marginal 计算切成 views，最终 attention
+    现在直接保留原 tensor；known values 也预先合并成同一对齐块。若没有自适应 tail，输出 helper
+    的 singleton fast path 不再把这些 views `cat` 回一份相同 logits；有 tail 时仍只拼接一次。
+    `(2,8)`、`(2,8,64,64)`、`(2,8,64,64,64,64)` token layouts 的输出阶段由
+    20.735/29.434/42.481 降至 13.986/15.777/20.727 us，约减少 32.5%/46.4%/51.2%；
+    同机并行 tiny batch-4 相对 `b01fe5f` 为 9.207→9.177 ms/step（约 0.3%）。
 
 ## Next actions
 
