@@ -318,14 +318,6 @@ class RequestLayerKV:
             )[0, :, 0]
             return SparseAttentionResult(output, [], 1.0, [])
         always = [part for part in (self.sink, self.recent) if len(part[0])]
-        partition = empty_partition(len(query), query.device)
-        evaluated_logits = []
-        evaluated_values = []
-        for key, value in always:
-            logits = gqa_logits(query, key)
-            evaluated_logits.append(logits)
-            evaluated_values.append(value)
-            partition = update_partition(partition, torch.logsumexp(logits, dim=-1))
         controller = HybridStopController(
             self.config.predicted_mass_threshold,
             self.config.marginal_mass_threshold,
@@ -342,20 +334,29 @@ class RequestLayerKV:
                 keys_are_unique=True,
             )
         guaranteed_values = [guaranteed_payloads[self.old[chunk]] for chunk in guaranteed]
-        guaranteed_logits = [gqa_logits(query, key) for key, _ in guaranteed_values]
+        known_values = always + guaranteed_values
+        known_widths = [len(key) for key, _ in known_values]
+        known_keys = [key for key, _ in known_values]
+        combined_key = known_keys[0] if len(known_keys) == 1 else torch.cat(known_keys)
+        combined_logits = gqa_logits(query, combined_key)
+        known_logits = list(combined_logits.split(known_widths, dim=-1))
+        evaluated_logits = list(known_logits)
+        evaluated_values = [value for _, value in known_values]
+        always_logits = known_logits[: len(always)]
+        guaranteed_logits = known_logits[len(always) :]
+        partition = empty_partition(len(query), query.device)
+        for logits in always_logits:
+            partition = update_partition(partition, torch.logsumexp(logits, dim=-1))
         guaranteed_lses = [torch.logsumexp(logits, dim=-1) for logits in guaranteed_logits]
         partition, guaranteed_marginals = sequence_target_marginals(partition, guaranteed_lses)
         stopped = False
-        for chunk, payload, logits, marginal in zip(
+        for chunk, logits, marginal in zip(
             guaranteed,
-            guaranteed_values,
             guaranteed_logits,
             guaranteed_marginals,
         ):
             selected.append(chunk)
             marginals.append(marginal)
-            evaluated_logits.append(logits)
-            evaluated_values.append(payload[1])
             stopped = controller.observe(draft_mass[chunk], marginal)
         for chunk in ordered_chunks[len(guaranteed) :]:
             if stopped:

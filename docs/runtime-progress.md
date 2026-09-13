@@ -670,6 +670,13 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     每 chunk 64 tokens 的 2/4/8 chunks 旧/新中位数为 177.462→139.752、323.413→262.886、
     656.269→532.884 us，约减少 21.3%/18.7%/18.8%。相同 tiny batch-4 的 20-step profile
     由 10.460 降至 8.306 s，QK einsum 次数由 2,720 降至 2,400；这些仍是 CPU 证据。
+90. 已知必选的 sink、recent 与 guaranteed old KV chunks 进一步先拼接 key、执行一次 grouped
+    QK，再按原 chunk width 切分 logits 供顺序 marginal stopping；自适应追加 chunk 仍逐个执行，
+    因此停止次序和选集不变。单个已知 chunk 不做无意义拼接。真实形态 `(2,8)` tokens 以及再加
+    1/2/3 个 64-token chunks，batched QK 分别约快 10.7%、21.3%、25.7%、29.3%；两个等长
+    64-token chunks 的低并发反例慢约 2.5%，故另以 `69c2609` 临时 worktree 做同机并行完整
+    tiny batch-4 A/B。7 轮×40 decode 的中位为 11.942→10.008 ms/token-step，约减少 16.2%，
+    同路径 20-step profile 的 QK einsum 调用由 2,080 降至 320。GPU 净收益仍须实测。
 
 ## Next actions
 
