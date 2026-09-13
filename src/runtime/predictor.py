@@ -314,15 +314,11 @@ class DraftSignalProvider:
             cpu_features = self.feature_buffer.copy(
                 torch.stack(
                     [
-                        torch.stack(
-                            [
-                                output.hidden_states[layer + 1][:, -1]
-                                for layer in unique_feature_layers
-                            ]
-                        )
+                        output.hidden_states[layer + 1][:, -1]
                         for output in outputs
+                        for layer in unique_feature_layers
                     ]
-                )
+                ).unflatten(0, (len(outputs), len(unique_feature_layers)))
             )
             target_features = torch.stack(
                 [
@@ -337,4 +333,4 @@ class DraftSignalProvider:
             for target_layer, layer_scores in enumerate(scores):
                 for horizon, values in zip(horizons, layer_scores):
                     horizon.expert_scores[target_layer] = values
-        return DraftPredictionPlan(horizons, torch.stack(proposed, dim=1).detach().cpu())
+        return DraftPredictionPlan(horizons, torch.stack(proposed, dim=1).detach())

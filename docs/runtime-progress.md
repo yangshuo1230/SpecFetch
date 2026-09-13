@@ -708,6 +708,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     4.648/6.306/9.434/15.337 us，约减少 18.5–48.0%；batch-16 为 31.553/37.361/47.328/
     71.385→9.816/16.008/28.489/53.416 us。GPU 路径同时从 batch+1 个 packing kernels 降到一个；
     测试锁定单次 stack、request-major 次序、shape 和不等宽拒绝。
+96. Draft rollout 的 expert-probe features 从每 horizon 一次 inner stack 再 outer stack，改为
+    horizon-major/layer-major 一次 flat stack 后 `unflatten` view；2×8×4×64、4×16×4×128、
+    4×48×4×256（horizons×layers×batch×hidden）的 CPU 中位由 7.553/21.993/95.644 降至
+    5.848/14.975/52.500 us，约减少 22.6%/31.9%/45.1%，CUDA packing launches 同样归一。
+    `DraftPredictionPlan.token_ids` 也保留在 Draft device；continuous runtime 不消费该诊断字段，
+    因而不再为它单独 D2H，同步只由真正需要的 attention/probe 信号触发。
 
 ## Next actions
 

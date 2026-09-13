@@ -117,7 +117,7 @@ def test_draft_rollout_restores_prefix_cache():
     state = BatchState(["r0"], [3], {})
     plan = provider.predict(state)
     assert plan.token_ids.shape == (1, 2)
-    assert plan.token_ids.device.type == "cpu"
+    assert plan.token_ids.device == provider.device
     assert len(plan.horizons) == 2
     assert provider.cache.get_seq_length() == 3
     provider.advance(torch.tensor([4]))
