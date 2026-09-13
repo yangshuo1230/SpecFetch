@@ -616,6 +616,38 @@ def optional_vllm_fused_add_rms_norm(
     return fused_add_rms_norm
 
 
+class _VllmRotaryEmbeddingAdapter:
+    """Present batched Qwen tensors to vLLM's flat-token rotary kernel."""
+
+    def __init__(self, rotary) -> None:
+        self.rotary = rotary
+
+    def __call__(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        tokens = positions.numel()
+        query_shape = query.shape
+        key_shape = key.shape if key is not None else None
+        flat_query = query.reshape(tokens, -1)
+        flat_key = key.reshape(tokens, -1) if key is not None else None
+        flat_query, flat_key = self.rotary(positions.reshape(-1), flat_query, flat_key)
+        return (
+            flat_query.reshape(query_shape),
+            flat_key.reshape(key_shape) if flat_key is not None else None,
+        )
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.rotary.forward_native(positions, query, key)
+
+
 def optional_vllm_rotary_embedding(mode: str, backend, model):
     """Resolve Qwen-compatible vLLM fused rotary embedding."""
     if mode not in {"auto", "torch", "vllm"}:
@@ -630,23 +662,37 @@ def optional_vllm_rotary_embedding(mode: str, backend, model):
         if mode == "vllm":
             raise RuntimeError("vLLM fused MoE requires a packed expert backend")
         return None
+    config = model.config
     try:
+        from types import SimpleNamespace
+
+        from vllm.config import CompilationConfig, set_current_vllm_config
         from vllm.model_executor.layers.rotary_embedding import get_rope
+
+        # Standalone custom ops have no engine-owned VllmConfig.  Letting vLLM
+        # construct its default config imports the complete serving stack (and
+        # its independent Transformers requirements) just to choose a CUDA
+        # dispatch method.  An explicit eager custom-op context supplies the
+        # only field RotaryEmbedding consults and keeps this adapter isolated.
+        standalone_config = SimpleNamespace(
+            compilation_config=CompilationConfig(custom_ops=["all"]),
+        )
+        with set_current_vllm_config(standalone_config):
+            rotary = get_rope(
+                config.head_dim,
+                rotary_dim=config.head_dim,
+                max_position=config.max_position_embeddings,
+                base=config.rope_theta,
+                is_neox_style=True,
+                rope_scaling=config.rope_scaling,
+                dtype=model.model.embed_tokens.weight.dtype,
+            )
     except Exception:
         if mode == "vllm":
             raise
         return None
-    config = model.config
-    rotary = get_rope(
-        config.head_dim,
-        rotary_dim=config.head_dim,
-        max_position=config.max_position_embeddings,
-        base=config.rope_theta,
-        is_neox_style=True,
-        rope_scaling=config.rope_scaling,
-        dtype=model.model.embed_tokens.weight.dtype,
-    )
-    return rotary.to(model.model.embed_tokens.weight.device)
+    rotary = rotary.to(model.model.embed_tokens.weight.device)
+    return _VllmRotaryEmbeddingAdapter(rotary)
 
 
 def optional_flash_kv_attention(mode: str, backend):

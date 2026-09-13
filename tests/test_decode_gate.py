@@ -31,7 +31,7 @@ def result_pair(runtime_throughput=6.0, vllm_throughput=4.0, context=512):
         },
     }
     vllm = {
-        "timing_protocol": "batch_decode_after_all_first_tokens_v1",
+        "timing_protocol": "batch_decode_from_cached_first_token_prefix_v2",
         "configuration": {
             "model": "/models/qwen",
             "batch_size": 4,
@@ -40,7 +40,12 @@ def result_pair(runtime_throughput=6.0, vllm_throughput=4.0, context=512):
             "cpu_offload_gb": 54.0,
             "gpu_memory_limit_gib": 10.0,
         },
-        "engine_options": {"dtype": "bfloat16", "gpu_memory_utilization": 0.1},
+        "engine_options": {
+            "dtype": "bfloat16",
+            "gpu_memory_utilization": 0.1,
+            "enable_prefix_caching": True,
+            "enable_chunked_prefill": False,
+        },
         "performance": {
             **shared_performance,
             "decode_throughput_tokens_per_second": vllm_throughput,
@@ -101,6 +106,16 @@ def test_decode_gate_requires_matched_satisfied_gpu_memory_limits():
     runtime, vllm = result_pair()
     vllm["engine_options"]["gpu_memory_utilization"] = 0.2
     with pytest.raises(ValueError, match="engine was not configured"):
+        evaluate_decode_pair(runtime, vllm, context_tokens=512)
+
+    runtime, vllm = result_pair()
+    vllm["engine_options"]["enable_prefix_caching"] = False
+    with pytest.raises(ValueError, match="prefix caching"):
+        evaluate_decode_pair(runtime, vllm, context_tokens=512)
+
+    runtime, vllm = result_pair()
+    vllm["engine_options"]["enable_chunked_prefill"] = True
+    with pytest.raises(ValueError, match="chunked prefill"):
         evaluate_decode_pair(runtime, vllm, context_tokens=512)
 
     runtime, vllm = result_pair()

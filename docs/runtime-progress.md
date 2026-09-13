@@ -163,6 +163,28 @@ residency/cache 起点，避免把资源预取伪装成免费 prefill。
 
 ## Current measured state
 
+### First gate-valid c512 checkpoint
+
+Workload: batch 4, context 512, one untimed first token plus 64 timed decode tokens per request,
+BF16, and the same absolute 10 GiB GPU-memory cap. SpecFetch uses resident KV, 673 packed expert
+slots selected by the cap maximizer, vLLM fused MoE, and demand-only expert loading. The production
+baseline uses vLLM 0.11.1 eager execution with 54 GiB CPU weight offload. Its two-phase protocol
+first builds the prefix through one generated token, then times 64 tokens from matching cached
+513-token prefixes; worker RPC reports the actual model-process allocator peak.
+
+| System | Decode wall | Decode throughput | Peak reserved | Relative |
+| --- | ---: | ---: | ---: | ---: |
+| SpecFetch resident/demand | 26.411 s | 9.693 tok/s | 9.863 GiB | **1.433x** |
+| vLLM CPU weight offload | 37.841 s | 6.765 tok/s | 9.395 GiB | 1.000x |
+
+The pair is accepted by the measurement/configuration checks but fails the 1.50x performance gate.
+At the measured vLLM rate, SpecFetch must reach at least 10.148 tok/s or at most 25.228 seconds, a
+remaining 1.183-second gap. SpecFetch's decode performs 54,010 expert transfers (509.7 GB), spends
+21.335 seconds in cumulative demand wait and 18.589 seconds in transfer work, so the next GPU work
+targets expert H2D overlap/cache effectiveness rather than resident KV attention. Raw results are
+`runtime-release-resident-demand-b4-c512-cap10.json` and
+`vllm-release-offload-b4-c512-cap10.json`.
+
 ### Post-optimization batch 1 smoke
 
 Workload: batch 1, context 16, output 9, sink 4, recent 4, KV chunk 4.
@@ -733,13 +755,21 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     192→182 ms，`torch.exp` 调用 880→173；无 profiler 总时长仍在约 115 ms 噪声带内。
     曾测试一次 `logcumsumexp` 生成全部前缀，虽更快但 float32 partition 最大差约 3.8e-6，
     可能在停止阈值边界改变选块，故未采用。
+99. GPU 恢复空闲后，opt-in CUDA 首轮 8/9 通过；失败并非 kernel 数值，而是 standalone
+    vLLM rotary 构造默认 `VllmConfig` 时导入与 runtime pin 不兼容的完整 multimodal 控制面。
+    adapter 现以显式 eager custom-op config 隔离构造，并把 Qwen 的 4-D
+    `(batch,sequence,heads,dim)` view 成 vLLM kernel 要求的 flat-token layout。新增 seq=512
+    prefill 回归后 CUDA 10/10 通过，真实 c512 prefill/decode 也完成。vLLM baseline 同时升级为
+    cached-first-token 两阶段协议，并从真实 worker CUDA allocator 通过本地 RPC 读取 peak；gate
+    会拒绝未开启 prefix caching、未关闭 chunked prefill 或缺失正峰值的结果。首个合规 c512
+    pair 为 SpecFetch 9.693 tok/s 对 vLLM 6.765 tok/s，即 1.433x，尚未通过 1.50x。
 
 ## Next actions
 
-1. GPU 空闲后先运行 opt-in CUDA 测试，再用 c512 demand/speculative H1 验证 grouped
-   GQA、跨请求 KV demand 和 layer lookahead 2，并建立相同显存约束的 vLLM decode-only
-   baseline。
-2. c512 通过后重跑 batch-4/context-4K 的长输出 demand/speculative，并在同一 10 GiB cap
+1. 对 c512 resident/demand 做 GPU profile，并以当前 54,010 次 expert transfer、21.335 s
+   demand wait 为主线验证预测 H1、cache slots 或同层 H2D/compute overlap；需要把 26.411 s
+   降到至多 25.228 s 才能通过当前 matched baseline，不能用非合规旧基线替代。
+2. c512 达到 >=1.50x 后重跑 batch-4/context-4K 的长输出 demand/speculative，并在同一 10 GiB cap
    下测量 resident KV 候选，核对 token 因果一致、
    TPOT、最大单批候选、dropped speculative、H2D overlap 与 demand wait。
 3. 用 CUDA profiler 分解 Target kernel、Draft、Python 调度、queue/residency、同步和 H2D；

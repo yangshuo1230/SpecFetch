@@ -155,7 +155,8 @@ def test_vllm_fused_add_rms_norm_matches_reference():
     assert torch.allclose(actual_residual, combined, atol=2e-2, rtol=2e-2)
 
 
-def test_vllm_rotary_embedding_matches_native_qwen_layout():
+@pytest.mark.parametrize("sequence_length", [1, 512])
+def test_vllm_rotary_embedding_matches_native_qwen_layout(sequence_length):
     from types import SimpleNamespace
 
     backend = CudaTransferBackend("cuda:0", expert_slots=1)
@@ -170,9 +171,30 @@ def test_vllm_rotary_embedding_matches_native_qwen_layout():
         model=SimpleNamespace(embed_tokens=embedding),
     )
     rotary = optional_vllm_rotary_embedding("vllm", backend, model)
-    positions = torch.tensor([[511], [1023], [4095], [4096]], device="cuda:0")
-    query = torch.randn(4, 1, 4, 128, dtype=torch.bfloat16, device="cuda:0")
-    key = torch.randn(4, 1, 2, 128, dtype=torch.bfloat16, device="cuda:0")
+    if sequence_length == 1:
+        positions = torch.tensor([[511], [1023], [4095], [4096]], device="cuda:0")
+    else:
+        positions = torch.arange(
+            3584,
+            3584 + 4 * sequence_length,
+            device="cuda:0",
+        ).reshape(4, sequence_length)
+    query = torch.randn(
+        4,
+        sequence_length,
+        4,
+        128,
+        dtype=torch.bfloat16,
+        device="cuda:0",
+    )
+    key = torch.randn(
+        4,
+        sequence_length,
+        2,
+        128,
+        dtype=torch.bfloat16,
+        device="cuda:0",
+    )
     expected_query, expected_key = rotary.forward_native(positions, query.clone(), key.clone())
 
     actual_query, actual_key = rotary(positions, query, key)

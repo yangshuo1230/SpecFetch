@@ -99,11 +99,22 @@ batch-1 diagnostics and preferred 128-token confirmation runs cannot substitute 
 Kernel/JIT warmup may run outside the timer only if the declared residency/cache state is restored
 before measurement.
 
+The vLLM decode-only runner explicitly enables prefix caching and disables chunked prefill. It first
+completes one generated token per request, then submits each original prompt plus that token as a
+cache-hit prefix and times exactly 64 further tokens. This makes the requested boundary observable;
+vLLM's asynchronous output delivery can otherwise decode an early request multiple times before
+the last request's first token is reported. The gate rejects results that do not record both engine
+constraints.
+
 Release results must set the same positive `--gpu-memory-limit-gib`. The vLLM runner derives its
 `gpu_memory_utilization` from that absolute limit and the physical device capacity; both runners
 record post-initialization peak allocated and reserved memory. The release checker rejects missing,
 different, or exceeded limits. The scope includes the complete measured request (prefix-cache build
 and decode) while excluding transient model-loading allocations, consistently on both sides.
+Because vLLM V1 executes the model in worker processes by default, its runner resets and reads the
+CUDA allocator counters through worker RPC and records the maximum rank peak; main-process counters
+would otherwise incorrectly report zero. The offline runner enables vLLM's pickle fallback only for
+these two trusted, module-local RPC callables; it does not accept remote or user-provided RPC payloads.
 
 For quality analysis, one non-performance run can compare every sparse attention output with a
 CPU full-attention shadow and evaluate several stopping thresholds on the same Target queries:

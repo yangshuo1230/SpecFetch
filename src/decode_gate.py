@@ -87,7 +87,7 @@ def evaluate_decode_pair(
 
     if runtime_result.get("timing_protocol") != "batch_decode_after_all_prefix_caches_v1":
         raise ValueError("SpecFetch result does not use the decode-only timing protocol")
-    if vllm_result.get("timing_protocol") != "batch_decode_after_all_first_tokens_v1":
+    if vllm_result.get("timing_protocol") != "batch_decode_from_cached_first_token_prefix_v2":
         raise ValueError("vLLM result does not use the decode-only timing protocol")
     if not runtime_performance.get("latency_valid", False):
         raise ValueError("SpecFetch latency is invalidated by shadow evaluation")
@@ -95,6 +95,10 @@ def evaluate_decode_pair(
         raise ValueError("vLLM release baseline must enable CPU weight offload")
     if vllm_result.get("engine_options", {}).get("dtype") != "bfloat16":
         raise ValueError("vLLM release baseline must use bfloat16")
+    if vllm_result.get("engine_options", {}).get("enable_prefix_caching") is not True:
+        raise ValueError("vLLM cached-prefix timing requires prefix caching")
+    if vllm_result.get("engine_options", {}).get("enable_chunked_prefill") is not False:
+        raise ValueError("vLLM cached-prefix timing requires chunked prefill to be disabled")
     if _model_identity(runtime_config["target"]) != _model_identity(vllm_config["model"]):
         raise ValueError("SpecFetch and vLLM model paths differ")
 

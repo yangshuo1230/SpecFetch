@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -48,50 +49,70 @@ def parse_args() -> argparse.Namespace:
 @dataclass
 class DecodeOnlyRun:
     outputs: list[Any]
+    first_token_ids: list[int]
     prefill_seconds: float
     decode_wall_seconds: float
+
+
+def _reset_worker_peak_memory(_worker: Any) -> None:
+    import torch
+
+    torch.cuda.reset_peak_memory_stats(torch.cuda.current_device())
+
+
+def _read_worker_peak_memory(_worker: Any) -> tuple[int, int]:
+    import torch
+
+    device = torch.cuda.current_device()
+    torch.cuda.synchronize(device)
+    return torch.cuda.max_memory_allocated(device), torch.cuda.max_memory_reserved(device)
+
+
+def maximum_worker_memory_gib(stats: list[tuple[int, int]]) -> tuple[float, float]:
+    if not stats:
+        raise RuntimeError("vLLM returned no worker memory measurements")
+    return max(item[0] for item in stats) / 2**30, max(item[1] for item in stats) / 2**30
+
+
+def _drain_requests(llm: Any, request_ids: list[str]) -> list[Any]:
+    latest: dict[str, Any] = {}
+    while llm.llm_engine.has_unfinished_requests():
+        for output in llm.llm_engine.step():
+            latest[output.request_id] = output
+    outputs = [latest[request_id] for request_id in request_ids]
+    if not all(output.finished for output in outputs):
+        raise RuntimeError("vLLM stopped with unfinished request outputs")
+    return outputs
 
 
 def run_decode_only(
     llm: Any,
     prompts: list[dict[str, list[int]]],
-    sampling: Any,
+    first_token_sampling: Any,
+    decode_sampling: Any,
     clock: Callable[[], float] = time.perf_counter,
 ) -> DecodeOnlyRun:
-    """Run the offline engine and time only work after every first token.
-
-    vLLM's public offline ``generate`` API returns only after the whole batch.
-    Stepping its engine is necessary to observe the shared first-token boundary.
-    This adapter intentionally fails if one engine step emits multiple initial
-    tokens because that would make the requested timing boundary unobservable.
-    """
-    request_ids = [llm._add_request(prompt, sampling) for prompt in prompts]
-    latest: dict[str, Any] = {}
+    """Build cached first-token prefixes, then time exactly 64 decode tokens."""
+    first_request_ids = [llm._add_request(prompt, first_token_sampling) for prompt in prompts]
     started_at = clock()
-    decode_started_at: float | None = None
-
-    while llm.llm_engine.has_unfinished_requests():
-        for output in llm.llm_engine.step():
-            latest[output.request_id] = output
-        if decode_started_at is None and all(request_id in latest for request_id in request_ids):
-            initial_lengths = [
-                len(latest[request_id].outputs[0].token_ids) for request_id in request_ids
-            ]
-            if all(length >= 1 for length in initial_lengths):
-                if any(length != 1 for length in initial_lengths):
-                    raise RuntimeError(
-                        "vLLM emitted multiple tokens before the first-token timing boundary"
-                    )
-                decode_started_at = clock()
-
+    first_outputs = _drain_requests(llm, first_request_ids)
+    first_token_rows = [list(output.outputs[0].token_ids) for output in first_outputs]
+    if any(len(row) != 1 for row in first_token_rows):
+        raise RuntimeError(
+            f"vLLM first-token preparation returned lengths {list(map(len, first_token_rows))}"
+        )
+    first_token_ids = [row[0] for row in first_token_rows]
+    decode_prompts = [
+        {"prompt_token_ids": prompt["prompt_token_ids"] + [token_id]}
+        for prompt, token_id in zip(prompts, first_token_ids)
+    ]
+    decode_request_ids = [llm._add_request(prompt, decode_sampling) for prompt in decode_prompts]
+    decode_started_at = clock()
+    outputs = _drain_requests(llm, decode_request_ids)
     finished_at = clock()
-    if decode_started_at is None:
-        raise RuntimeError("vLLM completed without exposing a first token for every request")
-    outputs = [latest[request_id] for request_id in request_ids]
-    if not all(output.finished for output in outputs):
-        raise RuntimeError("vLLM stopped with unfinished request outputs")
     return DecodeOnlyRun(
         outputs=outputs,
+        first_token_ids=first_token_ids,
         prefill_seconds=decode_started_at - started_at,
         decode_wall_seconds=finished_at - decode_started_at,
     )
@@ -106,6 +127,10 @@ def main() -> None:
     ):
         raise ValueError("gpu-memory-limit-gib must be positive")
     require_idle_gpus(1000, 10, {args.physical_gpu_index})
+    # vLLM's local worker RPC normally uses msgpack, which cannot encode the
+    # two trusted module-level memory-stat callables below. No untrusted or
+    # remote payload is accepted by this offline runner.
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     import torch
     from vllm import LLM, SamplingParams
     from vllm.sampling_params import RequestOutputKind
@@ -146,6 +171,12 @@ def main() -> None:
         "gpu_memory_utilization": gpu_memory_utilization,
         "cpu_offload_gb": args.cpu_offload_gb,
         "enforce_eager": args.enforce_eager,
+        # Fixed-batch decode-only timing needs one observable boundary after
+        # every request's first token. Chunked prefill may decode early rows
+        # while later rows are still being prefetched, making that boundary
+        # unobservable rather than merely changing prefill performance.
+        "enable_chunked_prefill": False,
+        "enable_prefix_caching": True,
         "trust_remote_code": True,
     }
     if args.kv_offloading_size is not None:
@@ -156,23 +187,31 @@ def main() -> None:
     initialization_start = time.perf_counter()
     llm = LLM(**engine_options)
     initialization_seconds = time.perf_counter() - initialization_start
-    torch.cuda.reset_peak_memory_stats(cuda_device)
+    llm.collective_rpc(_reset_worker_peak_memory)
     prompts = [{"prompt_token_ids": row.tolist()} for row in input_ids]
-    sampling = SamplingParams(
+    first_token_sampling = SamplingParams(
         temperature=0,
-        max_tokens=args.max_new_tokens,
+        max_tokens=1,
         ignore_eos=True,
         output_kind=RequestOutputKind.CUMULATIVE,
     )
-    run = run_decode_only(llm, prompts, sampling)
-    torch.cuda.synchronize(cuda_device)
-    peak_gpu_allocated_gib = torch.cuda.max_memory_allocated(cuda_device) / 2**30
-    peak_gpu_reserved_gib = torch.cuda.max_memory_reserved(cuda_device) / 2**30
+    decode_sampling = SamplingParams(
+        temperature=0,
+        max_tokens=args.max_new_tokens - 1,
+        ignore_eos=True,
+        output_kind=RequestOutputKind.CUMULATIVE,
+    )
+    run = run_decode_only(llm, prompts, first_token_sampling, decode_sampling)
+    worker_memory_stats = llm.collective_rpc(_read_worker_peak_memory)
+    peak_gpu_allocated_gib, peak_gpu_reserved_gib = maximum_worker_memory_gib(worker_memory_stats)
     memory_limit_satisfied = (
         args.gpu_memory_limit_gib is None or peak_gpu_reserved_gib <= args.gpu_memory_limit_gib
     )
     outputs = run.outputs
-    generated = [list(item.outputs[0].token_ids) for item in outputs]
+    generated = [
+        [first_token_id, *item.outputs[0].token_ids]
+        for first_token_id, item in zip(run.first_token_ids, outputs)
+    ]
     lengths = [len(tokens) for tokens in generated]
     if any(length != args.max_new_tokens for length in lengths):
         raise RuntimeError(
@@ -182,7 +221,7 @@ def main() -> None:
     decode_tokens = args.batch_size * decode_tokens_per_request
     result = {
         "configuration": {**vars(args), "prompts": str(args.prompts), "output": str(args.output)},
-        "timing_protocol": "batch_decode_after_all_first_tokens_v1",
+        "timing_protocol": "batch_decode_from_cached_first_token_prefix_v2",
         "engine_options": engine_options,
         "performance": {
             "initialization_seconds": initialization_seconds,
@@ -200,6 +239,8 @@ def main() -> None:
             "total_device_gib": total_gpu_gib,
             "peak_allocated_gib": peak_gpu_allocated_gib,
             "peak_reserved_gib": peak_gpu_reserved_gib,
+            "worker_ranks_measured": len(worker_memory_stats),
+            "worker_rpc_serialization": "trusted_local_pickle",
             "limit_satisfied": memory_limit_satisfied,
         },
         "generated_token_ids": generated,
