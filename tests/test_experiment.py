@@ -1,6 +1,8 @@
+import pytest
 import torch
 
 from scripts.run_experiment import evaluate_experts, evaluate_kv
+from src.gpu_guard import GpuState, require_idle_gpus
 from src.trace import ModelTrace, PairedTrace
 
 
@@ -45,3 +47,13 @@ def test_evaluate_experts_runs_probe_only_on_evaluation_trace():
     assert result["status"] == "ok"
     assert result["observations"] == 2
     assert result["summary"]["probe_recall@8"] == 1.0
+
+
+def test_gpu_guard_can_scope_check_to_selected_device(monkeypatch):
+    monkeypatch.setattr(
+        "src.gpu_guard.query_gpu_states",
+        lambda: [GpuState(0, 20_000, 100), GpuState(1, 2, 0)],
+    )
+    assert require_idle_gpus(1000, 10, {1}) == [GpuState(1, 2, 0)]
+    with pytest.raises(RuntimeError, match="GPU 0"):
+        require_idle_gpus(1000, 10, {0})

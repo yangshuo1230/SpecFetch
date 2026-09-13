@@ -21,6 +21,7 @@ from src.batch_policy import (
 )
 from src.gpu_guard import require_idle_gpus
 from src.metrics import fit_ridge_probe, ndcg_at_k, predict_probe, recall_at_k, top_k
+from src.runtime.predictor import ExpertProbeBank, ProbeEntry
 from src.trace import Mass, ModelTrace, attention_block_mass, map_layer, router_probabilities
 
 
@@ -57,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompts", required=True, type=Path)
     parser.add_argument("--output", type=Path, default=Path("results/offload-prefetch.json"))
     parser.add_argument("--events-output", type=Path)
+    parser.add_argument("--probe-output", type=Path)
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--lookahead", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -360,6 +362,18 @@ def probe_examples(
     return torch.stack(features), torch.stack(probabilities)
 
 
+def fit_probe_bank(train: list[PromptTrace], alpha: float) -> ExpertProbeBank:
+    target_layers = len(train[0].target.routers)
+    draft_layers = len(train[0].rollouts[0].trace.hidden_states)
+    entries = {}
+    for target_layer in sorted(train[0].target.routers):
+        draft_layer = map_layer(target_layer, target_layers, draft_layers)
+        features, probabilities = probe_examples(train, target_layer, draft_layer, 1)
+        labels = routed_labels(probabilities, min(8, probabilities.shape[1]))
+        entries[target_layer] = ProbeEntry(draft_layer, fit_ridge_probe(features, labels, alpha))
+    return ExpertProbeBank(entries)
+
+
 def build_transfer_events(
     train: list[PromptTrace], evaluation: list[PromptTrace], args: argparse.Namespace
 ) -> list[dict[str, Any]]:
@@ -634,6 +648,9 @@ def main() -> None:
         args.events_output.write_text(
             json.dumps(events, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+    if args.probe_output:
+        args.probe_output.parent.mkdir(parents=True, exist_ok=True)
+        fit_probe_bank(train, args.ridge_alpha).save(args.probe_output)
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

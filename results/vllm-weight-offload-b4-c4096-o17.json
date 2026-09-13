@@ -1,0 +1,113 @@
+{
+  "configuration": {
+    "batch_size": 4,
+    "context_tokens": 4096,
+    "cpu_offload_gb": 54.0,
+    "enforce_eager": true,
+    "gpu_memory_utilization": 0.1,
+    "kv_offloading_size": null,
+    "max_new_tokens": 17,
+    "model": "/root/models/Qwen3-30B-A3B",
+    "output": "results/vllm-weight-offload-b4-c4096-o17.json",
+    "physical_gpu_index": 2,
+    "prompts": "prompts.json"
+  },
+  "engine_options": {
+    "cpu_offload_gb": 54.0,
+    "dtype": "bfloat16",
+    "enforce_eager": true,
+    "gpu_memory_utilization": 0.1,
+    "model": "/root/models/Qwen3-30B-A3B",
+    "trust_remote_code": true
+  },
+  "generated_text": [
+    "<think>\nOkay, the user is asking me to explain speculative decoding in two sentences.",
+    " save compute?\n</think>\n\nMixture-of-Experts (MoE) models save **",
+    "\n<think>\nOkay, I need to write a Python function to check if a number",
+    " into Chinese.\n</think>\n\n\u5185\u5b58\u5e26\u5bbd\u662f\u6709\u9650\u7684\u3002<|im_end|>\n<|endoftext|>Human:"
+  ],
+  "generated_token_ids": [
+    [
+      151667,
+      198,
+      32313,
+      11,
+      279,
+      1196,
+      374,
+      10161,
+      752,
+      311,
+      10339,
+      65736,
+      47116,
+      304,
+      1378,
+      22870,
+      13
+    ],
+    [
+      3581,
+      12564,
+      5267,
+      151668,
+      271,
+      44,
+      12735,
+      8668,
+      12,
+      86141,
+      320,
+      25612,
+      36,
+      8,
+      4119,
+      3581,
+      3070
+    ],
+    [
+      198,
+      151667,
+      198,
+      32313,
+      11,
+      358,
+      1184,
+      311,
+      3270,
+      264,
+      13027,
+      729,
+      311,
+      1779,
+      421,
+      264,
+      1372
+    ],
+    [
+      1119,
+      8453,
+      624,
+      151668,
+      271,
+      111390,
+      99278,
+      99845,
+      20412,
+      101035,
+      9370,
+      1773,
+      151645,
+      198,
+      151643,
+      33975,
+      25
+    ]
+  ],
+  "performance": {
+    "initialization_seconds": 64.42474966892041,
+    "mean_tpot_ms_including_prefill": 449.4214869713794,
+    "request_seconds": 30.5606611140538,
+    "throughput_tokens_per_second": 2.2250827541400646
+  }
+}

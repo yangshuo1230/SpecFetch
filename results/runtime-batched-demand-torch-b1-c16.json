@@ -1,0 +1,176 @@
+{
+  "configuration": {
+    "batch_size": 1,
+    "context_tokens": 16,
+    "device": "cuda:0",
+    "disable_prefetch": true,
+    "draft": "/root/models/Qwen3-0.6B",
+    "draft_refresh_tokens": 0,
+    "expert_cache_slots": 64,
+    "kv_cache_slots": 64,
+    "kv_chunk_tokens": 4,
+    "lazy_expert_store": false,
+    "lookahead": 4,
+    "marginal_patience": 2,
+    "marginal_threshold": 0.01,
+    "mass_threshold": 0.95,
+    "max_new_tokens": 9,
+    "minimum_old_chunks": 2,
+    "moe_backend": "torch",
+    "no_pin_experts": false,
+    "output": "results/runtime-batched-demand-torch-b1-c16.json",
+    "physical_gpu_index": 1,
+    "policy": "demand_only",
+    "prefetch_horizons": 1,
+    "probes": "results/expert-probes.pt",
+    "prompts": "prompts.json",
+    "recent_tokens": 4,
+    "resolved_moe_backend": "torch",
+    "shadow_attention": false,
+    "shadow_thresholds": "",
+    "sink_tokens": 4,
+    "target": "/root/models/Qwen3-30B-A3B",
+    "transfer_batch_size": 32
+  },
+  "generated_text": [
+    "<think>\nOkay, the user asked me to"
+  ],
+  "generated_token_ids": [
+    [
+      151667,
+      198,
+      32313,
+      11,
+      279,
+      1196,
+      4588,
+      752,
+      311
+    ]
+  ],
+  "performance": {
+    "decode_step_seconds": 5.6931593308690935,
+    "decode_throughput_tokens_per_second": 1.4051951710929464,
+    "draft_decode_seconds": 1.7896623599808663,
+    "draft_prefill_seconds": 1.8577663188334554,
+    "end_to_end_tokens_per_second": 0.7336965756742075,
+    "expert_preload_seconds": 39.375363348051906,
+    "initialization_seconds": 47.054347053170204,
+    "latency_valid": true,
+    "mean_tpot_ms": 711.6449163586367,
+    "p50_tpot_ms": 478.6654548952356,
+    "peak_gpu_gib": 4.635501384735107,
+    "prefill_seconds": 4.715725576970726,
+    "request_seconds": 12.266651226673275,
+    "shadow_attention_seconds": 0.0,
+    "target_decode_seconds": 3.902831928804517
+  },
+  "residency": {
+    "evictions": 6555,
+    "wasted_prefetches": 0
+  },
+  "residency_by_phase": {
+    "decode": {
+      "evictions": 3968,
+      "wasted_prefetches": 0
+    },
+    "draft_prefill": {
+      "evictions": 0,
+      "wasted_prefetches": 0
+    },
+    "prefill": {
+      "evictions": 2587,
+      "wasted_prefetches": 0
+    }
+  },
+  "sparse_kv": {
+    "mean_cosine_similarity": null,
+    "mean_predicted_mass": 1.0,
+    "mean_relative_l2_error": null,
+    "mean_selected_old_chunks_per_layer_request": 2.5,
+    "mean_target_mass_coverage": null,
+    "threshold_sweep": {}
+  },
+  "transfer": {
+    "bytes": 54016868352,
+    "completed": 6683,
+    "demand_hits": 0,
+    "demand_misses": 6683,
+    "demand_requests": 6683,
+    "demand_transfers": 6683,
+    "demand_wait_ms": 3990.9930012654513,
+    "dropped_speculative": 0,
+    "failed": 0,
+    "maximum_transfer_batch": 32,
+    "prefetch_batches": 0,
+    "prefetch_enqueue_ms": 0.0,
+    "prefetch_enqueued": 0,
+    "prefetch_requests": 0,
+    "speculative_transfers": 0,
+    "submitted": 6683,
+    "transfer_batches": 1442,
+    "transfer_ms": 2079.231730196625
+  },
+  "transfer_by_phase": {
+    "decode": {
+      "bytes": 28998893568,
+      "completed": 4032,
+      "demand_hits": 0,
+      "demand_misses": 4032,
+      "demand_requests": 4032,
+      "demand_transfers": 4032,
+      "demand_wait_ms": 2437.8345971927047,
+      "dropped_speculative": 0,
+      "failed": 0,
+      "maximum_transfer_batch": 8,
+      "prefetch_batches": 0,
+      "prefetch_enqueue_ms": 0.0,
+      "prefetch_enqueued": 0,
+      "prefetch_requests": 0,
+      "speculative_transfers": 0,
+      "submitted": 4032,
+      "transfer_batches": 1344,
+      "transfer_ms": 1161.5381196606904
+    },
+    "draft_prefill": {
+      "bytes": 0,
+      "completed": 0,
+      "demand_hits": 0,
+      "demand_misses": 0,
+      "demand_requests": 0,
+      "demand_transfers": 0,
+      "demand_wait_ms": 0.0,
+      "dropped_speculative": 0,
+      "failed": 0,
+      "maximum_transfer_batch": 0,
+      "prefetch_batches": 0,
+      "prefetch_enqueue_ms": 0.0,
+      "prefetch_enqueued": 0,
+      "prefetch_requests": 0,
+      "speculative_transfers": 0,
+      "submitted": 0,
+      "transfer_batches": 0,
+      "transfer_ms": 0.0
+    },
+    "prefill": {
+      "bytes": 25017974784,
+      "completed": 2651,
+      "demand_hits": 0,
+      "demand_misses": 2651,
+      "demand_requests": 2651,
+      "demand_transfers": 2651,
+      "demand_wait_ms": 1553.1584040727466,
+      "dropped_speculative": 0,
+      "failed": 0,
+      "maximum_transfer_batch": 32,
+      "prefetch_batches": 0,
+      "prefetch_enqueue_ms": 0.0,
+      "prefetch_enqueued": 0,
+      "prefetch_requests": 0,
+      "speculative_transfers": 0,
+      "submitted": 2651,
+      "transfer_batches": 98,
+      "transfer_ms": 917.6936105359346
+    }
+  }
+}

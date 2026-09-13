@@ -1,0 +1,73 @@
+{
+  "configuration": {
+    "batch_size": 1,
+    "context_tokens": 16,
+    "device": "cuda:0",
+    "disable_prefetch": true,
+    "draft": "/root/models/Qwen3-0.6B",
+    "expert_cache_slots": 64,
+    "kv_cache_slots": 64,
+    "kv_chunk_tokens": 4,
+    "lazy_expert_store": false,
+    "lookahead": 4,
+    "marginal_patience": 2,
+    "marginal_threshold": 0.01,
+    "mass_threshold": 0.95,
+    "max_new_tokens": 2,
+    "minimum_old_chunks": 2,
+    "no_pin_experts": false,
+    "output": "results/runtime-smoke-demand-only.json",
+    "policy": "demand_only",
+    "probes": "results/expert-probes.pt",
+    "prompts": "prompts.json",
+    "recent_tokens": 4,
+    "sink_tokens": 4,
+    "target": "/root/models/Qwen3-30B-A3B"
+  },
+  "generated_text": [
+    "<think>\n"
+  ],
+  "generated_token_ids": [
+    [
+      151667,
+      198
+    ]
+  ],
+  "performance": {
+    "decode_step_seconds": 2.5659474548883736,
+    "decode_throughput_tokens_per_second": 0.38971959386576877,
+    "draft_decode_seconds": 1.8455048678442836,
+    "draft_prefill_seconds": 0.023193438071757555,
+    "end_to_end_tokens_per_second": 0.24690463038253377,
+    "expert_preload_seconds": 49.00086738006212,
+    "initialization_seconds": 56.58948313491419,
+    "mean_tpot_ms": 2565.9474548883736,
+    "p50_tpot_ms": 2565.9474548883736,
+    "peak_gpu_gib": 4.565621852874756,
+    "prefill_seconds": 5.51115271798335,
+    "request_seconds": 8.100293610943481,
+    "target_decode_seconds": 0.7203557388857007
+  },
+  "residency": {
+    "evictions": 3003,
+    "wasted_prefetches": 0
+  },
+  "sparse_kv": {
+    "mean_predicted_mass": 1.0,
+    "mean_selected_old_chunks_per_layer_request": 2
+  },
+  "transfer": {
+    "bytes": 28642639872,
+    "completed": 3131,
+    "demand_hits": 0,
+    "demand_misses": 3131,
+    "demand_requests": 3131,
+    "demand_transfers": 3131,
+    "demand_wait_ms": 2406.2815483193845,
+    "dropped_speculative": 0,
+    "failed": 0,
+    "speculative_transfers": 0,
+    "submitted": 3131,
+    "transfer_ms": 1227.0112631376833
+  }
+}

@@ -3,6 +3,170 @@
 This repository tests whether signals already produced by speculative decoding can prefetch
 offloaded memory for Qwen/Qwen3-30B-A3B. The draft model is Qwen/Qwen3-0.6B.
 
+The current optimization target is steady-state decode, not prefill or model loading. Target and
+Draft prefix caches may be built by a separate straightforward high-performance prefill path. The
+decode timer starts immediately before the first speculative rollout, so every rollout/refresh,
+queue operation, H2D wait and Target decode kernel needed for generated tokens remains charged to
+the proposed method. The release target is at least 1.5x the decode tokens/s of vLLM
+CPU-weight-offload under the same model, precision, workload and GPU-memory limit. For a fixed
+number of generated tokens, the equivalent latency gate is at most two thirds of vLLM's decode
+wall time and TPOT. Python remains the semantic reference; measured hot paths may move to C++/CUDA,
+fused kernels, CUDA Graphs or device-side scheduling.
+
+## Sparse offload inference runtime
+
+The `feature/sparse-offload-runtime` implementation is a runnable Qwen3-MoE reference engine, not
+only a trace simulator. It keeps four sink tokens and a 256-token recent window on GPU for each
+request/layer. Older 64-token KV chunks and every routed expert have authoritative CPU copies and
+enter GPU only through one decoupled memory-request queue.
+
+The queue supports speculative probability/deadline priority, cross-request expert reuse, demand
+promotion, duplicate upsert and reprioritization. GPU residency uses priority leases so a remote
+low-value prefetch cannot evict a nearer dependency. The sparse attention stopping rule combines
+95% cumulative draft mass, two consecutive target marginal contributions below 1%, and a minimum
+of two old chunks.
+
+Core modules are deliberately framework-neutral:
+
+| Module | Responsibility |
+| --- | --- |
+| `memory_queue.py` | Mutable KV/expert priority queue and demand promotion |
+| `residency.py` | Resource state machine, finite GPU capacity and eviction |
+| `transfer.py` | Dedicated worker and CUDA H2D stream |
+| `kv_cache.py` | Sink/recent layout, CPU old chunks and sparse retrieval |
+| `hybrid_attention.py` | Online target marginal mass and sparse attention |
+| `expert.py` | Original checkpoint expert source and exact Top-8 MoE |
+| `predictor.py` | Incremental, rollback-safe four-token draft rollout |
+| `qwen3_engine.py` | Transformers Qwen3 projections/router adapter |
+| `continuous_engine.py` | Variable-length admission, completion and backfill loop |
+| `model_loader.py` | Meta loader that never materializes experts on GPU |
+
+Train the expert probes and run the two causally matched policies:
+
+~~~bash
+python -m scripts.run_offload_prefetch \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --prompts prompts.json \
+  --output results/runtime-signal-training.json \
+  --probe-output results/expert-probes.pt
+
+python -m scripts.run_runtime_engine \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --probes results/expert-probes.pt \
+  --prompts prompts.json \
+  --context-tokens 512 --batch-size 4 \
+  --max-new-tokens 65 --gpu-memory-limit-gib 10 \
+  --output results/runtime-speculative.json
+
+python -m scripts.run_runtime_engine \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --probes results/expert-probes.pt \
+  --prompts prompts.json \
+  --context-tokens 512 --batch-size 4 \
+  --max-new-tokens 65 --gpu-memory-limit-gib 10 \
+  --disable-prefetch \
+  --output results/runtime-demand-only.json
+
+VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0 \
+python -m scripts.run_vllm_baseline \
+  --model /root/models/Qwen3-30B-A3B \
+  --prompts prompts.json \
+  --context-tokens 512 --batch-size 4 \
+  --max-new-tokens 65 --gpu-memory-limit-gib 10 \
+  --cpu-offload-gb 54 --enforce-eager \
+  --output results/vllm-offload.json
+~~~
+
+Both runtime modes use the same draft-ranked sparse KV set. `demand-only` suppresses early H2D but
+retains the predictor for an apples-to-apples sparse-attention choice. Legacy result files report
+end-to-end request time, but the active optimization gate excludes prefix prefill and includes the
+first rollout, later draft-cache advancement/refresh, Target compute, queue work and every demand
+wait in decode wall time.
+
+Decode comparisons use fixed-length generation with EOS ignored and enough output tokens to
+amortize startup jitter (64 tokens minimum, 128 preferred). The primary metrics are decode TPOT,
+decode tokens/s and batch decode wall time. vLLM must be measured over the matching interval after
+its first token rather than compared through total request latency. Cold-residency and warmed
+steady-state results are reported separately; they must not be mixed in one speedup claim. A
+configuration passes only when its matched SpecFetch/vLLM decode-throughput ratio is at least 1.50
+(equivalently its TPOT and fixed-token decode-wall-time ratios are at most 0.667).
+The predeclared release workloads are batch 4 at contexts 512 and 4096, each timing 64 fixed decode
+tokens after the first token from a matching declared residency state. Both workloads must pass;
+batch-1 diagnostics and preferred 128-token confirmation runs cannot substitute for either one.
+Kernel/JIT warmup may run outside the timer only if the declared residency/cache state is restored
+before measurement.
+
+The vLLM decode-only runner explicitly enables prefix caching and disables chunked prefill. It first
+completes one generated token per request, then submits each original prompt plus that token as a
+cache-hit prefix and times exactly 64 further tokens. This makes the requested boundary observable;
+vLLM's asynchronous output delivery can otherwise decode an early request multiple times before
+the last request's first token is reported. The gate rejects results that do not record both engine
+constraints.
+
+Release results must set the same positive `--gpu-memory-limit-gib`. The vLLM runner derives its
+`gpu_memory_utilization` from that absolute limit and the physical device capacity; both runners
+record post-initialization peak allocated and reserved memory. The release checker rejects missing,
+different, or exceeded limits. The scope includes the complete measured request (prefix-cache build
+and decode) while excluding transient model-loading allocations, consistently on both sides.
+Because vLLM V1 executes the model in worker processes by default, its runner resets and reads the
+CUDA allocator counters through worker RPC and records the maximum rank peak; main-process counters
+would otherwise incorrectly report zero. The offline runner enables vLLM's pickle fallback only for
+these two trusted, module-local RPC callables; it does not accept remote or user-provided RPC payloads.
+
+For quality analysis, one non-performance run can compare every sparse attention output with a
+CPU full-attention shadow and evaluate several stopping thresholds on the same Target queries:
+
+~~~bash
+python -m scripts.run_runtime_engine \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --probes results/expert-probes.pt --prompts prompts.json \
+  --context-tokens 512 --batch-size 4 \
+  --shadow-attention --shadow-thresholds 0.90,0.95,0.99 \
+  --output results/runtime-shadow-batch4-c512.json
+~~~
+
+Shadow runs deliberately mark latency as invalid. The vLLM fused-MoE adapter is opt-in with
+`--moe-backend vllm`; the default remains `torch` until actual-model numerical and latency checks
+pass. Both backends use the same CPU source, packed GPU expert slots, queue and residency policy.
+融合 backend 会在请求计时前预热实际预填充和解码形状，随后恢复冷专家驻留并重置指标；
+预热耗时独立记录，可通过 `--disable-moe-warmup` 关闭。
+
+预测准入有两个独立的时间尺度：`--prefetch-horizons` 限制提前考虑的未来 token 数，
+`--speculative-layer-lookahead` 则让每个 token 只滚动提交当前层附近的请求，完成一层后
+才补入下一个远期层，避免尚需很久才会消费的 expert/KV 长时间占据队列。可选的
+`--speculative-expert-budget` 与 `--speculative-kv-budget` 会在每次滚动提交内按队列的
+概率、deadline、miss cost 和字节数优先级限制唯一资源数。layer lookahead 未设置时仍
+一次提交全层候选，预算未设置时不截断候选，便于做成对性能比较；两种模式都会在当前
+层完成后撤销已经错过消费时点的 consumer，避免过期请求继续争抢传输。
+
+Variable output lengths and request backfill are available through the continuous runner:
+
+~~~bash
+python -m scripts.run_continuous_runtime \
+  --target /root/models/Qwen3-30B-A3B \
+  --draft /root/models/Qwen3-0.6B \
+  --probes results/expert-probes.pt --prompts prompts.json \
+  --request-count 8 --max-batch-size 4 --context-tokens 512 \
+  --output-lengths 4,8,12,16 \
+  --output results/runtime-continuous.json
+~~~
+
+结果会分别记录等待队列时延、单请求预填充、解码服务、活跃服务、TTFT 和端到端请求
+时延，使准入与回填成本保持可见，而不是全部折叠进单一吞吐量指标。
+这些服务指标继续保留用于诊断，但当前性能验收以 decode wall time/TPOT 为准，prefill、
+TTFT 和端到端请求时延不再决定本阶段是否通过。
+同一轮准入中长度相同的 prompt 会合并为一次 Target 预填充；不同长度仍分组执行，且每个
+请求继续维护独立的 Draft KV 状态。同组请求的 Draft 前缀也只批量计算一次，随后拆成
+请求私有 KV 缓存供独立推进；首轮 lookahead 同样先按组计算，再拆分为请求私有预测。
+后续刷新只合并缓存长度与推进进度兼容的请求，完成批量 advance/rollout 后立即恢复私有
+状态，并在结果中记录刷新批次及其峰值大小。
+Draft attention 与 probe feature 按唯一 Draft 层批量搬到 CPU 后复用，避免在层、请求和
+旧 KV 块的内层循环中反复产生设备同步。
+
 The primary experiment treats the draft as a prefetch oracle, not as a source of tokens for target
 verification. At every target step, the draft independently rolls out from only the currently known
 target prefix. Its attention and hidden states issue hypothetical CPU-to-GPU prefetch requests;
