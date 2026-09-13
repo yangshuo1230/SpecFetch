@@ -554,7 +554,7 @@ class TransferWorker:
                     keys_are_unique=True,
                 )
             else:
-                admissions = []
+                consumer_lease_batches = []
                 keys = []
                 for request in requests:
                     mib = max(request.size_bytes / 2**20, 1e-6)
@@ -571,17 +571,13 @@ class TransferWorker:
                         )
                         for consumer, probability in request.consumer_probabilities.items()
                     }
-                    admissions.append(
-                        (
-                            request.key,
-                            request.priority(current_step),
-                            request.deadline,
-                            False,
-                            consumer_leases,
-                        )
-                    )
+                    consumer_lease_batches.append(consumer_leases)
                     keys.append(request.key)
-                admitted_requests = self.residency.begin_transfers(admissions)
+                admitted_requests = self.residency.begin_prefetch_transfers(
+                    requests,
+                    consumer_lease_batches,
+                    current_step=current_step,
+                )
             if False not in admitted_requests:
                 accepted = requests
                 accepted_bytes = batch_bytes

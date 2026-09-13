@@ -656,6 +656,13 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     仍防御性复制调用方 dict。每项 4 consumers 的 1/8/32-resource admission 中位数由
     5.756/36.985/149.923 降至 4.307/25.280/102.409 us，约减少 25.2%/31.6%/31.7%；
     回归测试同时锁定 aggregate 数值、dict 非别名以及 QUEUED 路径不再 refresh。
+88. Speculative worker 仍在 residency 锁外重建 consumer lease urgency，但以平行的 requests 与
+    lease-dict lists 调用专用 batch 入口，不再为每个资源构造五字段 admission tuple、调用常见
+    QUEUED 路径不会使用的 `MemoryRequest.priority()`，或在通用入口扫描 `all(demand)`。专用入口
+    对罕见 CPU_ONLY 状态仍按原 queue priority 公式做 eviction 决策；长度、fallback 及 worker
+    路由均有回归覆盖。含 key/lease 构造与 admission 的 1/8/32-resource 中位数由
+    6.581/42.134/163.662 降至 6.199/39.219/151.473 us，约减少 5.8%/6.9%/7.4%。曾原型化
+    把 lease 重算整体移入 residency 锁，虽单线程略快但扩大临界区，已否决并撤销。
 
 ## Next actions
 

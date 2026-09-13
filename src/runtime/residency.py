@@ -30,6 +30,14 @@ class PrefetchIntent(Protocol):
     miss_cost_ms: float
 
 
+class QueuedPrefetchIntent(Protocol):
+    key: ResourceKey
+    size_bytes: int
+    miss_cost_ms: float
+    deadline: int
+    expected_uses: float
+
+
 @dataclass
 class ResourceRecord:
     key: ResourceKey
@@ -544,6 +552,45 @@ class ResidencyManager:
                         accepted, item_changed = self._begin_transfer_locked(key, demand=True)
                         changed = changed or item_changed
                         results.append(accepted)
+            finally:
+                if changed:
+                    self._condition.notify_all()
+        return results
+
+    def begin_prefetch_transfers(
+        self,
+        requests: list[QueuedPrefetchIntent],
+        consumer_leases: list[dict[str, tuple[float, int]]],
+        *,
+        current_step: int,
+    ) -> list[bool]:
+        """Admit precomputed speculative leases without forwarding tuple records."""
+        if len(requests) != len(consumer_leases):
+            raise RuntimeError("prefetch admission batch lengths do not match")
+        if not requests:
+            return []
+        changed = False
+        results = []
+        with self._condition:
+            try:
+                for request, leases in zip(requests, consumer_leases):
+                    record = self._records[request.key]
+                    if record.state == ResourceState.CPU_ONLY:
+                        mib = max(request.size_bytes / 2**20, 1e-6)
+                        urgency = 1.0 / max(1, request.deadline - current_step)
+                        priority = request.miss_cost_ms * request.expected_uses * urgency / mib
+                    else:
+                        # QUEUED admission recomputes this value from the merged
+                        # leases; resident/in-flight records return before using it.
+                        priority = 0.0
+                    accepted, item_changed = self._begin_transfer_locked(
+                        request.key,
+                        priority=priority,
+                        deadline=request.deadline,
+                        consumer_leases=leases,
+                    )
+                    changed = changed or item_changed
+                    results.append(accepted)
             finally:
                 if changed:
                     self._condition.notify_all()

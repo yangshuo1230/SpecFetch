@@ -4,7 +4,7 @@ import time
 import pytest
 import torch
 
-from src.runtime.memory_queue import MemoryRequestQueue, ResourceKey, ResourceKind
+from src.runtime.memory_queue import MemoryRequest, MemoryRequestQueue, ResourceKey, ResourceKind
 from src.runtime.residency import ResidencyManager, ResourceState
 from src.runtime.transfer import (
     CudaTransferBackend,
@@ -508,7 +508,7 @@ def test_prefetch_many_queues_each_consumer_and_marks_resource_once():
     }
 
 
-def test_transfer_worker_uses_step_snapshot_from_popped_batch():
+def test_transfer_worker_uses_step_snapshot_from_popped_batch(monkeypatch):
     class CountingQueue(MemoryRequestQueue):
         def __init__(self):
             super().__init__()
@@ -533,6 +533,21 @@ def test_transfer_worker_uses_step_snapshot_from_popped_batch():
             for consumer in ("a", "b")
         ]
     )
+    admitted_batches = []
+    begin_prefetch_transfers = residency.begin_prefetch_transfers
+
+    def capture_prefetches(requests, leases, *, current_step):
+        admitted_batches.append((list(requests), list(leases), current_step))
+        return begin_prefetch_transfers(requests, leases, current_step=current_step)
+
+    monkeypatch.setattr(residency, "begin_prefetch_transfers", capture_prefetches)
+    monkeypatch.setattr(
+        residency,
+        "begin_transfers",
+        lambda admissions: (_ for _ in ()).throw(
+            AssertionError(f"prefetch used generic admissions: {admissions}")
+        ),
+    )
     queue.current_step_reads = 0
     queue.close()
 
@@ -540,6 +555,11 @@ def test_transfer_worker_uses_step_snapshot_from_popped_batch():
     worker.close(drain=True)
 
     assert queue.current_step_reads == 0
+    assert len(admitted_batches) == 1
+    requests, leases, step = admitted_batches[0]
+    assert step == 0
+    assert {request.key for request in requests} == {resource(index) for index in range(3)}
+    assert len(leases) == 3
     assert set(backend.copies) == {resource(index) for index in range(3)}
     assert worker.metrics.completed == 3
     assert worker.metrics.bytes == 3 * 2**20
@@ -803,6 +823,30 @@ def test_queued_prefetch_admission_reuses_merged_lease_aggregates(monkeypatch):
     assert record.consumer_leases is not forwarded
     assert record.lease_priority == record.priority == 5.0
     assert record.lease_deadline == record.deadline == 5
+
+
+def test_prefetch_batch_admission_validates_lengths_and_cpu_only_priority():
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    victim, incoming = resource(0), resource(1)
+    for key in (victim, incoming):
+        residency.register_cpu(key, f"cpu:{key.object_id}", 2**20)
+    assert residency.begin_transfer(victim, demand=True)
+    residency.complete_transfer(victim, "gpu:0")
+    residency.release(victim)
+    residency.record(victim).priority = 0.5
+    request = MemoryRequest(incoming, 2**20, 4.0, 5, expected_uses=1.0)
+
+    with pytest.raises(RuntimeError, match="lengths do not match"):
+        residency.begin_prefetch_transfers([request], [], current_step=3)
+    assert residency.begin_prefetch_transfers(
+        [request],
+        [{"forecast": (2.0, 5)}],
+        current_step=3,
+    ) == [True]
+
+    assert residency.state(victim) == ResourceState.CPU_ONLY
+    assert residency.state(incoming) == ResourceState.IN_FLIGHT
+    assert residency.record(incoming).priority == 2.0
 
 
 def test_begin_demand_transfers_deduplicates_capacity_planning_by_default():
