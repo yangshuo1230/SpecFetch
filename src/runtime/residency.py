@@ -387,6 +387,7 @@ class ResidencyManager:
         if record.state in (ResourceState.GPU_RESIDENT, ResourceState.IN_FLIGHT):
             return False, False
         effective_consumer_leases = consumer_leases
+        merged_queued_leases = False
         if not demand and record.state == ResourceState.QUEUED:
             if not record.consumer_leases:
                 record.state = ResourceState.CPU_ONLY
@@ -395,6 +396,7 @@ class ResidencyManager:
                 self._refresh_priority(record)
                 return False, True
             effective_consumer_leases = dict(record.consumer_leases)
+            merged_queued_leases = True
             if consumer_leases is not None:
                 for consumer in effective_consumer_leases.keys() & consumer_leases.keys():
                     effective_consumer_leases[consumer] = consumer_leases[consumer]
@@ -427,6 +429,15 @@ class ResidencyManager:
         elif effective_consumer_leases is None:
             record.consumer_leases = {"__transfer__": (priority, deadline)}
             self._refresh_priority(record)
+        elif merged_queued_leases:
+            # QUEUED admission built this private merged lease dictionary and its
+            # aggregates above. Publish them directly instead of copying and
+            # rescanning the same values after the state transition.
+            record.consumer_leases = effective_consumer_leases
+            record.lease_priority = priority
+            record.lease_deadline = deadline
+            record.priority = priority
+            record.deadline = deadline
         else:
             record.consumer_leases = dict(effective_consumer_leases)
             self._refresh_priority(record)

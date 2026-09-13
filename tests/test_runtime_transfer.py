@@ -780,6 +780,31 @@ def test_begin_transfers_preserves_ordered_speculative_and_demand_semantics():
     assert reused_leases == {}
 
 
+def test_queued_prefetch_admission_reuses_merged_lease_aggregates(monkeypatch):
+    residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
+    key = resource(0)
+    residency.register_cpu(key, "cpu:0", 1)
+    assert residency.mark_queued(key)
+    residency.update_lease(key, 1.0, 7, "old")
+    residency.update_lease(key, 1.5, 8, "new")
+    forwarded = {"old": (2.0, 5), "new": (3.0, 6)}
+
+    monkeypatch.setattr(
+        residency,
+        "_refresh_priority",
+        lambda record: (_ for _ in ()).throw(
+            AssertionError(f"queued lease aggregates were rescanned: {record.key}")
+        ),
+    )
+    assert residency.begin_transfers([(key, 5.0, 5, False, forwarded)]) == [True]
+
+    record = residency.record(key)
+    assert record.consumer_leases == forwarded
+    assert record.consumer_leases is not forwarded
+    assert record.lease_priority == record.priority == 5.0
+    assert record.lease_deadline == record.deadline == 5
+
+
 def test_begin_demand_transfers_deduplicates_capacity_planning_by_default():
     residency = ResidencyManager({ResourceKind.EXPERT: 1, ResourceKind.KV: 1})
     key = resource(0)

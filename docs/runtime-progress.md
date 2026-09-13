@@ -650,6 +650,12 @@ low-concurrency counterexample; the batch-4 result above is the current primary 
     保持覆盖。预先创建空 queue、仅计 `upsert_prefetches` 的同进程旧/新 A/B 在 32、256、1,536
     intents 分别为 142.118→122.201、1136.781→951.378、6771.422→6032.590 us，约减少
     14.0%、16.3%、10.9%；完整 fresh admission 的独立采样也全部改善。
+87. Worker speculative admission 对 QUEUED record 合并 residency 与 queue consumer leases 后，
+    已拥有私有 lease dict 及其 priority/deadline 聚合值；状态转为 IN_FLIGHT 时现在直接发布这组
+    结果，不再复制 dict 并通过 `_refresh_priority` 第二次执行相同 sum/min。CPU_ONLY 兼容入口
+    仍防御性复制调用方 dict。每项 4 consumers 的 1/8/32-resource admission 中位数由
+    5.756/36.985/149.923 降至 4.307/25.280/102.409 us，约减少 25.2%/31.6%/31.7%；
+    回归测试同时锁定 aggregate 数值、dict 非别名以及 QUEUED 路径不再 refresh。
 
 ## Next actions
 
